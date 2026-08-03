@@ -1,0 +1,491 @@
+{
+  "_comment": "Payout and accounting cases (issue #7). Rules: docs/accounting.md (§2 authoritative proceeds, §3 integer unit, §5 pool fee, §6 exact allocation, §7 suspense, §8 ledger model, §9 idempotency, §12 automatic round payouts, §13 invariants). All amounts are attoTIG decimal strings (accounting.md §3) — never floats. Every expected journal batch balances: sum(debit_atoms) == sum(credit_atoms), all line amounts > 0 (accounting.md §8). Expected values were derived by hand with exact integer arithmetic, independently of any implementation.",
+  "context": {
+    "network": "testnet",
+    "unit": "attoTIG",
+    "round": 834,
+    "round_heights": { "first": 100080, "last": 100199, "_rule": "blocks_per_round 120 (fixtures/tig/v1/get-block.json); 834 * 120 = 100080" },
+    "pool_player_id": "0xp00l00000000000000000000000000000000000",
+    "fee_policy": {
+      "_note": "Fixture-pinned explicit policy. Live testnet uses 0 bps (accounting.md §5); this fixture pins the approved initial public 200 bps (accounting.md §14.1) to exercise fee arithmetic. See README derivation decision 2.",
+      "fee_policy_id": "feepol_fixture_200bps",
+      "fee_bps": 200,
+      "effective_from_tig_height": 100000
+    },
+    "chain": {
+      "chain_id": 84532,
+      "_rule": "Base Sepolia for testnet fixtures (accounting.md §12.5)",
+      "tig_token_contract": "0x716fake00000000000000000000000000000000"
+    },
+    "members": {
+      "member_alice": { "payout_destination": "0xa11ce0000000000000000000000000000000000" },
+      "member_bob": { "payout_destination": "0xb0b00000000000000000000000000000000000" },
+      "member_cara": { "payout_destination": "0xcafa0000000000000000000000000000000000", "_note": "destination changed 30h before round settlement in case automatic_round_funding_and_intents — inside the 48h hold of accounting.md §12.2" },
+      "member_dave": {},
+      "member_erin": {}
+    }
+  },
+  "cases": [
+    {
+      "name": "ordinary_block_exact_division",
+      "description": "Block block_100080: several members; weights come from qualifier-attribution.json case per_member_aggregation (alice 4, bob 3, cara 3, dave 0; Q=10). Proceeds divide exactly after the fee, so the remainder R is 0. The zero-weight member gets no journal line.",
+      "rule": "accounting.md §2 (authoritative proceeds and equality checks), §5 (fee), §6 (allocation), §8.1 (ordinary batch), §8 (all line amounts > 0, so a zero-amount member line is never written)",
+      "input": {
+        "block_id": "block_100080",
+        "opow_excerpt": {
+          "_note": "Case-local values satisfying accounting.md §2; fixtures/tig/v1/get-opow.json does not satisfy the §2 equality as literally written — see README open question 2",
+          "reward": "1200000000000000000",
+          "reward_share": "200000000000000000",
+          "coinbase": {
+            "0xp00l00000000000000000000000000000000000": "800000000000000000",
+            "0xde1e000000000000000000000000000000000000": "200000000000000000"
+          }
+        },
+        "q_by_member": { "member_alice": 4, "member_bob": 3, "member_cara": 3, "member_dave": 0 }
+      },
+      "expected": {
+        "proceeds_checks": {
+          "sum_coinbase": "1000000000000000000",
+          "reward_minus_reward_share": "1000000000000000000",
+          "equality_holds": true,
+          "pool_proceeds_atoms": "800000000000000000",
+          "_rule": "accounting.md §2: pool_proceeds_atoms = coinbase[pool_id]; sum(coinbase) == reward - reward_share"
+        },
+        "fee_atoms": "16000000000000000",
+        "_fee_derivation": "floor(800000000000000000 * 200 / 10000) = 16000000000000000 (accounting.md §5)",
+        "distributable_atoms": "784000000000000000",
+        "Q": 10,
+        "allocation": [
+          { "member": "member_alice", "q": 4, "numerator": "3136000000000000000", "base": "313600000000000000", "fraction_rank": "0", "extra_atom": false, "credit_atoms": "313600000000000000" },
+          { "member": "member_bob", "q": 3, "numerator": "2352000000000000000", "base": "235200000000000000", "fraction_rank": "0", "extra_atom": false, "credit_atoms": "235200000000000000" },
+          { "member": "member_cara", "q": 3, "numerator": "2352000000000000000", "base": "235200000000000000", "fraction_rank": "0", "extra_atom": false, "credit_atoms": "235200000000000000" }
+        ],
+        "remainder_R": "0",
+        "allocation_check": { "sum_member_credits": "784000000000000000", "equals_distributable": true },
+        "journal_batch": {
+          "idempotency_key": ["testnet", "block_100080"],
+          "_rule": "accounting.md §9 ordinary block batch (network, block_id)",
+          "lines": [
+            { "line_number": 1, "account": "ASSET:TIG_REWARD_RECEIVABLE", "side": "debit", "amount_atoms": "800000000000000000" },
+            { "line_number": 2, "account": "REVENUE:POOL_FEE", "side": "credit", "amount_atoms": "16000000000000000" },
+            { "line_number": 3, "account": "LIABILITY:MEMBER_EARNED_PENDING:834:member_alice", "side": "credit", "amount_atoms": "313600000000000000" },
+            { "line_number": 4, "account": "LIABILITY:MEMBER_EARNED_PENDING:834:member_bob", "side": "credit", "amount_atoms": "235200000000000000" },
+            { "line_number": 5, "account": "LIABILITY:MEMBER_EARNED_PENDING:834:member_cara", "side": "credit", "amount_atoms": "235200000000000000" }
+          ],
+          "balance_check": {
+            "sum_debit_atoms": "800000000000000000",
+            "sum_credit_atoms": "800000000000000000",
+            "_credit_derivation": "16000000000000000 + 313600000000000000 + 235200000000000000 + 235200000000000000 = 800000000000000000",
+            "balanced": true
+          }
+        }
+      }
+    },
+    {
+      "name": "ordinary_block_fee_floor_and_largest_remainder",
+      "description": "Block block_100081: the fee floor discards a sub-atto fraction (proceeds*200/10000 = 20000000000000000.06), leaving the fraction with the members. D is not divisible by Q=7; the largest-remainder method gives the R=2 extra atoms to the two members with the greatest fraction_rank (both rank 6 — R equals the tied count, so the hash order between them is irrelevant here).",
+      "rule": "accounting.md §5 (fee always rounds down, remainder stays with distributable), §6 (largest-remainder ordering rule 1), §8.1",
+      "input": {
+        "block_id": "block_100081",
+        "pool_proceeds_atoms": "1000000000000000003",
+        "q_by_member": { "member_alice": 3, "member_bob": 2, "member_cara": 2 }
+      },
+      "expected": {
+        "fee_atoms": "20000000000000000",
+        "_fee_derivation": "floor(1000000000000000003 * 200 / 10000) = floor(200000000000000000600 / 10000) = 20000000000000000",
+        "distributable_atoms": "980000000000000003",
+        "Q": 7,
+        "allocation": [
+          { "member": "member_alice", "q": 3, "numerator": "2940000000000000009", "base": "420000000000000001", "fraction_rank": "2", "extra_atom": false, "credit_atoms": "420000000000000001" },
+          { "member": "member_bob", "q": 2, "numerator": "1960000000000000006", "base": "280000000000000000", "fraction_rank": "6", "extra_atom": true, "credit_atoms": "280000000000000001" },
+          { "member": "member_cara", "q": 2, "numerator": "1960000000000000006", "base": "280000000000000000", "fraction_rank": "6", "extra_atom": true, "credit_atoms": "280000000000000001" }
+        ],
+        "remainder_R": "2",
+        "_remainder_derivation": "D - sum(base) = 980000000000000003 - 980000000000000001 = 2; both rank-6 members receive one atom",
+        "allocation_check": { "sum_member_credits": "980000000000000003", "equals_distributable": true },
+        "journal_batch": {
+          "idempotency_key": ["testnet", "block_100081"],
+          "lines": [
+            { "line_number": 1, "account": "ASSET:TIG_REWARD_RECEIVABLE", "side": "debit", "amount_atoms": "1000000000000000003" },
+            { "line_number": 2, "account": "REVENUE:POOL_FEE", "side": "credit", "amount_atoms": "20000000000000000" },
+            { "line_number": 3, "account": "LIABILITY:MEMBER_EARNED_PENDING:834:member_alice", "side": "credit", "amount_atoms": "420000000000000001" },
+            { "line_number": 4, "account": "LIABILITY:MEMBER_EARNED_PENDING:834:member_bob", "side": "credit", "amount_atoms": "280000000000000001" },
+            { "line_number": 5, "account": "LIABILITY:MEMBER_EARNED_PENDING:834:member_cara", "side": "credit", "amount_atoms": "280000000000000001" }
+          ],
+          "balance_check": {
+            "sum_debit_atoms": "1000000000000000003",
+            "sum_credit_atoms": "1000000000000000003",
+            "_credit_derivation": "20000000000000000 + 420000000000000001 + 280000000000000001 + 280000000000000001 = 1000000000000000003",
+            "balanced": true
+          }
+        }
+      }
+    },
+    {
+      "name": "remainder_tie_hash_ordering",
+      "description": "Block block_100082: R=1 extra atom but two members tie at the greatest fraction_rank (2). The tie is ordered by the smaller BLAKE3 remainder hash (fixture-pinned — README open question 1); member_alice's hash is smaller, so alice receives the atom and bob does not.",
+      "rule": "accounting.md §6 remainder ordering rules 1-3 (greater fraction_rank first; then smaller BLAKE3(canonical_encode([\"tig-pool-payout-remainder-v1\", network, block_id, member_id])); then canonical member_id)",
+      "input": {
+        "block_id": "block_100082",
+        "pool_proceeds_atoms": "500000000000000002",
+        "q_by_member": { "member_alice": 1, "member_bob": 1, "member_cara": 2 },
+        "persisted_remainder_hashes": {
+          "_note": "fixture-pinned BLAKE3 outputs; seed inputs are authoritative",
+          "member_alice": { "hash_inputs": ["tig-pool-payout-remainder-v1", "testnet", "block_100082", "member_alice"], "hash": "1a00000000000000000000000000000000000000000000000000000000000001" },
+          "member_bob": { "hash_inputs": ["tig-pool-payout-remainder-v1", "testnet", "block_100082", "member_bob"], "hash": "8b00000000000000000000000000000000000000000000000000000000000002" }
+        }
+      },
+      "expected": {
+        "fee_atoms": "10000000000000000",
+        "_fee_derivation": "floor(500000000000000002 * 200 / 10000) = 10000000000000000",
+        "distributable_atoms": "490000000000000002",
+        "Q": 4,
+        "allocation": [
+          { "member": "member_alice", "q": 1, "numerator": "490000000000000002", "base": "122500000000000000", "fraction_rank": "2", "extra_atom": true, "credit_atoms": "122500000000000001" },
+          { "member": "member_bob", "q": 1, "numerator": "490000000000000002", "base": "122500000000000000", "fraction_rank": "2", "extra_atom": false, "credit_atoms": "122500000000000000" },
+          { "member": "member_cara", "q": 2, "numerator": "980000000000000004", "base": "245000000000000001", "fraction_rank": "0", "extra_atom": false, "credit_atoms": "245000000000000001" }
+        ],
+        "remainder_R": "1",
+        "_remainder_derivation": "490000000000000002 - (122500000000000000 + 122500000000000000 + 245000000000000001) = 1; alice and bob tie at rank 2; alice's remainder hash 0x1a.. < bob's 0x8b.., so alice gets the atom",
+        "allocation_check": { "sum_member_credits": "490000000000000002", "equals_distributable": true },
+        "journal_batch": {
+          "idempotency_key": ["testnet", "block_100082"],
+          "lines": [
+            { "line_number": 1, "account": "ASSET:TIG_REWARD_RECEIVABLE", "side": "debit", "amount_atoms": "500000000000000002" },
+            { "line_number": 2, "account": "REVENUE:POOL_FEE", "side": "credit", "amount_atoms": "10000000000000000" },
+            { "line_number": 3, "account": "LIABILITY:MEMBER_EARNED_PENDING:834:member_alice", "side": "credit", "amount_atoms": "122500000000000001" },
+            { "line_number": 4, "account": "LIABILITY:MEMBER_EARNED_PENDING:834:member_bob", "side": "credit", "amount_atoms": "122500000000000000" },
+            { "line_number": 5, "account": "LIABILITY:MEMBER_EARNED_PENDING:834:member_cara", "side": "credit", "amount_atoms": "245000000000000001" }
+          ],
+          "balance_check": {
+            "sum_debit_atoms": "500000000000000002",
+            "sum_credit_atoms": "500000000000000002",
+            "_credit_derivation": "10000000000000000 + 122500000000000001 + 122500000000000000 + 245000000000000001 = 500000000000000002",
+            "balanced": true
+          }
+        }
+      }
+    },
+    {
+      "name": "dust_tiny_distributable_zero_fee",
+      "description": "Block block_100083: proceeds of 5 attoTIG. The fee floors to zero (no zero-amount fee line is written). The largest-remainder method allocates every atom — a member with base 0 still receives a remainder atom, and there is no unallocated payout dust.",
+      "rule": "accounting.md §5 (fee floor; sub-atto fraction stays with members), §6 ('There is no unallocated payout dust'; R < number of positive-weight members), §8 (all line amounts > 0, so the zero fee produces no line)",
+      "input": {
+        "block_id": "block_100083",
+        "pool_proceeds_atoms": "5",
+        "q_by_member": { "member_alice": 3, "member_bob": 2, "member_cara": 1 }
+      },
+      "expected": {
+        "fee_atoms": "0",
+        "_fee_derivation": "floor(5 * 200 / 10000) = floor(1000/10000) = 0",
+        "distributable_atoms": "5",
+        "Q": 6,
+        "allocation": [
+          { "member": "member_alice", "q": 3, "numerator": "15", "base": "2", "fraction_rank": "3", "extra_atom": false, "credit_atoms": "2" },
+          { "member": "member_bob", "q": 2, "numerator": "10", "base": "1", "fraction_rank": "4", "extra_atom": true, "credit_atoms": "2" },
+          { "member": "member_cara", "q": 1, "numerator": "5", "base": "0", "fraction_rank": "5", "extra_atom": true, "credit_atoms": "1" }
+        ],
+        "remainder_R": "2",
+        "_remainder_derivation": "5 - (2+1+0) = 2; ranks 5 (cara) and 4 (bob) are greatest; R=2 < 3 positive-weight members",
+        "allocation_check": { "sum_member_credits": "5", "equals_distributable": true, "unallocated_dust": "0" },
+        "journal_batch": {
+          "idempotency_key": ["testnet", "block_100083"],
+          "lines": [
+            { "line_number": 1, "account": "ASSET:TIG_REWARD_RECEIVABLE", "side": "debit", "amount_atoms": "5" },
+            { "line_number": 2, "account": "LIABILITY:MEMBER_EARNED_PENDING:834:member_alice", "side": "credit", "amount_atoms": "2" },
+            { "line_number": 3, "account": "LIABILITY:MEMBER_EARNED_PENDING:834:member_bob", "side": "credit", "amount_atoms": "2" },
+            { "line_number": 4, "account": "LIABILITY:MEMBER_EARNED_PENDING:834:member_cara", "side": "credit", "amount_atoms": "1" }
+          ],
+          "balance_check": {
+            "sum_debit_atoms": "5",
+            "sum_credit_atoms": "5",
+            "_credit_derivation": "2 + 2 + 1 = 5 (no fee line: amount would be 0)",
+            "balanced": true
+          }
+        }
+      }
+    },
+    {
+      "name": "zero_qualifier_suspense",
+      "description": "Block block_100200 (round 835): positive proceeds but Q == 0. No member allocation and no fee is posted; the entire proceeds go to block-specific suspense with one stable reason. Default disposition is to retain suspense indefinitely; round 835 cannot start a payout while this suspense is unresolved. Placed in round 835 so round 834's settlement cases are not blocked.",
+      "rule": "accounting.md §7 (zero-qualifier suspense; never distributed later, never converted to revenue), §5 (fee recognized only when attribution posts), §8.2 (suspense batch), §12.1 (round payout requires no unresolved suspense)",
+      "input": {
+        "block_id": "block_100200",
+        "round": 835,
+        "pool_proceeds_atoms": "333000000000000000",
+        "q_by_member": {},
+        "Q": 0
+      },
+      "expected": {
+        "fee_atoms": "0",
+        "member_allocations": [],
+        "suspense_reason": "ZERO_QUALIFIERS",
+        "disposition": "retain_indefinitely_unless_operator_resolution",
+        "round_835_payout_blocked_while_unresolved": true,
+        "journal_batch": {
+          "idempotency_key": ["testnet", "block_100200"],
+          "_rule": "accounting.md §9: an ordinary block has exactly one original batch, whether attributed or suspense",
+          "lines": [
+            { "line_number": 1, "account": "ASSET:TIG_REWARD_RECEIVABLE", "side": "debit", "amount_atoms": "333000000000000000" },
+            { "line_number": 2, "account": "LIABILITY:PAYOUT_SUSPENSE:block_100200", "side": "credit", "amount_atoms": "333000000000000000" }
+          ],
+          "balance_check": { "sum_debit_atoms": "333000000000000000", "sum_credit_atoms": "333000000000000000", "balanced": true }
+        }
+      }
+    },
+    {
+      "name": "attribution_mismatch_suspense",
+      "description": "Block block_100085: stored bundle selections aggregate to 4 for (c001, t001) but TIG publishes 5. The reconciliation pre-check fails, so the whole block posts to suspense — no fee, no guessed weights.",
+      "rule": "accounting.md §6 (batch must first prove selections aggregate to the published count), §7 (mismatch suspense; never divided using guessed weights), §8.2",
+      "input": {
+        "block_id": "block_100085",
+        "pool_proceeds_atoms": "750000000000000000",
+        "attribution_reconciliation": {
+          "challenge_id": "c001",
+          "track_id": "t001",
+          "stored_selection_sum": 4,
+          "published_pool_qualifier_count": 5,
+          "matches": false
+        }
+      },
+      "expected": {
+        "fee_atoms": "0",
+        "member_allocations": [],
+        "suspense_reason": "ATTRIBUTION_MISMATCH",
+        "journal_batch": {
+          "idempotency_key": ["testnet", "block_100085"],
+          "lines": [
+            { "line_number": 1, "account": "ASSET:TIG_REWARD_RECEIVABLE", "side": "debit", "amount_atoms": "750000000000000000" },
+            { "line_number": 2, "account": "LIABILITY:PAYOUT_SUSPENSE:block_100085", "side": "credit", "amount_atoms": "750000000000000000" }
+          ],
+          "balance_check": { "sum_debit_atoms": "750000000000000000", "sum_credit_atoms": "750000000000000000", "balanced": true }
+        }
+      }
+    },
+    {
+      "name": "suspense_resolution",
+      "description": "Block block_100085 later reconciles: the rebuilt attribution proves alice 2, bob 1 (Q=3, matching the published count after correction of the stored selections). The resolution batch debits that block's suspense and applies the fee policy and member weights effective for the original block.",
+      "rule": "accounting.md §7 (resolution batch applies original block's fee policy and weights), §9 (suspense resolution key (network, block_id, resolution_generation)), §5, §6",
+      "input": {
+        "block_id": "block_100085",
+        "resolution_generation": 1,
+        "suspended_atoms": "750000000000000000",
+        "reconciled_q_by_member": { "member_alice": 2, "member_bob": 1 },
+        "fee_policy_effective_for_block": "feepol_fixture_200bps"
+      },
+      "expected": {
+        "fee_atoms": "15000000000000000",
+        "_fee_derivation": "floor(750000000000000000 * 200 / 10000) = 15000000000000000",
+        "distributable_atoms": "735000000000000000",
+        "Q": 3,
+        "allocation": [
+          { "member": "member_alice", "q": 2, "numerator": "1470000000000000000", "base": "490000000000000000", "fraction_rank": "0", "extra_atom": false, "credit_atoms": "490000000000000000" },
+          { "member": "member_bob", "q": 1, "numerator": "735000000000000000", "base": "245000000000000000", "fraction_rank": "0", "extra_atom": false, "credit_atoms": "245000000000000000" }
+        ],
+        "remainder_R": "0",
+        "allocation_check": { "sum_member_credits": "735000000000000000", "equals_distributable": true },
+        "journal_batch": {
+          "idempotency_key": ["testnet", "block_100085", 1],
+          "lines": [
+            { "line_number": 1, "account": "LIABILITY:PAYOUT_SUSPENSE:block_100085", "side": "debit", "amount_atoms": "750000000000000000" },
+            { "line_number": 2, "account": "REVENUE:POOL_FEE", "side": "credit", "amount_atoms": "15000000000000000" },
+            { "line_number": 3, "account": "LIABILITY:MEMBER_EARNED_PENDING:834:member_alice", "side": "credit", "amount_atoms": "490000000000000000" },
+            { "line_number": 4, "account": "LIABILITY:MEMBER_EARNED_PENDING:834:member_bob", "side": "credit", "amount_atoms": "245000000000000000" }
+          ],
+          "balance_check": {
+            "sum_debit_atoms": "750000000000000000",
+            "sum_credit_atoms": "750000000000000000",
+            "_credit_derivation": "15000000000000000 + 490000000000000000 + 245000000000000000 = 750000000000000000",
+            "balanced": true
+          }
+        }
+      }
+    },
+    {
+      "name": "delayed_round_settlement",
+      "description": "Round 834 closes with five posted blocks (cases 1-3, 4 and the resolved block_100085). The round reconciles to TIG's round data, then waits weeks for TIG's actual delayed payment — elapsed time is never settlement evidence. When the exact TIG amount is finalized in payout custody with on-chain evidence, one settlement batch moves the receivable to custody.",
+      "rule": "accounting.md §4 (round state ladder; rules 6-8: reconciliation, earned_pending is a receivable, ASSETS_SETTLED requires actual finalized funds), §8.3 (settlement batch and evidence), §9 (round reconciliation key (network, round); settlement key (network, settlement_source_id))",
+      "input": {
+        "round": 834,
+        "posted_block_proceeds": {
+          "block_100080": "800000000000000000",
+          "block_100081": "1000000000000000003",
+          "block_100082": "500000000000000002",
+          "block_100083": "5",
+          "block_100085": "750000000000000000"
+        },
+        "round_reconciliation": {
+          "idempotency_key": ["testnet", 834],
+          "sum_stored_per_block_proceeds": "3050000000000000010",
+          "get_round_emissions_pool_self_coinbase": "3050000000000000010",
+          "matches": true
+        },
+        "settlement_evidence": {
+          "settlement_source_id": "settle_round834_tx01",
+          "chain_id": 84532,
+          "token_contract": "0x716fake00000000000000000000000000000000",
+          "transaction_hash": "0xfee0000000000000000000000000000000000000000000000000000000000834",
+          "custody_address": "0xc0570d1000000000000000000000000000000000",
+          "amount_atoms": "3050000000000000010",
+          "included_in_finalized_block": true,
+          "weeks_after_round_close": 3
+        }
+      },
+      "expected": {
+        "_sum_derivation": "800000000000000000 + 1000000000000000003 + 500000000000000002 + 5 + 750000000000000000 = 3050000000000000010",
+        "round_states_in_order": ["ROUND_RECONCILED", "TIG_PAYMENT_PENDING", "ASSETS_SETTLED"],
+        "settlement_before_funds_finalized": "forbidden — a wall-clock estimate, including the expected several-week delay, is never settlement evidence (accounting.md §4 rule 8)",
+        "journal_batch": {
+          "idempotency_key": ["testnet", "settle_round834_tx01"],
+          "lines": [
+            { "line_number": 1, "account": "ASSET:TIG_PAYOUT_CUSTODY", "side": "debit", "amount_atoms": "3050000000000000010" },
+            { "line_number": 2, "account": "ASSET:TIG_REWARD_RECEIVABLE", "side": "credit", "amount_atoms": "3050000000000000010" }
+          ],
+          "balance_check": { "sum_debit_atoms": "3050000000000000010", "sum_credit_atoms": "3050000000000000010", "balanced": true }
+        }
+      }
+    },
+    {
+      "name": "automatic_round_funding_and_intents",
+      "description": "Round 834 reaches ASSETS_SETTLED: every positive member amount is automatically moved to round-payout-pending and an immutable payout intent is created — no member withdrawal request, chosen amount, or minimum. member_cara's destination changed 30h earlier, so her amount stays in MEMBER_EARNED_PENDING under the 48h hold without blocking alice and bob; a follow-up batch funds her after the hold expires.",
+      "rule": "accounting.md §8.4 (funding batch; held destination stays in earned_pending), §12.1 (automatic, no request or minimum), §12.2 (48h destination hold), §12.3 (deterministic intents, key (network, round, member_id, payout_generation)), §13 invariant 10 (round-payout-pending never exceeds settled custody)",
+      "input": {
+        "round": 834,
+        "member_earned_pending_totals": {
+          "_derivation": "sum of MEMBER_EARNED_PENDING:834 credits from cases ordinary_block_exact_division, ordinary_block_fee_floor_and_largest_remainder, remainder_tie_hash_ordering, dust_tiny_distributable_zero_fee, suspense_resolution",
+          "member_alice": { "amount_atoms": "1346100000000000004", "_sum": "313600000000000000 + 420000000000000001 + 122500000000000001 + 2 + 490000000000000000" },
+          "member_bob": { "amount_atoms": "882700000000000003", "_sum": "235200000000000000 + 280000000000000001 + 122500000000000000 + 2 + 245000000000000000" },
+          "member_cara": { "amount_atoms": "760200000000000003", "_sum": "235200000000000000 + 280000000000000001 + 245000000000000001 + 1 + 0" }
+        },
+        "destination_holds": { "member_cara": { "destination_changed_hours_before_settlement": 30, "hold_hours": 48 } }
+      },
+      "expected": {
+        "cross_check_round_total": {
+          "sum_member_totals": "2989000000000000010",
+          "sum_fees": "61000000000000000",
+          "_fees_derivation": "16000000000000000 + 20000000000000000 + 10000000000000000 + 0 + 15000000000000000",
+          "members_plus_fees": "3050000000000000010",
+          "equals_round_proceeds": true,
+          "_rule": "accounting.md §13 invariant 4: fee plus member allocations equals proceeds"
+        },
+        "funding_batch_generation_1": {
+          "idempotency_key_note": "one batch at settlement; intents keyed (testnet, 834, member, 1) per accounting.md §9",
+          "lines": [
+            { "line_number": 1, "account": "LIABILITY:MEMBER_EARNED_PENDING:834:member_alice", "side": "debit", "amount_atoms": "1346100000000000004" },
+            { "line_number": 2, "account": "LIABILITY:ROUND_PAYOUT_PENDING:834:member_alice", "side": "credit", "amount_atoms": "1346100000000000004" },
+            { "line_number": 3, "account": "LIABILITY:MEMBER_EARNED_PENDING:834:member_bob", "side": "debit", "amount_atoms": "882700000000000003" },
+            { "line_number": 4, "account": "LIABILITY:ROUND_PAYOUT_PENDING:834:member_bob", "side": "credit", "amount_atoms": "882700000000000003" }
+          ],
+          "balance_check": {
+            "sum_debit_atoms": "2228800000000000007",
+            "sum_credit_atoms": "2228800000000000007",
+            "_derivation": "1346100000000000004 + 882700000000000003 = 2228800000000000007",
+            "balanced": true
+          },
+          "member_cara_excluded_reason": "destination inside 48h security hold — amount stays in MEMBER_EARNED_PENDING and does not block the rest of the round (accounting.md §8.4, §12.2)"
+        },
+        "payout_intents": [
+          {
+            "intent_key": ["testnet", 834, "member_alice", 1],
+            "amount_atoms": "1346100000000000004",
+            "destination": "0xa11ce0000000000000000000000000000000000",
+            "chain_id": 84532,
+            "token_contract": "0x716fake00000000000000000000000000000000",
+            "payout_policy_version": "payoutpol_fixture_v1"
+          },
+          {
+            "intent_key": ["testnet", 834, "member_bob", 1],
+            "amount_atoms": "882700000000000003",
+            "destination": "0xb0b00000000000000000000000000000000000",
+            "chain_id": 84532,
+            "token_contract": "0x716fake00000000000000000000000000000000",
+            "payout_policy_version": "payoutpol_fixture_v1"
+          }
+        ],
+        "custody_invariant": {
+          "round_payout_pending_total": "2228800000000000007",
+          "settled_payout_custody": "3050000000000000010",
+          "pending_not_greater_than_custody": true
+        },
+        "follow_up_after_hold_expiry": {
+          "funding_batch_member_cara": {
+            "lines": [
+              { "line_number": 1, "account": "LIABILITY:MEMBER_EARNED_PENDING:834:member_cara", "side": "debit", "amount_atoms": "760200000000000003" },
+              { "line_number": 2, "account": "LIABILITY:ROUND_PAYOUT_PENDING:834:member_cara", "side": "credit", "amount_atoms": "760200000000000003" }
+            ],
+            "balance_check": { "sum_debit_atoms": "760200000000000003", "sum_credit_atoms": "760200000000000003", "balanced": true }
+          },
+          "payout_intent": {
+            "intent_key": ["testnet", 834, "member_cara", 1],
+            "amount_atoms": "760200000000000003",
+            "destination": "0xcafa0000000000000000000000000000000000",
+            "chain_id": 84532,
+            "token_contract": "0x716fake00000000000000000000000000000000",
+            "payout_policy_version": "payoutpol_fixture_v1"
+          },
+          "custody_invariant_after": {
+            "round_payout_pending_total": "2989000000000000010",
+            "settled_payout_custody": "3050000000000000010",
+            "pending_not_greater_than_custody": true
+          }
+        }
+      }
+    },
+    {
+      "name": "round_transfer_confirmation",
+      "description": "The alice and bob transfers of round 834 confirm on chain: receipt succeeded, exact token Transfer event, containing block at or below the finalized head. Each confirmation posts one balanced batch. The pool pays Base gas as an operating cost; the member amount is never reduced for gas.",
+      "rule": "accounting.md §12.5 (confirmation conditions and batch), §12.1/§12.4 (gas is an operating cost, not deducted), §13 invariant 14 (only a finalized exact token event completes a round payout)",
+      "input": {
+        "round": 834,
+        "confirmed_transfers": [
+          {
+            "intent_key": ["testnet", 834, "member_alice", 1],
+            "transaction_hash": "0xa1fa0000000000000000000000000000000000000000000000000000000001",
+            "transfer_event": { "from": "0xc0570d1000000000000000000000000000000000", "to": "0xa11ce0000000000000000000000000000000000", "amount_atoms": "1346100000000000004" },
+            "receipt_success": true,
+            "block_at_or_below_finalized_head": true
+          },
+          {
+            "intent_key": ["testnet", 834, "member_bob", 1],
+            "transaction_hash": "0xb0bfa000000000000000000000000000000000000000000000000000000002",
+            "transfer_event": { "from": "0xc0570d1000000000000000000000000000000000", "to": "0xb0b00000000000000000000000000000000000", "amount_atoms": "882700000000000003" },
+            "receipt_success": true,
+            "block_at_or_below_finalized_head": true
+          }
+        ]
+      },
+      "expected": {
+        "journal_batches": [
+          {
+            "for_intent": ["testnet", 834, "member_alice", 1],
+            "lines": [
+              { "line_number": 1, "account": "LIABILITY:ROUND_PAYOUT_PENDING:834:member_alice", "side": "debit", "amount_atoms": "1346100000000000004" },
+              { "line_number": 2, "account": "ASSET:TIG_PAYOUT_CUSTODY", "side": "credit", "amount_atoms": "1346100000000000004" }
+            ],
+            "balance_check": { "sum_debit_atoms": "1346100000000000004", "sum_credit_atoms": "1346100000000000004", "balanced": true }
+          },
+          {
+            "for_intent": ["testnet", 834, "member_bob", 1],
+            "lines": [
+              { "line_number": 1, "account": "LIABILITY:ROUND_PAYOUT_PENDING:834:member_bob", "side": "debit", "amount_atoms": "882700000000000003" },
+              { "line_number": 2, "account": "ASSET:TIG_PAYOUT_CUSTODY", "side": "credit", "amount_atoms": "882700000000000003" }
+            ],
+            "balance_check": { "sum_debit_atoms": "882700000000000003", "sum_credit_atoms": "882700000000000003", "balanced": true }
+          }
+        ],
+        "gas_treatment": "paid by the pool as an operating cost; exact TIG liability not reduced (accounting.md §12.1, §12.4)",
+        "post_state_reconciliation": {
+          "_rule": "accounting.md §13 daily reconciliation: custody versus remaining liabilities",
+          "custody_remaining_atoms": "821200000000000003",
+          "_custody_derivation": "3050000000000000010 - 1346100000000000004 - 882700000000000003 = 821200000000000003",
+          "remaining_liability_backing": {
+            "member_cara_pending_atoms": "760200000000000003",
+            "pool_fee_share_atoms": "61000000000000000",
+            "sum": "821200000000000003",
+            "matches_custody_remaining": true
+          }
+        }
+      }
+    }
+  ]
+}

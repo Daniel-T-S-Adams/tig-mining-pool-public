@@ -1,0 +1,173 @@
+{
+  "_comment": "Per-block qualifier attribution cases (issue #7). Rules: docs/mining_system.md §7 and §7.1. Expected values recorded independently of any implementation. All BLAKE3 outputs (tie_seed, draw_rank) are FIXTURE-PINNED because canonical_encode's byte layout is not yet specified — see README open question 1. The seed inputs are authoritative; the hex values model the persisted draw artifact that mining_system.md §7.1 requires the pool to store.",
+  "context": {
+    "network": "testnet",
+    "block_id": "block_100080",
+    "height": 100080,
+    "round": 834,
+    "pool_player_id": "0xp00l00000000000000000000000000000000000",
+    "published_qualifier_counts": {
+      "_rule": "get-opow(pool_id, b).block_data.num_qualifiers_by_challenge_by_track — matches fixtures/tig/v1/get-opow.json",
+      "c001": { "t001": 5, "t002": 2 },
+      "c003": { "t010": 3 }
+    },
+    "_benchmark_provenance": "The snapshot's get-benchmarks.json is empty at the anchor; per docs/tig_integration.md §5.2 bundle qualities come from the incremental active-benchmark metadata cache. The benchmarks below are constructed cache contents, consistent with the snapshot's published qualifier counts above."
+  },
+  "cases": [
+    {
+      "name": "no_tie_full_groups",
+      "description": "Challenge c001 track t001: quality groups are accepted whole from highest to lowest; the last group fits the remaining positions exactly (N == M), so no random draw occurs.",
+      "rule": "mining_system.md §7 steps 1-9 (steps 6-7: accept complete quality groups while enough positions remain; step 8 draw not triggered because no group crosses the boundary)",
+      "input": {
+        "challenge_id": "c001",
+        "track_id": "t001",
+        "published_pool_qualifier_count": 5,
+        "active_pool_benchmarks": [
+          { "benchmark_id": "bench_a1", "member_id": "member_alice", "average_quality_by_bundle": [90, 80, 70] },
+          { "benchmark_id": "bench_b1", "member_id": "member_bob", "average_quality_by_bundle": [90, 60] },
+          { "benchmark_id": "bench_c1", "member_id": "member_cara", "average_quality_by_bundle": [80, 55] }
+        ]
+      },
+      "expected": {
+        "quality_groups_desc": [
+          { "quality": 90, "entries": [["bench_a1", 0], ["bench_b1", 0]], "group_size": 2, "positions_remaining_before": 5, "outcome": "accepted_whole" },
+          { "quality": 80, "entries": [["bench_a1", 1], ["bench_c1", 0]], "group_size": 2, "positions_remaining_before": 3, "outcome": "accepted_whole" },
+          { "quality": 70, "entries": [["bench_a1", 2]], "group_size": 1, "positions_remaining_before": 1, "outcome": "accepted_whole_exact_fit_no_draw" },
+          { "quality": 60, "entries": [["bench_b1", 1]], "group_size": 1, "positions_remaining_before": 0, "outcome": "rejected" },
+          { "quality": 55, "entries": [["bench_c1", 1]], "group_size": 1, "positions_remaining_before": 0, "outcome": "rejected" }
+        ],
+        "accepted_entries": [["bench_a1", 0], ["bench_a1", 1], ["bench_a1", 2], ["bench_b1", 0], ["bench_c1", 0]],
+        "q_by_member": { "member_alice": 3, "member_bob": 1, "member_cara": 1 },
+        "reconciliation_check": {
+          "rule": "accounting.md §6: stored bundle selections must aggregate to TIG's published pool qualifier count for every challenge and track",
+          "sum_q": 5,
+          "published_pool_qualifier_count": 5,
+          "matches": true
+        }
+      }
+    },
+    {
+      "name": "equal_quality_boundary_draw",
+      "description": "Challenge c001 track t002: a group of N=3 equal-quality (75) bundles crosses the remaining boundary of M=2 positions. The persisted random seed and the resulting boundary selection are recorded. Draw ranks are fixture-pinned (README open question 1); selection is the M entries with the smallest draw ranks.",
+      "rule": "mining_system.md §7 step 8 and §7.1 (tie_seed derivation, draw_rank, smallest-M selection, persisted boundary artifact)",
+      "input": {
+        "challenge_id": "c001",
+        "track_id": "t002",
+        "published_pool_qualifier_count": 2,
+        "active_pool_benchmarks": [
+          { "benchmark_id": "bench_a2", "member_id": "member_alice", "average_quality_by_bundle": [75, 60] },
+          { "benchmark_id": "bench_b2", "member_id": "member_bob", "average_quality_by_bundle": [75, 75] }
+        ],
+        "persisted_tie_draw": {
+          "_rule": "mining_system.md §7.1: store boundary candidates, seed inputs, draw ranks, and selected entries with the block payout",
+          "tie_seed_inputs": ["tig-pool-qualifier-tie-v1", "testnet", "block_100080", "0xp00l00000000000000000000000000000000000", "c001", "t002", 75],
+          "tie_seed": "5eedc001d0020000000000000000000000000000000000000000000000000075",
+          "draw_ranks": [
+            { "entry": ["bench_a2", 0], "draw_rank": "0a00000000000000000000000000000000000000000000000000000000000001" },
+            { "entry": ["bench_b2", 0], "draw_rank": "e000000000000000000000000000000000000000000000000000000000000003" },
+            { "entry": ["bench_b2", 1], "draw_rank": "3b00000000000000000000000000000000000000000000000000000000000002" }
+          ]
+        }
+      },
+      "expected": {
+        "boundary_group": {
+          "quality": 75,
+          "candidates": [["bench_a2", 0], ["bench_b2", 0], ["bench_b2", 1]],
+          "group_size_N": 3,
+          "positions_remaining_M": 2,
+          "crosses_boundary": true
+        },
+        "selected_entries_smallest_M_draw_ranks": [["bench_a2", 0], ["bench_b2", 1]],
+        "rejected_boundary_entry": ["bench_b2", 0],
+        "rejected_below_boundary": [["bench_a2", 1]],
+        "q_by_member": { "member_alice": 1, "member_bob": 1 },
+        "reconciliation_check": { "sum_q": 2, "published_pool_qualifier_count": 2, "matches": true }
+      }
+    },
+    {
+      "name": "draw_rank_collision_identity_tiebreak",
+      "description": "Challenge c003 track t010: quality-88 entry accepted whole, then a group of N=3 equal-quality (70) bundles crosses M=2 remaining positions. Two candidates have identical fixture-pinned draw ranks; the collision is broken by the canonical bundle identity (benchmark_id, position).",
+      "rule": "mining_system.md §7.1: 'A hash collision is broken by the canonical bundle identity.'",
+      "input": {
+        "challenge_id": "c003",
+        "track_id": "t010",
+        "published_pool_qualifier_count": 3,
+        "active_pool_benchmarks": [
+          { "benchmark_id": "bench_b3", "member_id": "member_bob", "average_quality_by_bundle": [88] },
+          { "benchmark_id": "bench_c3", "member_id": "member_cara", "average_quality_by_bundle": [70, 70] },
+          { "benchmark_id": "bench_d3", "member_id": "member_dave", "average_quality_by_bundle": [70] }
+        ],
+        "persisted_tie_draw": {
+          "tie_seed_inputs": ["tig-pool-qualifier-tie-v1", "testnet", "block_100080", "0xp00l00000000000000000000000000000000000", "c003", "t010", 70],
+          "tie_seed": "5eedc003d0100000000000000000000000000000000000000000000000000070",
+          "draw_ranks": [
+            { "entry": ["bench_c3", 0], "draw_rank": "7700000000000000000000000000000000000000000000000000000000000077" },
+            { "entry": ["bench_c3", 1], "draw_rank": "2a00000000000000000000000000000000000000000000000000000000000001" },
+            { "entry": ["bench_d3", 0], "draw_rank": "7700000000000000000000000000000000000000000000000000000000000077" }
+          ]
+        }
+      },
+      "expected": {
+        "quality_groups_desc": [
+          { "quality": 88, "entries": [["bench_b3", 0]], "group_size": 1, "positions_remaining_before": 3, "outcome": "accepted_whole" },
+          { "quality": 70, "entries": [["bench_c3", 0], ["bench_c3", 1], ["bench_d3", 0]], "group_size": 3, "positions_remaining_before": 2, "outcome": "boundary_draw" }
+        ],
+        "draw_order_smallest_first": {
+          "_note": "bench_c3#1 has the smallest rank; bench_c3#0 and bench_d3#0 collide at 0x77..77, so canonical bundle identity orders (bench_c3, 0) before (bench_d3, 0)",
+          "order": [["bench_c3", 1], ["bench_c3", 0], ["bench_d3", 0]]
+        },
+        "selected_entries_smallest_M_draw_ranks": [["bench_c3", 1], ["bench_c3", 0]],
+        "rejected_boundary_entry": ["bench_d3", 0],
+        "q_by_member": { "member_bob": 1, "member_cara": 2, "member_dave": 0 },
+        "reconciliation_check": { "sum_q": 3, "published_pool_qualifier_count": 3, "matches": true }
+      }
+    },
+    {
+      "name": "zero_published_count",
+      "description": "Challenge c003 track t011: the pool has an active benchmark with bundle entries, but the published qualifier map has no (c003, t011) entry, which reads as zero positions. No entry is accepted; the member's q contribution is 0.",
+      "rule": "mining_system.md §7 steps 1 and 7: Q read from OPoW data is 0 (absent key), so no positions remain and no group is accepted",
+      "input": {
+        "challenge_id": "c003",
+        "track_id": "t011",
+        "published_pool_qualifier_count": 0,
+        "_note": "absent key in num_qualifiers_by_challenge_by_track reads as 0",
+        "active_pool_benchmarks": [
+          { "benchmark_id": "bench_e1", "member_id": "member_erin", "average_quality_by_bundle": [50] }
+        ]
+      },
+      "expected": {
+        "accepted_entries": [],
+        "q_by_member": { "member_erin": 0 },
+        "reconciliation_check": { "sum_q": 0, "published_pool_qualifier_count": 0, "matches": true }
+      }
+    },
+    {
+      "name": "per_member_aggregation",
+      "description": "Aggregate the accepted entries of every (challenge, track) of block_100080 (cases 1-4) by member to produce the block weight q[m,b] consumed by accounting.md §6. These weights are the input to payouts.json case ordinary_block_exact_division.",
+      "rule": "mining_system.md §7 step 9; accounting.md §13 invariant 3 (stored member qualifier weights sum to TIG's published pool count)",
+      "input": {
+        "per_track_q": {
+          "c001/t001": { "member_alice": 3, "member_bob": 1, "member_cara": 1 },
+          "c001/t002": { "member_alice": 1, "member_bob": 1 },
+          "c003/t010": { "member_bob": 1, "member_cara": 2, "member_dave": 0 },
+          "c003/t011": { "member_erin": 0 }
+        }
+      },
+      "expected": {
+        "q_by_member_block_100080": {
+          "member_alice": 4,
+          "member_bob": 3,
+          "member_cara": 3,
+          "member_dave": 0,
+          "member_erin": 0
+        },
+        "Q_block_100080": 10,
+        "reconciliation_check": {
+          "sum_published_counts": 10,
+          "_derivation": "5 (c001/t001) + 2 (c001/t002) + 3 (c003/t010) = 10",
+          "matches": true
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,21 @@
+# Rust
+/target/
+**/*.rs.bk
+
+# Secrets — never committed (see CLAUDE.md "Security and secrets")
+*.secret
+*.pem
+*.key
+.env
+.env.*
+secrets/
+*.local.toml
+
+# Local development state
+/data/
+*.log
+
+# Editor/OS noise
+.DS_Store
+.idea/
+.vscode/

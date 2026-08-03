@@ -1,0 +1,2091 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "api.schema.json",
+  "title": "TIG pool member API messages 0.1.0",
+  "$defs": {
+    "ProtocolInfoResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "supported_protocol_versions",
+        "supported_package_formats",
+        "server_time",
+        "request_clock_skew_seconds",
+        "heartbeat_interval_seconds"
+      ],
+      "properties": {
+        "supported_protocol_versions": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "common.schema.json#/$defs/ProtocolVersion"
+          }
+        },
+        "supported_package_formats": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "common.schema.json#/$defs/PackageFormat"
+          }
+        },
+        "server_time": {
+          "$ref": "common.schema.json#/$defs/DateTime"
+        },
+        "request_clock_skew_seconds": {
+          "const": 300
+        },
+        "heartbeat_interval_seconds": {
+          "const": 30
+        }
+      }
+    },
+    "EnrollRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enrollment_request_id",
+        "enrollment_ticket",
+        "worker_name",
+        "ed25519_public_key",
+        "ed25519_key_proof",
+        "supported_protocol_versions",
+        "supported_package_formats",
+        "member_agent_version"
+      ],
+      "properties": {
+        "enrollment_request_id": {
+          "$ref": "common.schema.json#/$defs/Uuid"
+        },
+        "enrollment_ticket": {
+          "type": "string",
+          "minLength": 43,
+          "maxLength": 512
+        },
+        "worker_name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "ed25519_public_key": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{43}$"
+        },
+        "ed25519_key_proof": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{86}$"
+        },
+        "supported_protocol_versions": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 32
+          }
+        },
+        "supported_package_formats": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          }
+        },
+        "member_agent_version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        }
+      }
+    },
+    "EnrollResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol_version",
+        "enrollment_request_id",
+        "package_format",
+        "member_id",
+        "worker_id",
+        "credential_id",
+        "worker_status",
+        "server_time"
+      ],
+      "properties": {
+        "protocol_version": {
+          "$ref": "common.schema.json#/$defs/ProtocolVersion"
+        },
+        "enrollment_request_id": {
+          "$ref": "common.schema.json#/$defs/Uuid"
+        },
+        "package_format": {
+          "$ref": "common.schema.json#/$defs/PackageFormat"
+        },
+        "member_id": {
+          "$ref": "common.schema.json#/$defs/Uuid"
+        },
+        "worker_id": {
+          "$ref": "common.schema.json#/$defs/Uuid"
+        },
+        "credential_id": {
+          "$ref": "common.schema.json#/$defs/Uuid"
+        },
+        "worker_status": {
+          "const": "ACTIVE"
+        },
+        "server_time": {
+          "$ref": "common.schema.json#/$defs/DateTime"
+        }
+      }
+    },
+    "RotateCredentialRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol_version",
+        "rotation_id",
+        "new_ed25519_public_key",
+        "new_key_proof"
+      ],
+      "properties": {
+        "protocol_version": {
+          "$ref": "common.schema.json#/$defs/ProtocolVersion"
+        },
+        "rotation_id": {
+          "$ref": "common.schema.json#/$defs/Uuid"
+        },
+        "new_ed25519_public_key": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{43}$"
+        },
+        "new_key_proof": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{86}$"
+        }
+      }
+    },
+    "RotateCredentialResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol_version",
+        "rotation_id",
+        "worker_id",
+        "new_credential_id",
+        "old_credential_revokes_at",
+        "server_time"
+      ],
+      "properties": {
+        "protocol_version": {
+          "$ref": "common.schema.json#/$defs/ProtocolVersion"
+        },
+        "rotation_id": {
+          "$ref": "common.schema.json#/$defs/Uuid"
+        },
+        "worker_id": {
+          "$ref": "common.schema.json#/$defs/Uuid"
+        },
+        "new_credential_id": {
+          "$ref": "common.schema.json#/$defs/Uuid"
+        },
+        "old_credential_revokes_at": {
+          "$ref": "common.schema.json#/$defs/DateTime"
+        },
+        "server_time": {
+          "$ref": "common.schema.json#/$defs/DateTime"
+        }
+      }
+    },
+    "RegisterSlotRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol_version",
+        "slot_registration_id",
+        "client_slot_key",
+        "prior_slot_generation",
+        "compute",
+        "runtime_inventory"
+      ],
+      "properties": {
+        "protocol_version": {
+          "$ref": "common.schema.json#/$defs/ProtocolVersion"
+        },
+        "slot_registration_id": {
+          "$ref": "common.schema.json#/$defs/Uuid"
+        },
+        "client_slot_key": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._-]{1,128}$"
+        },
+        "prior_slot_generation": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "compute": {
+          "$ref": "common.schema.json#/$defs/ComputeSpec"
+        },
+        "runtime_inventory": {
+          "$ref": "common.schema.json#/$defs/RuntimeInventory"
+        }
+      }
+    },
+    "RegisterSlotResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol_version",
+        "slot_registration_id",
+        "worker_id",
+        "slot_id",
+        "slot_generation",
+        "client_slot_key",
+        "slot_state",
+        "qualification_status",
+        "qualification_id",
+        "qualification_spec_digest",
+        "server_time"
+      ],
+      "properties": {
+        "protocol_version": {
+          "$ref": "common.schema.json#/$defs/ProtocolVersion"
+        },
+        "slot_registration_id": {
+          "$ref": "common.schema.json#/$defs/Uuid"
+        },
+        "worker_id": {
+          "$ref": "common.schema.json#/$defs/Uuid"
+        },
+        "slot_id": {
+          "$ref": "common.schema.json#/$defs/Uuid"
+        },
+        "slot_generation": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "client_slot_key": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._-]{1,128}$"
+        },
+        "slot_state": {
+          "$ref": "common.schema.json#/$defs/SlotState"
+        },
+        "qualification_status": {
+          "$ref": "#/$defs/QualificationStatus"
+        },
+        "qualification_id": {
+          "$ref": "common.schema.json#/$defs/Uuid"
+        },
+        "qualification_spec_digest": {
+          "$ref": "common.schema.json#/$defs/Sha256"
+        },
+        "server_time": {
+          "$ref": "common.schema.json#/$defs/DateTime"
+        }
+      }
+    },
+    "QualificationStatus": {
+      "enum": [
+        "REQUIRED",
+        "PENDING",
+        "QUALIFIED",
+        "FAILED",
+        "EXPIRED"
+      ]
+    },
+    "QualificationSettings": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "player_id",
+        "block_id",
+        "challenge_id",
+        "algorithm_id",
+        "track_id"
+      ],
+      "properties": {
+        "player_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "block_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "challenge_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "algorithm_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "track_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        }
+      }
+    },
+    "QualificationTaskResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol_version",
+        "qualification_id",
+        "fixture_id",
+        "fixture_version",
+        "worker_id",
+        "slot_id",
+        "slot_generation",
+        "qualification_spec_digest",
+        "compute",
+        "execution",
+        "expires_at",
+        "server_time"
+      ],
+      "properties": {
+        "protocol_version": {
+          "$ref": "common.schema.json#/$defs/ProtocolVersion"
+        },
+        "qualification_id": {
+          "$ref": "common.schema.json#/$defs/Uuid"
+        },
+        "fixture_id": {
+          "$ref": "common.schema.json#/$defs/Uuid"
+        },
+        "fixture_version": {
+          "const": "tig-worker-qualification-v1"
+        },
+        "worker_id": {
+          "$ref": "common.schema.json#/$defs/Uuid"
+        },
+        "slot_id": {
+          "$ref": "common.schema.json#/$defs/Uuid"
+        },
+        "slot_generation": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "qualification_spec_digest": {
+          "$ref": "common.schema.json#/$defs/Sha256"
+        },
+        "compute": {
+          "$ref": "common.schema.json#/$defs/ComputeSpec"
+        },
+        "execution": {
+          "$ref": "#/$defs/QualificationExecution"
+        },
+        "expires_at": {
+          "$ref": "common.schema.json#/$defs/DateTime"
+        },
+        "server_time": {
+          "$ref": "common.schema.json#/$defs/DateTime"
+        }
+      }
+    },
+    "QualificationExecution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "settings",
+        "rand_hash",
+        "nonce",
+        "hyperparameters",
+        "fuel_budget",
+        "algorithm_download_url",
+        "algorithm_binary_sha256",
+        "runtime_image_reference",
+        "runtime",
+        "expected_output_record_sha256",
+        "expected_quality"
+      ],
+      "properties": {
+        "settings": {
+          "$ref": "#/$defs/QualificationSettings"
+        },
+        "rand_hash": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "nonce": {
+          "$ref": "common.schema.json#/$defs/UInt64"
+        },
+        "hyperparameters": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "fuel_budget": {
+          "$ref": "common.schema.json#/$defs/UInt64Decimal"
+        },
+        "algorithm_download_url": {
+          "type": "string",
+          "format": "uri",
+          "maxLength": 4096
+        },
+        "algorithm_binary_sha256": {
+          "$ref": "common.schema.json#/$defs/Sha256"
+        },
+        "runtime_image_reference": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "runtime": {
+          "$ref": "#/$defs/AssignmentRuntime"
+        },
+        "expected_output_record_sha256": {
+          "$ref": "common.schema.json#/$defs/Sha256"
+        },
+        "expected_quality": {
+          "$ref": "common.schema.json#/$defs/Int32"
+        }
+      }
+    },
+    "QualificationResultRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol_version",
+        "qualification_result_id",
+        "qualification_id",
+        "fixture_id",
+        "slot_generation",
+        "qualification_spec_digest",
+        "output_record",
+        "quality",
+        "observed_runtime_inventory",
+        "started_at",
+        "completed_at"
+      ],
+      "properties": {
+        "protocol_version": {
+          "$ref": "common.schema.json#/$defs/ProtocolVersion"
+        },
+        "qualification_result_id": {
+          "$ref": "common.schema.json#/$defs/Uuid"
+        },
+        "qualification_id": {
+          "$ref": "common.schema.json#/$defs/Uuid"
+        },
+        "fixture_id": {
+          "$ref": "common.schema.json#/$defs/Uuid"
+        },
+        "slot_generation": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "qualification_spec_digest": {
+          "$ref": "common.schema.json#/$defs/Sha256"
+        },
+        "output_record": {
+          "$ref": "output-record.schema.json"
+        },
+        "quality": {
+          "$ref": "common.schema.json#/$defs/Int32"
+        },
+        "observed_runtime_inventory": {
+          "$ref": "common.schema.json#/$defs/RuntimeInventory"
+        },
+        "started_at": {
+          "$ref": "common.schema.json#/$defs/DateTime"
+        },
+        "completed_at": {
+          "$ref": "common.schema.json#/$defs/DateTime"
+        }
+      }
+    },
+    "QualificationStatusResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol_version",
+        "qualification_id",
+        "worker_id",
+        "slot_id",
+        "slot_generation",
+        "qualification_spec_digest",
+        "qualification_status",
+        "server_time"
+      ],
+      "properties": {
+        "protocol_version": {
+          "$ref": "common.schema.json#/$defs/ProtocolVersion"
+        },
+        "qualification_id": {
+          "$ref": "common.schema.json#/$defs/Uuid"
+        },
+        "worker_id": {
+          "$ref": "common.schema.json#/$defs/Uuid"
+        },
+        "slot_id": {
+          "$ref": "common.schema.json#/$defs/Uuid"
+        },
+        "slot_generation": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "qualification_spec_digest": {
+          "$ref": "common.schema.json#/$defs/Sha256"
+        },
+        "qualification_status": {
+          "$ref": "#/$defs/QualificationStatus"
+        },
+        "qualified_at": {
+          "$ref": "common.schema.json#/$defs/DateTime"
+        },
+        "reason_code": {
+          "type": "string",
+          "pattern": "^[A-Z][A-Z0-9_]{2,63}$"
+        },
+        "server_time": {
+          "$ref": "common.schema.json#/$defs/DateTime"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "qualification_status": {
+                "const": "QUALIFIED"
+              }
+            },
+            "required": [
+              "qualification_status"
+            ]
+          },
+          "then": {
+            "required": [
+              "qualified_at"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "qualification_status": {
+                "enum": [
+                  "FAILED",
+                  "EXPIRED"
+                ]
+              }
+            },
+            "required": [
+              "qualification_status"
+            ]
+          },
+          "then": {
+            "required": [
+              "reason_code"
+            ]
+          }
+        }
+      ]
+    },
+    "CapacityOfferRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol_version",
+        "offer_id",
+        "worker_id",
+        "slot_id",
+        "slot_generation",
+        "slot_state",
+        "compute",
+        "runtime_inventory",
+        "qualification_id",
+        "qualification_spec_digest",
+        "offered_at"
+      ],
+      "properties": {
+        "protocol_version": {
+          "$ref": "common.schema.json#/$defs/ProtocolVersion"
+        },
+        "offer_id": {
+          "$ref": "common.schema.json#/$defs/Uuid"
+        },
+        "worker_id": {
+          "$ref": "common.schema.json#/$defs/Uuid"
+        },
+        "slot_id": {
+          "$ref": "common.schema.json#/$defs/Uuid"
+        },
+        "slot_generation": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "slot_state": {
+          "const": "AVAILABLE"
+        },
+        "compute": {
+          "$ref": "common.schema.json#/$defs/ComputeSpec"
+        },
+        "runtime_inventory": {
+          "$ref": "common.schema.json#/$defs/RuntimeInventory"
+        },
+        "qualification_id": {
+          "$ref": "common.schema.json#/$defs/Uuid"
+        },
+        "qualification_spec_digest": {
+          "$ref": "common.schema.json#/$defs/Sha256"
+        },
+        "offered_at": {
+          "$ref": "common.schema.json#/$defs/DateTime"
+        }
+      }
+    },
+    "CapacityOfferStatusResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol_version",
+        "offer_id",
+        "worker_id",
+        "slot_id",
+        "offer_state",
+        "precommit_state",
+        "server_time"
+      ],
+      "properties": {
+        "protocol_version": {
+          "$ref": "common.schema.json#/$defs/ProtocolVersion"
+        },
+        "offer_id": {
+          "$ref": "common.schema.json#/$defs/Uuid"
+        },
+        "worker_id": {
+          "$ref": "common.schema.json#/$defs/Uuid"
+        },
+        "slot_id": {
+          "$ref": "common.schema.json#/$defs/Uuid"
+        },
+        "offer_state": {
+          "enum": [
+            "QUEUED",
+            "READY_CHECK",
+            "PENDING",
+            "NO_ACTION",
+            "REJECTED",
+            "ASSIGNMENT_AVAILABLE",
+            "CANCELLED",
+            "EXPIRED"
+          ]
+        },
+        "precommit_state": {
+          "enum": [
+            "NOT_STARTED",
+            "PRECOMMIT_SUBMITTED",
+            "PRECOMMIT_CONFIRMED",
+            "PRECOMMIT_FAILED"
+          ]
+        },
+        "lease_expires_at": {
+          "$ref": "common.schema.json#/$defs/DateTime"
+        },
+        "ready_check_id": {
+          "$ref": "common.schema.json#/$defs/Uuid"
+        },
+        "reason_code": {
+          "type": "string",
+          "pattern": "^[A-Z][A-Z0-9_]{2,63}$"
+        },
+        "assignment": {
+          "$ref": "#/$defs/AssignmentResponse"
+        },
+        "server_time": {
+          "$ref": "common.schema.json#/$defs/DateTime"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "offer_state": {
+                "enum": [
+                  "QUEUED",
+                  "READY_CHECK",
+                  "PENDING"
+                ]
+              }
+            },
+            "required": [
+              "offer_state"
+            ]
+          },
+          "then": {
+            "required": [
+              "lease_expires_at"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "offer_state": {
+                "const": "READY_CHECK"
+              }
+            },
+            "required": [
+              "offer_state"
+            ]
+          },
+          "then": {
+            "required": [
+              "ready_check_id"
+            ],
+            "properties": {
+              "precommit_state": {
+                "const": "NOT_STARTED"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "offer_state": {
+                "const": "QUEUED"
+              }
+            },
+            "required": [
+              "offer_state"
+            ]
+          },
+          "then": {
+            "properties": {
+              "precommit_state": {
+                "const": "NOT_STARTED"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "offer_state": {
+                "const": "ASSIGNMENT_AVAILABLE"
+              }
+            },
+            "required": [
+              "offer_state"
+            ]
+          },
+          "then": {
+            "required": [
+              "assignment"
+            ],
+            "properties": {
+              "precommit_state": {
+                "const": "PRECOMMIT_CONFIRMED"
+              }
+            }
+          },
+          "else": {
+            "not": {
+              "required": [
+                "assignment"
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "offer_state": {
+                "enum": [
+                  "NO_ACTION",
+                  "REJECTED",
+                  "CANCELLED",
+                  "EXPIRED"
+                ]
+              }
+            },
+            "required": [
+              "offer_state"
+            ]
+          },
+          "then": {
+            "required": [
+              "reason_code"
+            ]
+          }
+        }
+      ]
+    },
+    "AssignmentIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol_version",
+        "package_format",
+        "network",
+        "tig_api_base_url",
+        "pool_player_id",
+        "assignment_id",
+        "offer_id",
+        "member_id",
+        "worker_id",
+        "slot_id",
+        "slot_generation",
+        "compute",
+        "qualification_id",
+        "qualification_spec_digest",
+        "decision_block_id",
+        "confirmed_precommit",
+        "nonce_range",
+        "algorithm_binary_sha256",
+        "runtime",
+        "merkle",
+        "package_limits"
+      ],
+      "properties": {
+        "protocol_version": {
+          "$ref": "common.schema.json#/$defs/ProtocolVersion"
+        },
+        "package_format": {
+          "$ref": "common.schema.json#/$defs/PackageFormat"
+        },
+        "network": {
+          "const": "testnet"
+        },
+        "tig_api_base_url": {
+          "const": "https://testnet-api.tig.foundation"
+        },
+        "pool_player_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "assignment_id": {
+          "$ref": "common.schema.json#/$defs/Uuid"
+        },
+        "offer_id": {
+          "$ref": "common.schema.json#/$defs/Uuid"
+        },
+        "member_id": {
+          "$ref": "common.schema.json#/$defs/Uuid"
+        },
+        "worker_id": {
+          "$ref": "common.schema.json#/$defs/Uuid"
+        },
+        "slot_id": {
+          "$ref": "common.schema.json#/$defs/Uuid"
+        },
+        "slot_generation": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "compute": {
+          "$ref": "common.schema.json#/$defs/ComputeSpec"
+        },
+        "qualification_id": {
+          "$ref": "common.schema.json#/$defs/Uuid"
+        },
+        "qualification_spec_digest": {
+          "$ref": "common.schema.json#/$defs/Sha256"
+        },
+        "decision_block_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "confirmed_precommit": {
+          "$ref": "#/$defs/ConfirmedPrecommit"
+        },
+        "nonce_range": {
+          "$ref": "#/$defs/NonceRange"
+        },
+        "algorithm_binary_sha256": {
+          "$ref": "common.schema.json#/$defs/Sha256"
+        },
+        "runtime": {
+          "$ref": "#/$defs/AssignmentRuntime"
+        },
+        "merkle": {
+          "$ref": "#/$defs/AssignmentMerkle"
+        },
+        "package_limits": {
+          "$ref": "common.schema.json#/$defs/PackageLimits"
+        }
+      }
+    },
+    "ConfirmedPrecommit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "benchmark_id",
+        "settings",
+        "details",
+        "block_confirmed"
+      ],
+      "properties": {
+        "benchmark_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "settings": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "player_id",
+            "block_id",
+            "challenge_id",
+            "algorithm_id",
+            "track_id"
+          ],
+          "properties": {
+            "player_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "block_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "challenge_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "algorithm_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "track_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            }
+          }
+        },
+        "details": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "block_started",
+            "num_nonces",
+            "num_bundles",
+            "rand_hash",
+            "fee_paid",
+            "hyperparameters",
+            "fuel_budget",
+            "compute_type"
+          ],
+          "properties": {
+            "block_started": {
+              "$ref": "common.schema.json#/$defs/UInt32"
+            },
+            "num_nonces": {
+              "$ref": "common.schema.json#/$defs/PositiveUInt64"
+            },
+            "num_bundles": {
+              "$ref": "common.schema.json#/$defs/PositiveUInt64"
+            },
+            "rand_hash": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "fee_paid": {
+              "type": "string",
+              "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$"
+            },
+            "hyperparameters": {
+              "type": [
+                "object",
+                "null"
+              ]
+            },
+            "fuel_budget": {
+              "$ref": "common.schema.json#/$defs/UInt64Decimal"
+            },
+            "compute_type": {
+              "$ref": "common.schema.json#/$defs/ComputeType"
+            }
+          }
+        },
+        "block_confirmed": {
+          "$ref": "common.schema.json#/$defs/UInt32"
+        }
+      }
+    },
+    "NonceRange": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "start",
+        "end_exclusive",
+        "num_nonces"
+      ],
+      "properties": {
+        "start": {
+          "const": 0
+        },
+        "end_exclusive": {
+          "$ref": "common.schema.json#/$defs/PositiveUInt64"
+        },
+        "num_nonces": {
+          "$ref": "common.schema.json#/$defs/PositiveUInt64"
+        }
+      }
+    },
+    "AssignmentRuntime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "tig_upstream_commit",
+        "benchmarker_version",
+        "image_manifest_digest",
+        "image_platform_digest",
+        "platform"
+      ],
+      "properties": {
+        "tig_upstream_commit": {
+          "$ref": "common.schema.json#/$defs/GitCommit"
+        },
+        "benchmarker_version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "image_manifest_digest": {
+          "$ref": "common.schema.json#/$defs/Sha256Digest"
+        },
+        "image_platform_digest": {
+          "$ref": "common.schema.json#/$defs/Sha256Digest"
+        },
+        "platform": {
+          "type": "string",
+          "pattern": "^linux/(amd64|arm64)$"
+        }
+      }
+    },
+    "AssignmentMerkle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "algorithm",
+        "leaf_encoding",
+        "tree_capacity"
+      ],
+      "properties": {
+        "algorithm": {
+          "const": "tig-merkle-blake3-v1"
+        },
+        "leaf_encoding": {
+          "const": "tig-output-metadata-v1"
+        },
+        "tree_capacity": {
+          "$ref": "common.schema.json#/$defs/PositiveUInt64"
+        }
+      }
+    },
+    "AssignmentResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol_version",
+        "assignment_identity",
+        "assignment_digest",
+        "algorithm_download_url",
+        "runtime_image_reference",
+        "ack_by",
+        "workflow_expiry_block",
+        "proof_reserve_blocks",
+        "package_due_before_block",
+        "package_due_at_estimate",
+        "server_time"
+      ],
+      "properties": {
+        "protocol_version": {
+          "$ref": "common.schema.json#/$defs/ProtocolVersion"
+        },
+        "assignment_identity": {
+          "$ref": "#/$defs/AssignmentIdentity"
+        },
+        "assignment_digest": {
+          "$ref": "common.schema.json#/$defs/Sha256"
+        },
+        "algorithm_download_url": {
+          "type": "string",
+          "format": "uri",
+          "maxLength": 4096
+        },
+        "runtime_image_reference": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "ack_by": {
+          "$ref": "common.schema.json#/$defs/DateTime"
+        },
+        "workflow_expiry_block": {
+          "$ref": "common.schema.json#/$defs/UInt32"
+        },
+        "proof_reserve_blocks": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 59
+        },
+        "package_due_before_block": {
+          "$ref": "common.schema.json#/$defs/UInt32"
+        },
+        "package_due_at_estimate": {
+          "$ref": "common.schema.json#/$defs/DateTime"
+        },
+        "server_time": {
+          "$ref": "common.schema.json#/$defs/DateTime"
+        }
+      }
+    },
+    "AssignmentAckRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol_version",
+        "ack_id",
+        "assignment_digest",
+        "acknowledged_at"
+      ],
+      "properties": {
+        "protocol_version": {
+          "$ref": "common.schema.json#/$defs/ProtocolVersion"
+        },
+        "ack_id": {
+          "$ref": "common.schema.json#/$defs/Uuid"
+        },
+        "assignment_digest": {
+          "$ref": "common.schema.json#/$defs/Sha256"
+        },
+        "acknowledged_at": {
+          "$ref": "common.schema.json#/$defs/DateTime"
+        }
+      }
+    },
+    "AssignmentStateResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol_version",
+        "assignment_id",
+        "benchmark_id",
+        "assignment_digest",
+        "assignment_state",
+        "slot_state",
+        "last_accepted_event_seq",
+        "server_time"
+      ],
+      "properties": {
+        "protocol_version": {
+          "$ref": "common.schema.json#/$defs/ProtocolVersion"
+        },
+        "assignment_id": {
+          "$ref": "common.schema.json#/$defs/Uuid"
+        },
+        "benchmark_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "assignment_digest": {
+          "$ref": "common.schema.json#/$defs/Sha256"
+        },
+        "assignment_state": {
+          "$ref": "common.schema.json#/$defs/AssignmentState"
+        },
+        "slot_state": {
+          "$ref": "common.schema.json#/$defs/SlotState"
+        },
+        "last_accepted_event_seq": {
+          "$ref": "common.schema.json#/$defs/UInt64"
+        },
+        "fault_attribution": {
+          "$ref": "common.schema.json#/$defs/FaultAttribution"
+        },
+        "reason_code": {
+          "type": "string",
+          "pattern": "^[A-Z][A-Z0-9_]{2,63}$"
+        },
+        "acceptance_receipt": {
+          "$ref": "#/$defs/AcceptanceReceipt"
+        },
+        "server_time": {
+          "$ref": "common.schema.json#/$defs/DateTime"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "assignment_state": {
+                "enum": [
+                  "PACKAGE_DURABLY_ACCEPTED",
+                  "BENCHMARK_SUBMITTED",
+                  "BENCHMARK_CONFIRMED",
+                  "PROOF_BUILDING",
+                  "PROOF_SUBMITTED",
+                  "PROOF_CONFIRMED",
+                  "VERIFYING",
+                  "ACTIVE",
+                  "STOPPED",
+                  "FRAUDULENT"
+                ]
+              }
+            },
+            "required": [
+              "assignment_state"
+            ]
+          },
+          "then": {
+            "required": [
+              "acceptance_receipt"
+            ],
+            "properties": {
+              "slot_state": {
+                "const": "AVAILABLE"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "assignment_state": {
+                "enum": [
+                  "CANCELLED",
+                  "EXPIRED",
+                  "FAILED",
+                  "FRAUDULENT"
+                ]
+              }
+            },
+            "required": [
+              "assignment_state"
+            ]
+          },
+          "then": {
+            "required": [
+              "fault_attribution",
+              "reason_code"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "assignment_state": {
+                "enum": [
+                  "ASSIGNMENT_AVAILABLE",
+                  "ACKNOWLEDGED",
+                  "COMPUTING",
+                  "PACKAGING",
+                  "UPLOADING",
+                  "PACKAGE_RECEIVED",
+                  "PACKAGE_STRUCTURALLY_ACCEPTED"
+                ]
+              }
+            },
+            "required": [
+              "assignment_state"
+            ]
+          },
+          "then": {
+            "not": {
+              "required": [
+                "acceptance_receipt"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "AssignmentEventRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol_version",
+        "event_id",
+        "event_seq",
+        "event_type",
+        "occurred_at",
+        "data"
+      ],
+      "properties": {
+        "protocol_version": {
+          "$ref": "common.schema.json#/$defs/ProtocolVersion"
+        },
+        "event_id": {
+          "$ref": "common.schema.json#/$defs/Uuid"
+        },
+        "event_seq": {
+          "$ref": "common.schema.json#/$defs/PositiveUInt64"
+        },
+        "event_type": {
+          "enum": [
+            "PROGRESS",
+            "COMPUTE_COMPLETED",
+            "PACKAGE_STARTED",
+            "PACKAGE_READY",
+            "RETRYABLE_ERROR",
+            "TERMINAL_ERROR"
+          ]
+        },
+        "occurred_at": {
+          "$ref": "common.schema.json#/$defs/DateTime"
+        },
+        "data": {
+          "type": "object"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "event_type": {
+                "const": "PROGRESS"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "$ref": "#/$defs/ProgressData"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "event_type": {
+                "enum": [
+                  "COMPUTE_COMPLETED",
+                  "PACKAGE_STARTED"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "$ref": "common.schema.json#/$defs/EmptyRequest"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "event_type": {
+                "const": "PACKAGE_READY"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "$ref": "#/$defs/PackageReadyData"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "event_type": {
+                "enum": [
+                  "RETRYABLE_ERROR",
+                  "TERMINAL_ERROR"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "data": {
+                "$ref": "#/$defs/WorkerErrorData"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "ProgressData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stage",
+        "completed_nonces",
+        "total_nonces"
+      ],
+      "properties": {
+        "stage": {
+          "enum": [
+            "COMPUTING",
+            "PACKAGING",
+            "UPLOADING"
+          ]
+        },
+        "completed_nonces": {
+          "$ref": "common.schema.json#/$defs/UInt64"
+        },
+        "total_nonces": {
+          "$ref": "common.schema.json#/$defs/PositiveUInt64"
+        }
+      }
+    },
+    "PackageReadyData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "package_id",
+        "package_sha256",
+        "compressed_size_bytes",
+        "uncompressed_size_bytes"
+      ],
+      "properties": {
+        "package_id": {
+          "$ref": "common.schema.json#/$defs/Uuid"
+        },
+        "package_sha256": {
+          "$ref": "common.schema.json#/$defs/Sha256"
+        },
+        "compressed_size_bytes": {
+          "$ref": "common.schema.json#/$defs/PositiveUInt64"
+        },
+        "uncompressed_size_bytes": {
+          "$ref": "common.schema.json#/$defs/PositiveUInt64"
+        }
+      }
+    },
+    "WorkerErrorData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "error_code",
+        "message"
+      ],
+      "properties": {
+        "error_code": {
+          "type": "string",
+          "pattern": "^[A-Z][A-Z0-9_]{2,63}$"
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "last_completed_nonce": {
+          "$ref": "common.schema.json#/$defs/UInt64"
+        }
+      }
+    },
+    "AssignmentEventResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol_version",
+        "assignment_id",
+        "event_id",
+        "accepted_event_seq",
+        "assignment_state",
+        "server_time"
+      ],
+      "properties": {
+        "protocol_version": {
+          "$ref": "common.schema.json#/$defs/ProtocolVersion"
+        },
+        "assignment_id": {
+          "$ref": "common.schema.json#/$defs/Uuid"
+        },
+        "event_id": {
+          "$ref": "common.schema.json#/$defs/Uuid"
+        },
+        "accepted_event_seq": {
+          "$ref": "common.schema.json#/$defs/PositiveUInt64"
+        },
+        "assignment_state": {
+          "$ref": "common.schema.json#/$defs/AssignmentState"
+        },
+        "server_time": {
+          "$ref": "common.schema.json#/$defs/DateTime"
+        }
+      }
+    },
+    "CancelAssignmentRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol_version",
+        "cancel_id",
+        "reason_code",
+        "message",
+        "requested_at"
+      ],
+      "properties": {
+        "protocol_version": {
+          "$ref": "common.schema.json#/$defs/ProtocolVersion"
+        },
+        "cancel_id": {
+          "$ref": "common.schema.json#/$defs/Uuid"
+        },
+        "reason_code": {
+          "type": "string",
+          "pattern": "^[A-Z][A-Z0-9_]{2,63}$"
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "requested_at": {
+          "$ref": "common.schema.json#/$defs/DateTime"
+        }
+      }
+    },
+    "HeartbeatRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol_version",
+        "heartbeat_id",
+        "worker_id",
+        "sent_at",
+        "resources"
+      ],
+      "properties": {
+        "protocol_version": {
+          "$ref": "common.schema.json#/$defs/ProtocolVersion"
+        },
+        "heartbeat_id": {
+          "$ref": "common.schema.json#/$defs/Uuid"
+        },
+        "worker_id": {
+          "$ref": "common.schema.json#/$defs/Uuid"
+        },
+        "sent_at": {
+          "$ref": "common.schema.json#/$defs/DateTime"
+        },
+        "resources": {
+          "type": "array",
+          "maxItems": 1024,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "slot_id",
+              "slot_state",
+              "last_accepted_event_seq"
+            ],
+            "properties": {
+              "slot_id": {
+                "$ref": "common.schema.json#/$defs/Uuid"
+              },
+              "slot_state": {
+                "$ref": "common.schema.json#/$defs/SlotState"
+              },
+              "offer_id": {
+                "$ref": "common.schema.json#/$defs/Uuid"
+              },
+              "ready_check_id": {
+                "$ref": "common.schema.json#/$defs/Uuid"
+              },
+              "assignment_id": {
+                "$ref": "common.schema.json#/$defs/Uuid"
+              },
+              "last_accepted_event_seq": {
+                "$ref": "common.schema.json#/$defs/UInt64"
+              },
+              "upload_id": {
+                "$ref": "common.schema.json#/$defs/Uuid"
+              },
+              "committed_upload_offset": {
+                "$ref": "common.schema.json#/$defs/UInt64"
+              }
+            },
+            "dependentRequired": {
+              "ready_check_id": [
+                "offer_id"
+              ]
+            }
+          }
+        }
+      }
+    },
+    "HeartbeatResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol_version",
+        "heartbeat_id",
+        "server_time",
+        "next_heartbeat_seconds",
+        "resources"
+      ],
+      "properties": {
+        "protocol_version": {
+          "$ref": "common.schema.json#/$defs/ProtocolVersion"
+        },
+        "heartbeat_id": {
+          "$ref": "common.schema.json#/$defs/Uuid"
+        },
+        "server_time": {
+          "$ref": "common.schema.json#/$defs/DateTime"
+        },
+        "next_heartbeat_seconds": {
+          "const": 30
+        },
+        "resources": {
+          "type": "array",
+          "maxItems": 1024,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "slot_id",
+              "slot_state",
+              "directive"
+            ],
+            "properties": {
+              "slot_id": {
+                "$ref": "common.schema.json#/$defs/Uuid"
+              },
+              "slot_state": {
+                "$ref": "common.schema.json#/$defs/SlotState"
+              },
+              "offer_state": {
+                "type": "string",
+                "maxLength": 64
+              },
+              "assignment_state": {
+                "$ref": "common.schema.json#/$defs/AssignmentState"
+              },
+              "lease_expires_at": {
+                "$ref": "common.schema.json#/$defs/DateTime"
+              },
+              "ready_check_id": {
+                "$ref": "common.schema.json#/$defs/Uuid"
+              },
+              "directive": {
+                "enum": [
+                  "CONTINUE",
+                  "CONFIRM_AVAILABLE",
+                  "CANCEL",
+                  "REAUTHENTICATE",
+                  "UPGRADE_REQUIRED"
+                ]
+              },
+              "reason_code": {
+                "type": "string",
+                "pattern": "^[A-Z][A-Z0-9_]{2,63}$"
+              },
+              "fault_attribution": {
+                "$ref": "common.schema.json#/$defs/FaultAttribution"
+              }
+            },
+            "allOf": [
+              {
+                "if": {
+                  "properties": {
+                    "directive": {
+                      "const": "CONFIRM_AVAILABLE"
+                    }
+                  },
+                  "required": [
+                    "directive"
+                  ]
+                },
+                "then": {
+                  "required": [
+                    "offer_state",
+                    "lease_expires_at",
+                    "ready_check_id"
+                  ],
+                  "properties": {
+                    "slot_state": {
+                      "const": "QUEUED"
+                    },
+                    "offer_state": {
+                      "const": "READY_CHECK"
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    "BeginUploadRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol_version",
+        "package_format",
+        "package_id",
+        "assignment_digest",
+        "media_type",
+        "compressed_size_bytes",
+        "uncompressed_size_bytes",
+        "manifest_sha256",
+        "package_sha256"
+      ],
+      "properties": {
+        "protocol_version": {
+          "$ref": "common.schema.json#/$defs/ProtocolVersion"
+        },
+        "package_format": {
+          "$ref": "common.schema.json#/$defs/PackageFormat"
+        },
+        "package_id": {
+          "$ref": "common.schema.json#/$defs/Uuid"
+        },
+        "assignment_digest": {
+          "$ref": "common.schema.json#/$defs/Sha256"
+        },
+        "media_type": {
+          "const": "application/vnd.tig-pool.proof-material-v1.tar+zstd"
+        },
+        "compressed_size_bytes": {
+          "$ref": "common.schema.json#/$defs/PositiveUInt64"
+        },
+        "uncompressed_size_bytes": {
+          "$ref": "common.schema.json#/$defs/PositiveUInt64"
+        },
+        "manifest_sha256": {
+          "$ref": "common.schema.json#/$defs/Sha256"
+        },
+        "package_sha256": {
+          "$ref": "common.schema.json#/$defs/Sha256"
+        }
+      }
+    },
+    "BeginUploadResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol_version",
+        "assignment_id",
+        "package_id",
+        "upload_id",
+        "upload_state",
+        "committed_offset",
+        "chunk_size_bytes",
+        "expires_at",
+        "server_time"
+      ],
+      "properties": {
+        "protocol_version": {
+          "$ref": "common.schema.json#/$defs/ProtocolVersion"
+        },
+        "assignment_id": {
+          "$ref": "common.schema.json#/$defs/Uuid"
+        },
+        "package_id": {
+          "$ref": "common.schema.json#/$defs/Uuid"
+        },
+        "upload_id": {
+          "$ref": "common.schema.json#/$defs/Uuid"
+        },
+        "upload_state": {
+          "$ref": "#/$defs/UploadState"
+        },
+        "committed_offset": {
+          "$ref": "common.schema.json#/$defs/UInt64"
+        },
+        "chunk_size_bytes": {
+          "type": "integer",
+          "minimum": 1048576,
+          "maximum": 67108864
+        },
+        "expires_at": {
+          "$ref": "common.schema.json#/$defs/DateTime"
+        },
+        "acceptance_receipt": {
+          "$ref": "#/$defs/AcceptanceReceipt"
+        },
+        "server_time": {
+          "$ref": "common.schema.json#/$defs/DateTime"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "upload_state": {
+                "const": "DURABLY_ACCEPTED"
+              }
+            },
+            "required": [
+              "upload_state"
+            ]
+          },
+          "then": {
+            "required": [
+              "acceptance_receipt"
+            ]
+          },
+          "else": {
+            "not": {
+              "required": [
+                "acceptance_receipt"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "UploadState": {
+      "enum": [
+        "CREATED",
+        "UPLOADING",
+        "RECEIVED",
+        "STRUCTURALLY_CHECKING",
+        "STRUCTURALLY_ACCEPTED",
+        "DURABLY_ACCEPTED",
+        "REJECTED",
+        "EXPIRED",
+        "ABORTED"
+      ]
+    },
+    "UploadChunkResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol_version",
+        "upload_id",
+        "committed_offset",
+        "upload_state",
+        "server_time"
+      ],
+      "properties": {
+        "protocol_version": {
+          "$ref": "common.schema.json#/$defs/ProtocolVersion"
+        },
+        "upload_id": {
+          "$ref": "common.schema.json#/$defs/Uuid"
+        },
+        "committed_offset": {
+          "$ref": "common.schema.json#/$defs/UInt64"
+        },
+        "upload_state": {
+          "enum": [
+            "CREATED",
+            "UPLOADING",
+            "RECEIVED"
+          ]
+        },
+        "server_time": {
+          "$ref": "common.schema.json#/$defs/DateTime"
+        }
+      }
+    },
+    "FinalizeUploadRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol_version",
+        "finalize_id",
+        "package_sha256",
+        "compressed_size_bytes"
+      ],
+      "properties": {
+        "protocol_version": {
+          "$ref": "common.schema.json#/$defs/ProtocolVersion"
+        },
+        "finalize_id": {
+          "$ref": "common.schema.json#/$defs/Uuid"
+        },
+        "package_sha256": {
+          "$ref": "common.schema.json#/$defs/Sha256"
+        },
+        "compressed_size_bytes": {
+          "$ref": "common.schema.json#/$defs/PositiveUInt64"
+        }
+      }
+    },
+    "UploadStatusResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol_version",
+        "assignment_id",
+        "package_id",
+        "upload_id",
+        "upload_state",
+        "committed_offset",
+        "server_time"
+      ],
+      "properties": {
+        "protocol_version": {
+          "$ref": "common.schema.json#/$defs/ProtocolVersion"
+        },
+        "assignment_id": {
+          "$ref": "common.schema.json#/$defs/Uuid"
+        },
+        "package_id": {
+          "$ref": "common.schema.json#/$defs/Uuid"
+        },
+        "upload_id": {
+          "$ref": "common.schema.json#/$defs/Uuid"
+        },
+        "upload_state": {
+          "$ref": "#/$defs/UploadState"
+        },
+        "committed_offset": {
+          "$ref": "common.schema.json#/$defs/UInt64"
+        },
+        "reason_code": {
+          "type": "string",
+          "pattern": "^[A-Z][A-Z0-9_]{2,63}$"
+        },
+        "fault_attribution": {
+          "$ref": "common.schema.json#/$defs/FaultAttribution"
+        },
+        "acceptance_receipt": {
+          "$ref": "#/$defs/AcceptanceReceipt"
+        },
+        "server_time": {
+          "$ref": "common.schema.json#/$defs/DateTime"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "upload_state": {
+                "const": "DURABLY_ACCEPTED"
+              }
+            },
+            "required": [
+              "upload_state"
+            ]
+          },
+          "then": {
+            "required": [
+              "acceptance_receipt"
+            ]
+          },
+          "else": {
+            "not": {
+              "required": [
+                "acceptance_receipt"
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "upload_state": {
+                "enum": [
+                  "REJECTED",
+                  "EXPIRED",
+                  "ABORTED"
+                ]
+              }
+            },
+            "required": [
+              "upload_state"
+            ]
+          },
+          "then": {
+            "required": [
+              "reason_code",
+              "fault_attribution"
+            ]
+          }
+        }
+      ]
+    },
+    "AcceptanceReceipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol_version",
+        "receipt_id",
+        "assignment_id",
+        "benchmark_id",
+        "member_id",
+        "worker_id",
+        "slot_id",
+        "slot_generation",
+        "package_id",
+        "package_sha256",
+        "merkle_root",
+        "accepted_at",
+        "member_may_delete_package",
+        "slot_released"
+      ],
+      "properties": {
+        "protocol_version": {
+          "$ref": "common.schema.json#/$defs/ProtocolVersion"
+        },
+        "receipt_id": {
+          "$ref": "common.schema.json#/$defs/Uuid"
+        },
+        "assignment_id": {
+          "$ref": "common.schema.json#/$defs/Uuid"
+        },
+        "benchmark_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "member_id": {
+          "$ref": "common.schema.json#/$defs/Uuid"
+        },
+        "worker_id": {
+          "$ref": "common.schema.json#/$defs/Uuid"
+        },
+        "slot_id": {
+          "$ref": "common.schema.json#/$defs/Uuid"
+        },
+        "slot_generation": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "package_id": {
+          "$ref": "common.schema.json#/$defs/Uuid"
+        },
+        "package_sha256": {
+          "$ref": "common.schema.json#/$defs/Sha256"
+        },
+        "merkle_root": {
+          "$ref": "common.schema.json#/$defs/MerkleRoot"
+        },
+        "accepted_at": {
+          "$ref": "common.schema.json#/$defs/DateTime"
+        },
+        "member_may_delete_package": {
+          "const": true
+        },
+        "slot_released": {
+          "const": true
+        }
+      }
+    }
+  }
+}

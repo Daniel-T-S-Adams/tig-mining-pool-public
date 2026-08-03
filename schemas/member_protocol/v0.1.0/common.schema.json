@@ -1,0 +1,411 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "common.schema.json",
+  "title": "TIG pool member protocol 0.1.0 common types",
+  "$defs": {
+    "ProtocolVersion": {
+      "const": "0.1.0"
+    },
+    "PackageFormat": {
+      "const": "proof-material-v1"
+    },
+    "Uuid": {
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "DateTime": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "Sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "Sha256Digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "GitCommit": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "MerkleRoot": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "UInt32": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4294967295
+    },
+    "UInt64": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "PositiveUInt64": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "UInt64Decimal": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]{0,19})$"
+    },
+    "Int32": {
+      "type": "integer",
+      "minimum": -2147483648,
+      "maximum": 2147483647
+    },
+    "ComputeType": {
+      "enum": [
+        "aws_t3",
+        "aws_c7i",
+        "aws_m7i",
+        "aws_t3a",
+        "aws_c7a",
+        "aws_m7a",
+        "aws_t4g",
+        "aws_c7g",
+        "aws_m7g",
+        "aws_g4dn"
+      ]
+    },
+    "CpuArch": {
+      "enum": [
+        "amd64",
+        "arm64"
+      ]
+    },
+    "ComputeSpec": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "compute_kind",
+            "compute_type",
+            "cpu_arch",
+            "cpu_vendor",
+            "cpu_cores"
+          ],
+          "properties": {
+            "compute_kind": {
+              "const": "CPU"
+            },
+            "compute_type": {
+              "enum": [
+                "aws_t3",
+                "aws_c7i",
+                "aws_m7i"
+              ]
+            },
+            "cpu_arch": {
+              "const": "amd64"
+            },
+            "cpu_vendor": {
+              "const": "INTEL"
+            },
+            "cpu_cores": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 4096
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "compute_kind",
+            "compute_type",
+            "cpu_arch",
+            "cpu_vendor",
+            "cpu_cores"
+          ],
+          "properties": {
+            "compute_kind": {
+              "const": "CPU"
+            },
+            "compute_type": {
+              "enum": [
+                "aws_t3a",
+                "aws_c7a",
+                "aws_m7a"
+              ]
+            },
+            "cpu_arch": {
+              "const": "amd64"
+            },
+            "cpu_vendor": {
+              "const": "AMD"
+            },
+            "cpu_cores": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 4096
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "compute_kind",
+            "compute_type",
+            "cpu_arch",
+            "cpu_vendor",
+            "cpu_cores"
+          ],
+          "properties": {
+            "compute_kind": {
+              "const": "CPU"
+            },
+            "compute_type": {
+              "enum": [
+                "aws_t4g",
+                "aws_c7g",
+                "aws_m7g"
+              ]
+            },
+            "cpu_arch": {
+              "const": "arm64"
+            },
+            "cpu_vendor": {
+              "const": "ARM"
+            },
+            "cpu_cores": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 4096
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "compute_kind",
+            "compute_type",
+            "cpu_arch",
+            "gpu_vendor",
+            "gpu_device_id",
+            "gpu_model",
+            "nvidia_driver_version",
+            "container_toolkit_version",
+            "cuda_driver_version"
+          ],
+          "properties": {
+            "compute_kind": {
+              "const": "GPU"
+            },
+            "compute_type": {
+              "const": "aws_g4dn"
+            },
+            "cpu_arch": {
+              "const": "amd64"
+            },
+            "gpu_vendor": {
+              "const": "NVIDIA"
+            },
+            "gpu_device_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "gpu_model": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "nvidia_driver_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "container_toolkit_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "cuda_driver_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          }
+        }
+      ]
+    },
+    "RuntimeInventory": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "member_agent_version",
+        "benchmarker_version",
+        "available_image_manifest_digests"
+      ],
+      "properties": {
+        "member_agent_version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "benchmarker_version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "available_image_manifest_digests": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/Sha256Digest"
+          }
+        }
+      }
+    },
+    "PackageLimits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "max_compressed_bytes",
+        "max_uncompressed_bytes",
+        "max_manifest_bytes",
+        "max_output_record_bytes",
+        "min_upload_chunk_bytes",
+        "max_upload_chunk_bytes"
+      ],
+      "properties": {
+        "max_compressed_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 68719476736
+        },
+        "max_uncompressed_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 137438953472
+        },
+        "max_manifest_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 262144
+        },
+        "max_output_record_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16777216
+        },
+        "min_upload_chunk_bytes": {
+          "type": "integer",
+          "minimum": 1048576,
+          "maximum": 67108864
+        },
+        "max_upload_chunk_bytes": {
+          "type": "integer",
+          "minimum": 1048576,
+          "maximum": 67108864
+        }
+      }
+    },
+    "SlotState": {
+      "enum": [
+        "AVAILABLE",
+        "QUEUED",
+        "RESERVED",
+        "COMPUTING",
+        "PACKAGING",
+        "UPLOADING",
+        "DISABLED",
+        "REVOKED"
+      ]
+    },
+    "AssignmentState": {
+      "enum": [
+        "ASSIGNMENT_AVAILABLE",
+        "ACKNOWLEDGED",
+        "COMPUTING",
+        "PACKAGING",
+        "UPLOADING",
+        "PACKAGE_RECEIVED",
+        "PACKAGE_STRUCTURALLY_ACCEPTED",
+        "PACKAGE_DURABLY_ACCEPTED",
+        "BENCHMARK_SUBMITTED",
+        "BENCHMARK_CONFIRMED",
+        "PROOF_BUILDING",
+        "PROOF_SUBMITTED",
+        "PROOF_CONFIRMED",
+        "VERIFYING",
+        "ACTIVE",
+        "STOPPED",
+        "CANCELLED",
+        "EXPIRED",
+        "FAILED",
+        "FRAUDULENT"
+      ]
+    },
+    "FaultAttribution": {
+      "enum": [
+        "NONE",
+        "MEMBER",
+        "POOL",
+        "TIG",
+        "UNRESOLVED"
+      ]
+    },
+    "EmptyRequest": {
+      "type": "object",
+      "additionalProperties": false
+    },
+    "ErrorResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "protocol_version",
+        "error_code",
+        "message",
+        "retryable",
+        "server_time"
+      ],
+      "properties": {
+        "protocol_version": {
+          "$ref": "#/$defs/ProtocolVersion"
+        },
+        "error_code": {
+          "type": "string",
+          "pattern": "^[A-Z][A-Z0-9_]{2,63}$"
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "retryable": {
+          "type": "boolean"
+        },
+        "request_id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "enrollment_request_id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "server_time": {
+          "$ref": "#/$defs/DateTime"
+        },
+        "expected_state": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "expected_offset": {
+          "$ref": "#/$defs/UInt64"
+        },
+        "expected_event_seq": {
+          "$ref": "#/$defs/PositiveUInt64"
+        }
+      }
+    }
+  }
+}

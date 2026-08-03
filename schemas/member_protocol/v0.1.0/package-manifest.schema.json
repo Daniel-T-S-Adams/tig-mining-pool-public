@@ -1,0 +1,271 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "package-manifest.schema.json",
+  "title": "TIG pool proof-material package manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol_version",
+    "package_format",
+    "package_id",
+    "assignment_id",
+    "assignment_digest",
+    "benchmark_id",
+    "member_id",
+    "worker_id",
+    "slot_id",
+    "slot_generation",
+    "compute",
+    "qualification_id",
+    "qualification_spec_digest",
+    "network",
+    "tig_api_base_url",
+    "nonce_range",
+    "merkle",
+    "versions",
+    "files",
+    "created_at"
+  ],
+  "properties": {
+    "protocol_version": {
+      "$ref": "common.schema.json#/$defs/ProtocolVersion"
+    },
+    "package_format": {
+      "$ref": "common.schema.json#/$defs/PackageFormat"
+    },
+    "package_id": {
+      "$ref": "common.schema.json#/$defs/Uuid"
+    },
+    "assignment_id": {
+      "$ref": "common.schema.json#/$defs/Uuid"
+    },
+    "assignment_digest": {
+      "$ref": "common.schema.json#/$defs/Sha256"
+    },
+    "benchmark_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "member_id": {
+      "$ref": "common.schema.json#/$defs/Uuid"
+    },
+    "worker_id": {
+      "$ref": "common.schema.json#/$defs/Uuid"
+    },
+    "slot_id": {
+      "$ref": "common.schema.json#/$defs/Uuid"
+    },
+    "slot_generation": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "compute": {
+      "$ref": "common.schema.json#/$defs/ComputeSpec"
+    },
+    "qualification_id": {
+      "$ref": "common.schema.json#/$defs/Uuid"
+    },
+    "qualification_spec_digest": {
+      "$ref": "common.schema.json#/$defs/Sha256"
+    },
+    "network": {
+      "const": "testnet"
+    },
+    "tig_api_base_url": {
+      "const": "https://testnet-api.tig.foundation"
+    },
+    "nonce_range": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "start",
+        "end_exclusive",
+        "num_nonces"
+      ],
+      "properties": {
+        "start": {
+          "const": 0
+        },
+        "end_exclusive": {
+          "$ref": "common.schema.json#/$defs/PositiveUInt64"
+        },
+        "num_nonces": {
+          "$ref": "common.schema.json#/$defs/PositiveUInt64"
+        }
+      }
+    },
+    "merkle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "algorithm",
+        "leaf_encoding",
+        "tree_capacity",
+        "root"
+      ],
+      "properties": {
+        "algorithm": {
+          "const": "tig-merkle-blake3-v1"
+        },
+        "leaf_encoding": {
+          "const": "tig-output-metadata-v1"
+        },
+        "tree_capacity": {
+          "$ref": "common.schema.json#/$defs/PositiveUInt64"
+        },
+        "root": {
+          "$ref": "common.schema.json#/$defs/MerkleRoot"
+        }
+      }
+    },
+    "versions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "member_agent_version",
+        "tig_upstream_commit",
+        "benchmarker_version",
+        "algorithm_binary_sha256",
+        "runtime_image_manifest_digest",
+        "runtime_image_platform_digest",
+        "runtime_platform"
+      ],
+      "properties": {
+        "member_agent_version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "tig_upstream_commit": {
+          "$ref": "common.schema.json#/$defs/GitCommit"
+        },
+        "benchmarker_version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "algorithm_binary_sha256": {
+          "$ref": "common.schema.json#/$defs/Sha256"
+        },
+        "runtime_image_manifest_digest": {
+          "$ref": "common.schema.json#/$defs/Sha256Digest"
+        },
+        "runtime_image_platform_digest": {
+          "$ref": "common.schema.json#/$defs/Sha256Digest"
+        },
+        "runtime_platform": {
+          "type": "string",
+          "pattern": "^linux/(amd64|arm64)$"
+        }
+      }
+    },
+    "files": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "qualities",
+        "leaf_hashes",
+        "outputs"
+      ],
+      "properties": {
+        "qualities": {
+          "$ref": "#/$defs/QualitiesFile"
+        },
+        "leaf_hashes": {
+          "$ref": "#/$defs/LeafHashesFile"
+        },
+        "outputs": {
+          "$ref": "#/$defs/OutputsFile"
+        }
+      }
+    },
+    "created_at": {
+      "$ref": "common.schema.json#/$defs/DateTime"
+    }
+  },
+  "$defs": {
+    "BaseFile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "size_bytes",
+        "sha256",
+        "record_count",
+        "encoding"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "size_bytes": {
+          "$ref": "common.schema.json#/$defs/UInt64"
+        },
+        "sha256": {
+          "$ref": "common.schema.json#/$defs/Sha256"
+        },
+        "record_count": {
+          "$ref": "common.schema.json#/$defs/PositiveUInt64"
+        },
+        "encoding": {
+          "type": "string"
+        }
+      }
+    },
+    "QualitiesFile": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/BaseFile"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "name": {
+              "const": "qualities.i32le"
+            },
+            "encoding": {
+              "const": "signed-i32-little-endian"
+            }
+          }
+        }
+      ]
+    },
+    "LeafHashesFile": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/BaseFile"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "name": {
+              "const": "leaf-hashes.bin"
+            },
+            "encoding": {
+              "const": "raw-32-byte-blake3-hashes"
+            }
+          }
+        }
+      ]
+    },
+    "OutputsFile": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/BaseFile"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "name": {
+              "const": "outputs.ndjson"
+            },
+            "encoding": {
+              "const": "rfc8785-json-lines-lf"
+            }
+          }
+        }
+      ]
+    }
+  }
+}

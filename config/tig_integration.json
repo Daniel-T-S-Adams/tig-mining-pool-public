@@ -1,0 +1,99 @@
+{
+  "format_version": 1,
+  "network": {
+    "name": "testnet",
+    "api_base_url": "https://testnet-api.tig.foundation",
+    "mainnet_api_base_url": "https://mainnet-api.tig.foundation",
+    "mainnet_enabled": false
+  },
+  "upstream": {
+    "repository": "https://github.com/tig-foundation/tig-monorepo.git",
+    "commit": "ad08d1ea001a73ff5aab3b556d7f59246fece14e",
+    "openapi": {
+      "version": "1.0.0",
+      "sha256": "fad74baea1a52f9dbc07c095d6ed0b0d7c6b5897288a6dd7cf10d096df17d1cc",
+      "url": "https://swagger.tig.foundation/swagger.yaml"
+    },
+    "benchmarker_container_version": "0.0.7"
+  },
+  "spike": {
+    "compute_class": "cpu",
+    "cpu_architecture": "arm64",
+    "compute_type": "aws_t4g",
+    "gpu_enabled": false,
+    "workflow_guardrails": {
+      "max_assignment_age_blocks": 60,
+      "workflow_expiry_age_blocks": 120,
+      "proof_reserve_blocks": 10,
+      "package_due_age_blocks": 110
+    }
+  },
+  "compute_compatibility": {
+    "cpu_architectures": [
+      "amd64",
+      "arm64"
+    ],
+    "compute_types_by_vendor": {
+      "intel": [
+        "aws_t3",
+        "aws_c7i",
+        "aws_m7i"
+      ],
+      "amd": [
+        "aws_t3a",
+        "aws_c7a",
+        "aws_m7a"
+      ],
+      "arm": [
+        "aws_t4g",
+        "aws_c7g",
+        "aws_m7g"
+      ],
+      "nvidia_gpu_on_amd64": [
+        "aws_g4dn"
+      ]
+    }
+  },
+  "images": {
+    "reference_master": {
+      "reference": "ghcr.io/tig-foundation/tig-monorepo/benchmarker/master:0.0.7",
+      "manifest_digest": "sha256:06bc4c37772b5df7d3f55aa300a4ab1005a2a80f7edeb414b7089f57d5617643"
+    },
+    "reference_worker": {
+      "reference": "ghcr.io/tig-foundation/tig-monorepo/benchmarker/slave:0.0.7",
+      "manifest_digest": "sha256:b980a69e68ed7c7e6d0471af7e83a6e49f6fb03aab695c6189fd0a349ab77d49"
+    },
+    "satisfiability_runtime": {
+      "reference": "ghcr.io/tig-foundation/tig-monorepo/satisfiability/runtime:0.0.7",
+      "manifest_digest": "sha256:cd65156b4ad59e0bbc1d54c90b7f13b8711399453d9a1cc898c1647e5a6c150c"
+    },
+    "vehicle_routing_runtime": {
+      "reference": "ghcr.io/tig-foundation/tig-monorepo/vehicle_routing/runtime:0.0.7",
+      "manifest_digest": "sha256:4238021bebcd0e73ffffde38c17000d9f35efe2cfc05c2f9a58cf19416217ac8"
+    },
+    "knapsack_runtime": {
+      "reference": "ghcr.io/tig-foundation/tig-monorepo/knapsack/runtime:0.0.7",
+      "manifest_digest": "sha256:fb040e7eca936f08b6808136b26027d54b997f82eb02718e310124012909a840"
+    },
+    "vector_search_runtime": {
+      "reference": "ghcr.io/tig-foundation/tig-monorepo/vector_search/runtime:0.0.7",
+      "manifest_digest": "sha256:0d609e0ce456a9bfbcee62d2a92d4a14db3ec413e7688d61654a4562aa35d2c5"
+    },
+    "hypergraph_runtime": {
+      "reference": "ghcr.io/tig-foundation/tig-monorepo/hypergraph/runtime:0.0.7",
+      "manifest_digest": "sha256:3f88eb1fc4a8356e49b1a1f113334ea50dedde45070cb01afa193c98bb6cf1b8"
+    },
+    "neuralnet_optimizer_runtime": {
+      "reference": "ghcr.io/tig-foundation/tig-monorepo/neuralnet_optimizer/runtime:0.0.7",
+      "manifest_digest": "sha256:f848a758ed181b147c8f26379b481670804b1b0bd17b83d143ab7c3613ca92be"
+    },
+    "job_scheduling_runtime": {
+      "reference": "ghcr.io/tig-foundation/tig-monorepo/job_scheduling/runtime:0.0.7",
+      "manifest_digest": "sha256:84b34cff363cb86d72642d174bdd9cb4ca6c84d99cf7d2ef85c8e9d7489d2fa2"
+    },
+    "energy_arbitrage_runtime": {
+      "reference": "ghcr.io/tig-foundation/tig-monorepo/energy_arbitrage/runtime:0.0.7",
+      "manifest_digest": "sha256:53aa72545c1ab7b6c8875b899a2bee072a86d4089c3399f860f67deb1c40ff3f"
+    }
+  }
+}

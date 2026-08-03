@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "output-record.schema.json",
+  "title": "TIG proof-material v1 output record",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "nonce",
+    "runtime_signature",
+    "fuel_consumed",
+    "solution",
+    "cpu_arch"
+  ],
+  "properties": {
+    "nonce": {
+      "$ref": "common.schema.json#/$defs/UInt64"
+    },
+    "runtime_signature": {
+      "$ref": "common.schema.json#/$defs/UInt64Decimal"
+    },
+    "fuel_consumed": {
+      "$ref": "common.schema.json#/$defs/UInt64Decimal"
+    },
+    "solution": {
+      "type": "string"
+    },
+    "cpu_arch": {
+      "$ref": "common.schema.json#/$defs/CpuArch"
+    }
+  }
+}

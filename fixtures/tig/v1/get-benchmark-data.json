@@ -1,0 +1,42 @@
+{
+  "_comment": "GET /get-benchmark-data?benchmark_id=bench_net_0001 — the §5.2 active-benchmark metadata-cache record (tig_integration.md). A network-side benchmark owned by another player, active at the anchor: the pool's hyperparameter-source rule (mining_system.md §6.6) and bundle-quality attribution (§7) read exactly the fields retained here. The fake server currently serves get-benchmark-data only for pool-created benchmarks; this static record documents the shape and values for pool-code tests (limitation recorded in README).",
+  "precommit": {
+    "benchmark_id": "bench_net_0001",
+    "settings": {
+      "player_id": "0xdev1000000000000000000000000000000000000",
+      "block_id": "block_100020",
+      "challenge_id": "c001",
+      "algorithm_id": "a011",
+      "track_id": "t001"
+    },
+    "details": {
+      "block_started": 100020,
+      "num_nonces": 120,
+      "num_bundles": 3,
+      "rand_hash": "rh_net_0001",
+      "fee_paid": "130000000000000000",
+      "fuel_budget": 1500000,
+      "hyperparameters": { "noise": "0.15", "restart_period": 250 },
+      "compute_type": "aws_c7g"
+    },
+    "state": { "block_confirmed": 100021 }
+  },
+  "benchmark": {
+    "id": "bench_net_0001",
+    "details": {
+      "stopped": false,
+      "num_active_bundles": 3,
+      "average_quality_by_bundle": [52, 61, 47],
+      "merkle_root": "9f3b71c2a4e8d05612aa47c9b3e1f8d2704c6a1e5b9d3f70281c4e6a0d5b7f19",
+      "sampled_nonces": [7, 55, 101]
+    },
+    "state": { "block_confirmed": 100050 },
+    "solution_quality": null
+  },
+  "proof": {
+    "benchmark_id": "bench_net_0001",
+    "details": { "submission_delay": 35, "block_active": 100160 },
+    "state": { "block_confirmed": 100055 }
+  },
+  "fraud": null
+}

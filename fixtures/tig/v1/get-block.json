@@ -1,0 +1,169 @@
+{
+  "block": {
+    "id": "block_100080",
+    "details": {
+      "prev_block_id": "block_100079",
+      "height": 100080,
+      "round": 834,
+      "num_confirmed": {
+        "precommit": 0,
+        "benchmark": 0,
+        "proof": 0,
+        "fraud": 0,
+        "verified": 0
+      },
+      "num_active": {
+        "challenge": 2,
+        "benchmark": 0,
+        "player": 1
+      },
+      "timestamp": 1753900000,
+      "emissions": {
+        "benchmarker": "85000000000000000000",
+        "vault": "15000000000000000000"
+      },
+      "gamma_value": 1.0
+    },
+    "data": {
+      "confirmed_ids": {
+        "precommit": [],
+        "benchmark": [],
+        "proof": [],
+        "fraud": [],
+        "verified": []
+      },
+      "active_ids": {
+        "challenge": ["c001", "c003"],
+        "benchmark": [],
+        "player": ["0xp00l00000000000000000000000000000000000"]
+      }
+    },
+    "config": {
+      "advances": {
+        "bootstrap_address": "0xb007000000000000000000000000000000000000",
+        "min_percent_yes_votes": 0.5,
+        "vote_start_delay": 120,
+        "vote_period": 1440,
+        "min_lock_period_to_vote": 2592000,
+        "submission_fee": "1000000000000000000",
+        "adoption_threshold": 0.25,
+        "merge_points_threshold": 5040
+      },
+      "challenges": {
+        "c001": {
+          "name": "satisfiability",
+          "type": "cpu",
+          "quality_type": "continuous",
+          "submission_delay_multiplier": 3.0,
+          "num_samples_gte_average": 2,
+          "num_samples_lt_average": 1,
+          "lifespan_period": 120,
+          "per_nonce_fee": "1000000000000000",
+          "base_fee": "10000000000000000",
+          "active_tracks": {
+            "t001": { "num_nonces_per_bundle": 40, "min_active_quality": 0 },
+            "t002": { "num_nonces_per_bundle": 80, "min_active_quality": 10 }
+          },
+          "max_fuel_budget": 20000000000,
+          "max_qualifiers_per_track": 50,
+          "legacy_multiplier_span": 10.0,
+          "min_num_bundles": 1
+        },
+        "c003": {
+          "name": "knapsack",
+          "type": "cpu",
+          "quality_type": "binary",
+          "submission_delay_multiplier": 3.0,
+          "num_samples_gte_average": 2,
+          "num_samples_lt_average": 1,
+          "lifespan_period": 120,
+          "per_nonce_fee": "2000000000000000",
+          "base_fee": "10000000000000000",
+          "active_tracks": {
+            "t010": { "num_nonces_per_bundle": 25, "min_active_quality": 0 }
+          },
+          "max_fuel_budget": 10000000000,
+          "max_qualifiers_per_track": 25,
+          "legacy_multiplier_span": 10.0,
+          "min_num_bundles": 2
+        },
+        "c099": {
+          "name": "future_challenge",
+          "type": "cpu",
+          "quality_type": "continuous",
+          "submission_delay_multiplier": 3.0,
+          "num_samples_gte_average": 2,
+          "num_samples_lt_average": 1,
+          "lifespan_period": 120,
+          "per_nonce_fee": "1000000000000000",
+          "base_fee": "10000000000000000",
+          "active_tracks": {
+            "t090": { "num_nonces_per_bundle": 10, "min_active_quality": 0 }
+          },
+          "max_fuel_budget": 10000000000,
+          "max_qualifiers_per_track": 10,
+          "legacy_multiplier_span": 10.0,
+          "min_num_bundles": 1
+        }
+      },
+      "codes": {
+        "submission_fee": "500000000000000000",
+        "adoption_threshold": 0.25,
+        "merge_points_threshold": 5040,
+        "push_delay_period": 120
+      },
+      "deposits": {
+        "lock_address": "0x10c4000000000000000000000000000000000000",
+        "min_lock_amount": "10000000000000000000",
+        "min_lock_period": 2592000,
+        "lock_period_cap": 63072000,
+        "max_reward_share": 0.5,
+        "default_reward_share": 0.2,
+        "reward_share_update_period": 10080,
+        "delegatees_update_period": 1440,
+        "max_delegations": 10,
+        "token_locker_weight": 1
+      },
+      "erc20": {
+        "rpc_url": "https://rpc.fake.invalid",
+        "chain_id": "8453",
+        "token_address": "0x70ce000000000000000000000000000000000000"
+      },
+      "opow": {
+        "imbalance_multiplier": 1.5,
+        "cutoff_phase_in_period": 1440,
+        "cutoff_multiplier": 2.5,
+        "max_deposit_to_qualifier_ratio": 5.0,
+        "challenge_factors_weight": 0.5,
+        "max_coinbase_outputs": 5,
+        "coinbase_update_period": 1440
+      },
+      "rounds": {
+        "blocks_per_round": 120,
+        "seconds_between_blocks": 60
+      },
+      "reports": {
+        "submission_fee": "250000000000000000",
+        "submission_period": 120,
+        "penalty_amount": "5000000000000000000",
+        "penalty_address": "0xdead000000000000000000000000000000000000"
+      },
+      "rewards": {
+        "gamma": { "a": 1.0, "b": 0.5, "c": 0.1 },
+        "distribution": {
+          "opow": 0.85,
+          "codes": 0.1,
+          "advances": 0.04,
+          "challenge_owners": 0.01
+        },
+        "schedule": [
+          { "block_reward": 100.0, "round_start": 800 }
+        ]
+      },
+      "topups": {
+        "topup_address": "0x70b0000000000000000000000000000000000000",
+        "min_topup_amount": "1000000000000000000"
+      }
+    }
+  }
+}

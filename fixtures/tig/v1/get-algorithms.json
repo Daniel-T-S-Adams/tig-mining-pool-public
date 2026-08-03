@@ -1,0 +1,133 @@
+{
+  "algorithms": [
+    {
+      "id": "a011",
+      "details": {
+        "name": "sat_annealer",
+        "player_id": "0xdev1000000000000000000000000000000000000",
+        "challenge_id": "c001",
+        "algorithm_id": "a011",
+        "fee_paid": "500000000000000000"
+      },
+      "state": {
+        "block_confirmed": 96000,
+        "round_submitted": 800,
+        "round_pushed": 801,
+        "round_active": 810,
+        "round_merged": null,
+        "banned": false
+      },
+      "block_data": {
+        "num_qualifiers_by_track_by_player": {
+          "t001": { "0xdev1000000000000000000000000000000000000": 20 },
+          "t002": { "0xdev1000000000000000000000000000000000000": 8 }
+        },
+        "adoption": "600000000000000000",
+        "merge_points": 120,
+        "reward": "1000000000000000000"
+      },
+      "binary": {
+        "details": {
+          "compile_success": true,
+          "download_url": "https://fake.invalid/binaries/a011.tar.gz"
+        },
+        "state": { "block_confirmed": 96010 }
+      }
+    },
+    {
+      "id": "a012",
+      "details": {
+        "name": "sat_banned",
+        "player_id": "0xdev2000000000000000000000000000000000000",
+        "challenge_id": "c001",
+        "algorithm_id": "a012",
+        "fee_paid": "500000000000000000"
+      },
+      "state": {
+        "block_confirmed": 95000,
+        "round_submitted": 790,
+        "round_pushed": 791,
+        "round_active": 795,
+        "round_merged": null,
+        "banned": true
+      },
+      "block_data": {
+        "num_qualifiers_by_track_by_player": {},
+        "adoption": "0",
+        "merge_points": 0,
+        "reward": "0"
+      },
+      "binary": {
+        "details": {
+          "compile_success": true,
+          "download_url": "https://fake.invalid/binaries/a012.tar.gz"
+        },
+        "state": { "block_confirmed": 95010 }
+      }
+    },
+    {
+      "id": "a013",
+      "details": {
+        "name": "sat_nobinary",
+        "player_id": "0xdev3000000000000000000000000000000000000",
+        "challenge_id": "c001",
+        "algorithm_id": "a013",
+        "fee_paid": "500000000000000000"
+      },
+      "state": {
+        "block_confirmed": 99000,
+        "round_submitted": 830,
+        "round_pushed": 831,
+        "round_active": 833,
+        "round_merged": null,
+        "banned": false
+      },
+      "block_data": {
+        "num_qualifiers_by_track_by_player": {},
+        "adoption": "0",
+        "merge_points": 0,
+        "reward": "0"
+      },
+      "binary": {
+        "details": {
+          "compile_success": false,
+          "download_url": null
+        },
+        "state": { "block_confirmed": 99010 }
+      }
+    },
+    {
+      "id": "a031",
+      "details": {
+        "name": "knapsack_greedy",
+        "player_id": "0xdev1000000000000000000000000000000000000",
+        "challenge_id": "c003",
+        "algorithm_id": "a031",
+        "fee_paid": "500000000000000000"
+      },
+      "state": {
+        "block_confirmed": 97000,
+        "round_submitted": 820,
+        "round_pushed": 821,
+        "round_active": 825,
+        "round_merged": null,
+        "banned": false
+      },
+      "block_data": {
+        "num_qualifiers_by_track_by_player": {
+          "t010": { "0xdev1000000000000000000000000000000000000": 18 }
+        },
+        "adoption": "1000000000000000000",
+        "merge_points": 60,
+        "reward": "500000000000000000"
+      },
+      "binary": {
+        "details": {
+          "compile_success": true,
+          "download_url": "https://fake.invalid/binaries/a031.tar.gz"
+        },
+        "state": { "block_confirmed": 97010 }
+      }
+    }
+  ]
+}

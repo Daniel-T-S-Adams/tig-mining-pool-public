@@ -1,0 +1,28 @@
+{
+  "player": {
+    "id": "0xp00l00000000000000000000000000000000000",
+    "details": {
+      "name": "fixture-pool",
+      "x": null,
+      "telegram": null,
+      "discord": null,
+      "is_multisig": false
+    },
+    "state": {
+      "total_fees_paid": "3000000000000000000",
+      "available_fee_balance": "5000000000000000000",
+      "delegatees": null,
+      "votes": {},
+      "reward_share": { "value": 0.2, "block_set": 99000 },
+      "coinbase": null
+    },
+    "block_data": {
+      "delegatees": {},
+      "reward_by_type": {
+        "benchmarker": "2500000000000000000"
+      },
+      "deposit_by_locked_period": ["10000000000000000000", "0", "0", "0"],
+      "weighted_deposit": "20000000000000000000"
+    }
+  }
+}

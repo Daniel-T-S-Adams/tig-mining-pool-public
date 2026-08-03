@@ -1,0 +1,86 @@
+{
+  "challenges": [
+    {
+      "id": "c001",
+      "config": {
+        "name": "satisfiability",
+        "type": "cpu",
+        "quality_type": "continuous",
+        "submission_delay_multiplier": 3.0,
+        "num_samples_gte_average": 2,
+        "num_samples_lt_average": 1,
+        "lifespan_period": 120,
+        "per_nonce_fee": "1000000000000000",
+        "base_fee": "10000000000000000",
+        "active_tracks": {
+          "t001": { "num_nonces_per_bundle": 40, "min_active_quality": 0 },
+          "t002": { "num_nonces_per_bundle": 80, "min_active_quality": 10 }
+        },
+        "max_fuel_budget": 20000000000,
+        "max_qualifiers_per_track": 50,
+        "legacy_multiplier_span": 10.0,
+        "min_num_bundles": 1
+      },
+      "state": { "round_active": 800 },
+      "block_data": {
+        "num_qualifiers_by_track": { "t001": 30, "t002": 12 },
+        "qualifier_qualities_by_track": {
+          "t001": [40, 44, 51, 55, 62],
+          "t002": [12, 15, 21]
+        }
+      }
+    },
+    {
+      "id": "c003",
+      "config": {
+        "name": "knapsack",
+        "type": "cpu",
+        "quality_type": "binary",
+        "submission_delay_multiplier": 3.0,
+        "num_samples_gte_average": 2,
+        "num_samples_lt_average": 1,
+        "lifespan_period": 120,
+        "per_nonce_fee": "2000000000000000",
+        "base_fee": "10000000000000000",
+        "active_tracks": {
+          "t010": { "num_nonces_per_bundle": 25, "min_active_quality": 0 }
+        },
+        "max_fuel_budget": 10000000000,
+        "max_qualifiers_per_track": 25,
+        "legacy_multiplier_span": 10.0,
+        "min_num_bundles": 2
+      },
+      "state": { "round_active": 820 },
+      "block_data": {
+        "num_qualifiers_by_track": { "t010": 18 },
+        "qualifier_qualities_by_track": { "t010": [1] }
+      }
+    },
+    {
+      "id": "c099",
+      "config": {
+        "name": "future_challenge",
+        "type": "cpu",
+        "quality_type": "continuous",
+        "submission_delay_multiplier": 3.0,
+        "num_samples_gte_average": 2,
+        "num_samples_lt_average": 1,
+        "lifespan_period": 120,
+        "per_nonce_fee": "1000000000000000",
+        "base_fee": "10000000000000000",
+        "active_tracks": {
+          "t090": { "num_nonces_per_bundle": 10, "min_active_quality": 0 }
+        },
+        "max_fuel_budget": 10000000000,
+        "max_qualifiers_per_track": 10,
+        "legacy_multiplier_span": 10.0,
+        "min_num_bundles": 1
+      },
+      "state": { "round_active": 900 },
+      "block_data": {
+        "num_qualifiers_by_track": {},
+        "qualifier_qualities_by_track": {}
+      }
+    }
+  ]
+}

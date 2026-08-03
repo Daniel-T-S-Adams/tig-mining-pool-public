@@ -1,0 +1,25 @@
+{
+  "c001": [
+    {
+      "track_id": "t001",
+      "algorithm_id": "a011",
+      "num_bundles": 12,
+      "average_quality": 55
+    },
+    {
+      "track_id": "t002",
+      "algorithm_id": "a011",
+      "num_bundles": 4,
+      "average_quality": 18
+    }
+  ],
+  "c003": [
+    {
+      "track_id": "t010",
+      "algorithm_id": "a031",
+      "num_bundles": 9,
+      "average_quality": 1
+    }
+  ],
+  "c099": []
+}

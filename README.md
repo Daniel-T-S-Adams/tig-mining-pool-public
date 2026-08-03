@@ -44,6 +44,8 @@ CLAUDE.md            operating contract (AGENTS.md symlinks to it)
 docs/                authoritative design documents and ADRs
 schemas/             versioned member-protocol JSON schemas
 config/              pinned TIG integration contract
+fixtures/            versioned deterministic test fixtures (see fixtures/tig/v1/README.md)
 crates/pool-domain   shared domain types (grows as behavior is implemented)
+crates/fake-tig      deterministic local stand-in for the TIG API (`make smoke`)
 .github/workflows/   PR checks (fmt, clippy, test from a clean checkout)
 ```

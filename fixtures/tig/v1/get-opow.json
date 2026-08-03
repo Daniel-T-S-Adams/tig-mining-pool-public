@@ -1,0 +1,31 @@
+{
+  "opow": {
+    "player_id": "0xp00l00000000000000000000000000000000000",
+    "block_data": {
+      "num_qualifiers_by_challenge_by_track": {
+        "c001": { "t001": 5, "t002": 2 },
+        "c003": { "t010": 3 }
+      },
+      "num_potential_qualifiers_by_challenge_by_track": {
+        "c001": { "t001": 7, "t002": 2 },
+        "c003": { "t010": 4 }
+      },
+      "legacy_multiplier_by_challenge_by_track": {
+        "c001": { "t001": 1.0, "t002": 1.0 },
+        "c003": { "t010": 1.0 }
+      },
+      "cutoff": 12,
+      "weighted_self_deposit": "20000000000000000000",
+      "weighted_delegated_deposit": "5000000000000000000",
+      "delegators": ["0xde1e000000000000000000000000000000000000"],
+      "reward_share": "200000000000000000",
+      "coinbase": {
+        "0xp00l00000000000000000000000000000000000": "800000000000000000",
+        "0xde1e000000000000000000000000000000000000": "200000000000000000"
+      },
+      "imbalance": "50000000000000000",
+      "influence": "30000000000000000",
+      "reward": "2500000000000000000"
+    }
+  }
+}

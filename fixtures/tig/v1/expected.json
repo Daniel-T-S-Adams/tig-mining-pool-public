@@ -1,0 +1,47 @@
+{
+  "_comment": "Derived values recorded independently of any implementation (issue #2). Each entry names the rule that derives it. Reviewed before implementation tests may cite this fixture as evidence.",
+  "anchor": {
+    "block_id": "block_100080",
+    "height": 100080,
+    "round": 834
+  },
+  "active_challenges": {
+    "rule": "challenge.state.round_active <= block.details.round (tig_integration.md §5.1)",
+    "expected": ["c001", "c003"],
+    "excluded": { "c099": "round_active 900 > round 834" }
+  },
+  "eligible_algorithms": {
+    "rule": "active in snapshot round, not banned, confirmed binary with compile_success=true and non-null download_url (tig_integration.md §5.1)",
+    "expected_by_challenge": { "c001": ["a011"], "c003": ["a031"] },
+    "excluded": {
+      "a012": "banned = true",
+      "a013": "compile_success = false and download_url = null"
+    }
+  },
+  "num_nonces_examples": {
+    "rule": "num_nonces = num_bundles × active_tracks[track].num_nonces_per_bundle",
+    "cases": [
+      { "challenge": "c001", "track": "t001", "num_bundles": 2, "expected_num_nonces": 80 },
+      { "challenge": "c001", "track": "t002", "num_bundles": 1, "expected_num_nonces": 80 },
+      { "challenge": "c003", "track": "t010", "num_bundles": 2, "expected_num_nonces": 50 }
+    ]
+  },
+  "precommit_fee_examples": {
+    "rule": "fee = base_fee + per_nonce_fee × num_nonces (values are PreciseNumber decimal strings; integer math only)",
+    "cases": [
+      { "challenge": "c001", "num_nonces": 80, "expected_fee": "90000000000000000" },
+      { "challenge": "c003", "num_nonces": 50, "expected_fee": "110000000000000000" }
+    ]
+  },
+  "sample_counts": {
+    "rule": "num_samples_gte_average + num_samples_lt_average per challenge config",
+    "expected": { "c001": 3, "c003": 3, "c099": 3 }
+  },
+  "workflow_guardrails": {
+    "rule": "config/tig_integration.json spike.workflow_guardrails, relative to precommit block_started",
+    "block_started_example": 100081,
+    "do_not_assign_at_or_after_height": 100141,
+    "package_due_before_height": 100191,
+    "workflow_expired_at_height": 100201
+  }
+}

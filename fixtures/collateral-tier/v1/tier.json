@@ -1,0 +1,376 @@
+{
+  "_comment": "Deterministic tier cases (issue #5, docs/pre_build_checklist.md §6). Provenance: constructed. Money values are PreciseNumber-style attoTIG decimal strings (accounting.md §3), computed with integer math only. J[k] and X are fixture policy inventions, NOT settled protocol constants (mining_system.md §11 leaves their numerical values open). Round aggregates U/V follow the minimal state model in architecture.md §7.6 (one aggregate row per member/tier membership/round). Expected values are recorded independently of any implementation; each names the rule that derives it.",
+  "conventions": {
+    "money_unit": "attoTIG decimal string (1 TIG = 10^18 attoTIG), accounting.md §3",
+    "ids": "obvious fakes (member_m10..., bench_b50..., round r834)",
+    "policy_version": "policy_v1_fixture"
+  },
+  "fixture_policy": {
+    "joining_fee_J": { "1": "3000000000000000000", "2": "5000000000000000000", "3": "8000000000000000000" },
+    "failure_charge_X": "2000000000000000000",
+    "note": "Numerical values for J[k] and X are intentionally left open in mining_system.md §11; these are fixture inventions carried as versioned policy inputs."
+  },
+  "cases": [
+    {
+      "name": "paid_join_activates_tier",
+      "description": "Joining tier 2 debits J[2] from finalized unencumbered security-deposit value; tier activation and the balanced fee journal batch commit together.",
+      "input_state": {
+        "member_id": "member_m10",
+        "tier": "NONE",
+        "finalized_security_deposit_liability": "10000000000000000000",
+        "pending_returns": "0",
+        "frozen_charge_or_slash": "0",
+        "requested_tier_k": 2,
+        "joining_fee_J2": "5000000000000000000"
+      },
+      "action_or_event": "Member authorizes the tier-2 joining fee from finalized security-deposit value; the debit finalizes.",
+      "expected": {
+        "tier_after": 2,
+        "finalized_security_deposit_after": "5000000000000000000",
+        "journal_batch": {
+          "debit": "LIABILITY:MEMBER_SECURITY_DEPOSIT:member_m10",
+          "credit": "REVENUE:TIER_JOINING_FEES",
+          "amount": "5000000000000000000"
+        },
+        "atomic_with_activation": true,
+        "refundable": false,
+        "derivation": "10 - 5 = 5 TIG remaining deposit; activation and the fee batch are one commit; the fee is non-refundable."
+      },
+      "rule": "accounting.md §11.3 (fee taken only from finalized, unencumbered security-deposit value; activation and the balanced fee journal batch commit together; tier removal creates no refund); mining_system.md §6.1 (joining tier k costs the versioned, non-refundable fee J[k])"
+    },
+    {
+      "name": "unfinalized_fee_debit_never_activates",
+      "description": "A failed, ambiguous, or unfinalized fee debit never activates the tier.",
+      "input_state": {
+        "member_id": "member_m11",
+        "tier": "NONE",
+        "requested_tier_k": 1,
+        "joining_fee_J1": "3000000000000000000",
+        "fee_debit_state": "unfinalized"
+      },
+      "action_or_event": "Member attempts to join tier 1 but the fee debit does not finalize.",
+      "expected": {
+        "tier_after": "NONE",
+        "concurrency_allowance": 0,
+        "new_precommits_allowed": false,
+        "derivation": "No finalized fee, no activation; the member remains at tier NONE with zero concurrency."
+      },
+      "rule": "accounting.md §11.3 (a failed, ambiguous, or unfinalized fee debit never activates the tier)"
+    },
+    {
+      "name": "k_unverified_enforcement_at_limit",
+      "description": "Tier k permits at most k concurrent unverified benchmarks; the admission check is member_unverified < tier_number inside the serialized precommit-admission lease.",
+      "input_state": {
+        "member_id": "member_m12",
+        "tier": 2,
+        "unverified_benchmarks": ["bench_b50", "bench_b51"],
+        "member_unverified": 2,
+        "collateral_gate": "passes",
+        "global_gate": "passes"
+      },
+      "action_or_event": "Controller recounts authoritative unverified workflows and evaluates admission for a third precommit intent.",
+      "expected": {
+        "admission": "denied",
+        "check": "member_unverified < tier_number is 2 < 2 = false",
+        "admission_if_member_unverified_were_1": "allowed (1 < 2, given the collateral and global gates pass)",
+        "derivation": "Tier 2 caps concurrent unverified benchmarks at 2; the strict less-than check fails at the limit."
+      },
+      "rule": "mining_system.md §6.1 (tier k permits at most k concurrent unverified benchmarks) and §10 invariant 22; architecture.md §7.6 (in the same transaction the Controller recounts authoritative unverified workflows and checks member_unverified < tier_number)"
+    },
+    {
+      "name": "unverified_span_survives_package_acceptance",
+      "description": "Durable package acceptance releases the compute slot but the benchmark stays unverified for tier concurrency until TIG verifies it or records a terminal outcome.",
+      "input_state": {
+        "member_id": "member_m13",
+        "tier": 1,
+        "benchmark": {
+          "benchmark_id": "bench_b52",
+          "state": "package durably accepted, benchmark commitment submitted, not yet TIG-verified, not terminal"
+        },
+        "member_unverified": 1,
+        "slot_state": "released at durable acceptance"
+      },
+      "action_or_event": "Member offers the freed slot and the Controller evaluates admission for a new precommit intent.",
+      "expected": {
+        "admission": "denied",
+        "member_unverified": 1,
+        "check": "1 < 1 = false",
+        "derivation": "A benchmark is unverified from creation of its pool precommit intent until TIG records it verified or terminal stopped/expired/failed. Slot release at durable acceptance does not end the unverified interval, so the tier-1 member has no free unverified position."
+      },
+      "rule": "mining_system.md §6.1 (a benchmark is unverified from creation of its pool precommit intent until TIG records it as verified or terminal; an accepted package releases its compute slot, but the benchmark remains unverified for tier concurrency) and §10 invariant 9"
+    },
+    {
+      "name": "rejoin_outstanding_unverified_counts_against_new_tier",
+      "description": "A removed member with still-unverified benchmarks buys a tier again; those benchmarks immediately count against the newly purchased tier.",
+      "input_state": {
+        "member_id": "member_m14",
+        "tier": "NONE (removed)",
+        "unverified_benchmarks_outstanding": ["bench_b53", "bench_b54"],
+        "member_unverified": 2,
+        "action_fee_J2": "5000000000000000000"
+      },
+      "action_or_event": "Member pays J[2] and rejoins at tier 2, then requests new work.",
+      "expected": {
+        "tier_after": 2,
+        "rejoin_allowed_immediately": true,
+        "new_precommit_admission": "denied",
+        "check": "member_unverified < tier_number is 2 < 2 = false",
+        "derivation": "Repurchase is allowed immediately (no cooldown, no admission queue) but does not reset protocol state: both pre-removal unverified benchmarks count against the new tier-2 allowance, so no new precommit is admitted until one resolves."
+      },
+      "rule": "mining_system.md §6.1 (a removed member may buy a tier again immediately; an immediate repurchase does not reset protocol state — every still-unverified benchmark continues to count against the newly purchased tier) and §10 invariant 22 (including benchmarks created before the current tier purchase)"
+    },
+    {
+      "name": "rejoin_no_cooldown_no_refund_liabilities_persist",
+      "description": "Removal then immediate repurchase: the old fee is not refunded, the new fee is charged in a new idempotent batch, and reservations/fines/method exposure survive both removal and rejoin.",
+      "input_state": {
+        "member_id": "member_m15",
+        "history": [
+          { "event": "joined tier 2", "fee_paid": "5000000000000000000", "batch_id": "fee_batch_fake_001" },
+          { "event": "tier removed at round close" }
+        ],
+        "outstanding": {
+          "open_reservation_bench_b55": "42090000000000000000",
+          "frozen_failure_charge": "2000000000000000000"
+        }
+      },
+      "action_or_event": "Member immediately pays J[2] again and rejoins.",
+      "expected": {
+        "rejoin_allowed": true,
+        "cooldown": "none",
+        "refund_of_prior_fee": "0",
+        "new_fee_batch": { "amount": "5000000000000000000", "batch_id": "fee_batch_fake_002 (new idempotent batch, new membership period)" },
+        "outstanding_after_rejoin": {
+          "open_reservation_bench_b55": "42090000000000000000",
+          "frozen_failure_charge": "2000000000000000000"
+        },
+        "derivation": "No cooldown or admission queue; no refund; every purchase creates a new idempotent fee batch and membership period; removal and rejoin change neither the open reservation nor the frozen charge."
+      },
+      "rule": "mining_system.md §8 (the member can immediately purchase any allowed tier by paying J[k] again; there is no cooldown; rejoining does not clear open benchmarks, round evidence, security reservations, fines, or method penalties) and §10 invariant 24; accounting.md §11.3 (every purchase has a new idempotent fee batch and membership period)"
+    },
+    {
+      "name": "dormancy_has_no_tier_consequence",
+      "description": "A member with no unverified and no verified/active benchmarks all round contributes zero to both aggregates and is not removed.",
+      "input_state": {
+        "member_id": "member_m16",
+        "tier": 3,
+        "round": "r834",
+        "round_aggregate": {
+          "sample_count": 100,
+          "unverified_exposure_U": 0,
+          "verified_exposure_V": 0,
+          "chargeable_failures_f": 0
+        }
+      },
+      "action_or_event": "Round r834 closes and the tier decision is evaluated.",
+      "expected": {
+        "removal": false,
+        "charge": "0",
+        "check": "U > V is 0 > 0 = false; f > k is 0 > 3 = false",
+        "derivation": "Dormancy adds zero to both aggregates, so neither removal rule fires. The repeated non-refundable joining fee, not a dormancy penalty, is the deterrent against cycling dormant identities."
+      },
+      "rule": "mining_system.md §8 (a member with no current unverified or verified/active benchmarks contributes zero to both aggregates; dormancy by itself has no tier consequence)"
+    },
+    {
+      "name": "round_U_greater_than_V_removes_tier",
+      "description": "At round close, unverified exposure exceeding verified exposure removes the tier membership (v0 slow-work/clogging rule).",
+      "input_state": {
+        "member_id": "member_m17",
+        "tier": 2,
+        "round": "r834",
+        "round_aggregate": {
+          "sample_count": 100,
+          "unverified_exposure_U": 57,
+          "verified_exposure_V": 42,
+          "chargeable_failures_f": 0
+        }
+      },
+      "action_or_event": "Round r834 closes and the tier decision is evaluated.",
+      "expected": {
+        "removal": true,
+        "removal_timing": "at round close",
+        "tier_after": "NONE",
+        "concurrency_after": 0,
+        "new_precommits_allowed": false,
+        "charge": "0",
+        "check": "unverified_exposure 57 > verified_exposure 42 = true",
+        "derivation": "The sums are comparable directly because both aggregates share the same sample_count. Removal follows from U > V alone; no X is charged because f = 0."
+      },
+      "rule": "mining_system.md §8 (if unverified_exposure[m, round] > verified_exposure[m, round]: remove tier membership; the averages can be compared by comparing their sums because they have the same sample count; removal means tier = NONE, concurrency zero, and no new precommits)"
+    },
+    {
+      "name": "round_U_equal_V_retains_tier",
+      "description": "The removal rule is a strict inequality: equal exposure sums do not remove the tier.",
+      "input_state": {
+        "member_id": "member_m18",
+        "tier": 2,
+        "round": "r834",
+        "round_aggregate": {
+          "sample_count": 100,
+          "unverified_exposure_U": 40,
+          "verified_exposure_V": 40,
+          "chargeable_failures_f": 0
+        }
+      },
+      "action_or_event": "Round r834 closes and the tier decision is evaluated.",
+      "expected": {
+        "removal": false,
+        "check": "40 > 40 = false",
+        "derivation": "The documented condition is strictly greater-than; equality retains the membership."
+      },
+      "rule": "mining_system.md §8 (removal fires only when unverified_exposure > verified_exposure)"
+    },
+    {
+      "name": "per_failure_charge_X_below_boundary",
+      "description": "Each chargeable failed benchmark charges X from reserved security collateral; with f <= k the tier is retained.",
+      "input_state": {
+        "member_id": "member_m19",
+        "tier": 3,
+        "round": "r834",
+        "failure_charge_X": "2000000000000000000",
+        "chargeable_failures": [
+          { "benchmark_id": "bench_b60", "outcome": "abandoned before durable acceptance", "attribution": "MEMBER" },
+          { "benchmark_id": "bench_b61", "outcome": "package internally inconsistent", "attribution": "MEMBER" }
+        ],
+        "round_aggregate": { "sample_count": 100, "unverified_exposure_U": 10, "verified_exposure_V": 30, "chargeable_failures_f": 2 }
+      },
+      "action_or_event": "Round r834 closes and the tier decision is evaluated.",
+      "expected": {
+        "total_charge": "4000000000000000000",
+        "charge_mechanism": "freeze then charge exactly X per failure from that benchmark's reservation, under the assignment's policy version",
+        "removal": false,
+        "check": "f > k is 2 > 3 = false; U > V is 10 > 30 = false",
+        "derivation": "f * X = 2 * 2 TIG = 4 TIG. Each failure consumes its own benchmark's reservation; one benchmark never consumes another benchmark's reserve. Tier retained because both removal conditions are false."
+      },
+      "rule": "mining_system.md §8 (each failure charges the versioned amount X from reserved security collateral); accounting.md §11.6 (for every chargeable tier failure, freeze and then charge exactly X under the assignment's policy version; multiple failing benchmarks use their own reservations and batches)"
+    },
+    {
+      "name": "f_greater_than_k_removal_boundary",
+      "description": "The removal boundary is strict: f = k charges f*X and retains the tier; f = k + 1 charges f*X and additionally removes the tier at round close.",
+      "input_state": {
+        "member_id": "member_m20",
+        "tier": 2,
+        "failure_charge_X": "2000000000000000000",
+        "sub_cases": [
+          { "label": "at_boundary", "chargeable_failures_f": 2 },
+          { "label": "over_boundary", "chargeable_failures_f": 3 }
+        ],
+        "round_aggregate_note": "U <= V in both sub-cases so only the f rule is in play"
+      },
+      "action_or_event": "Round r834 closes and the tier decision is evaluated for each sub-case.",
+      "expected": {
+        "at_boundary": {
+          "total_charge": "4000000000000000000",
+          "removal": false,
+          "check": "f > k is 2 > 2 = false"
+        },
+        "over_boundary": {
+          "total_charge": "6000000000000000000",
+          "removal": true,
+          "removal_timing": "at round close, in addition to the f * X charge",
+          "check": "f > k is 3 > 2 = true"
+        },
+        "derivation": "2 * 2 TIG = 4 TIG (retained); 3 * 2 TIG = 6 TIG plus removal. Removal is additional to, not instead of, the per-failure charges."
+      },
+      "rule": "mining_system.md §8 (if f > k, the member's tier membership is removed at round close in addition to the f * X charge); accounting.md §11.6 (for tier k, if the round's chargeable failure count f > k, remove the tier at round close after recording the ordinary f * X charges)"
+    },
+    {
+      "name": "non_chargeable_outcomes_do_not_increment_f",
+      "description": "POOL, TIG, compatibility, and UNRESOLVED outcomes, and TIG-verified work that merely earns no qualifiers, charge zero and never increment f.",
+      "input_state": {
+        "member_id": "member_m21",
+        "tier": 1,
+        "failure_charge_X": "2000000000000000000",
+        "round_outcomes": [
+          { "benchmark_id": "bench_b62", "outcome": "upload failed due to confirmed pool infrastructure failure", "attribution": "POOL" },
+          { "benchmark_id": "bench_b63", "outcome": "TIG infrastructure failed independently of the member", "attribution": "TIG" },
+          { "benchmark_id": "bench_b64", "outcome": "origin of corruption not established", "attribution": "UNRESOLVED" },
+          { "benchmark_id": "bench_b65", "outcome": "TIG-verified, active bundles earned no qualifiers", "attribution": "none (valid work)" }
+        ]
+      },
+      "action_or_event": "Round r834 closes and the tier decision is evaluated.",
+      "expected": {
+        "chargeable_failures_f": 0,
+        "total_charge": "0",
+        "removal_from_f_rule": false,
+        "fraud_labels": "none — valid low-quality or non-qualifying work is never mislabeled as fraud",
+        "derivation": "None of the four outcomes is a chargeable member failure, so f stays 0 and no X is frozen or charged. bench_b64 is recorded as an unresolved operational outcome rather than an automatic penalty."
+      },
+      "rule": "mining_system.md §8 (pool, TIG, compatibility, or unresolved incidents are neither tier failures nor chargeable member failures; ordinary non-qualifying work that TIG does verify is not a tier failure) and §10 invariant 18; accounting.md §11.6 (POOL, TIG, compatibility, and UNRESOLVED outcomes charge zero and do not increment f; for TIG-verified work that merely earns no qualifiers, charge zero)"
+    },
+    {
+      "name": "zero_quality_bundles_chargeable_not_fraud",
+      "description": "A complete, valid benchmark with zero bundles meeting TIG's minimum verification quality is a chargeable tier failure (capacity/economic policy) without being labeled fraud.",
+      "input_state": {
+        "member_id": "member_m22",
+        "tier": 2,
+        "failure_charge_X": "2000000000000000000",
+        "benchmark": {
+          "benchmark_id": "bench_b66",
+          "state": "complete, structurally valid, no bundle meets TIG's minimum verification quality"
+        },
+        "round_aggregate_before": { "chargeable_failures_f": 0 }
+      },
+      "action_or_event": "The outcome is attributed and recorded for the round.",
+      "expected": {
+        "chargeable_failures_f_after": 1,
+        "charge": "2000000000000000000",
+        "labeled_fraud": false,
+        "derivation": "f increments to 1 and exactly X = 2 TIG is frozen then charged; the record describes a capacity/economic failure, not fraud."
+      },
+      "rule": "mining_system.md §8 (a benchmark with no bundles meeting TIG's minimum verification quality counts as a chargeable failure for this tier policy even though it is not described as fraud); accounting.md §11.6 (for zero bundles meeting TIG's minimum verification quality, charge X under the tier policy without describing the outcome as fraud)"
+    },
+    {
+      "name": "removal_cancels_offers_not_precommit_intents",
+      "description": "Tier removal cancels queued offers and unconfirmed ready checks in one transaction, but a precommit intent created before removal remains an outstanding member-owned benchmark.",
+      "input_state": {
+        "member_id": "member_m23",
+        "tier": 2,
+        "state_at_removal": {
+          "queued_offers": ["offer_fake_101", "offer_fake_102"],
+          "unconfirmed_ready_checks": ["ready_fake_201"],
+          "precommit_intents": [{ "benchmark_id": "bench_b67", "state": "precommit intent created, not terminal" }]
+        }
+      },
+      "action_or_event": "Tier membership is removed at round close.",
+      "expected": {
+        "cancelled": ["offer_fake_101", "offer_fake_102", "ready_fake_201"],
+        "cancellation_atomicity": "closing the membership and cancelling still-queued/ready-check offers is one transaction",
+        "surviving": {
+          "bench_b67": "remains an outstanding member-owned benchmark following its normal terminal path, with its financial exposure still attached to member_m23"
+        },
+        "post_removal_offers": "after rejoining, the member sends fresh availability offers",
+        "derivation": "Offers and ready checks carry no protocol commitment and are cancelled; the precommit intent does carry one and survives."
+      },
+      "rule": "mining_system.md §8 (removal cancels queued offers and unconfirmed ready checks because they contain no protocol commitment; a precommit intent already created before removal remains an outstanding member-owned benchmark); architecture.md §7.6 (closing a tier membership and cancelling its still-queued/ready-check offers is one transaction; offers that already own a precommit intent are not cancelled)"
+    },
+    {
+      "name": "removal_at_round_close_rejoin_gets_fresh_aggregates",
+      "description": "Because evaluation occurs at round close, a removed member who rejoins normally starts the new membership in the new round with a new aggregate row and fresh U/V/f, while pre-removal round evidence is retained.",
+      "input_state": {
+        "member_id": "member_m24",
+        "round_r834_aggregate": {
+          "membership_period": "membership_fake_001",
+          "sample_count": 100,
+          "unverified_exposure_U": 60,
+          "verified_exposure_V": 20,
+          "chargeable_failures_f": 0,
+          "tier_decision": "removed (U > V)"
+        }
+      },
+      "action_or_event": "Member is removed at round r834 close, pays J[1] and rejoins in round r835.",
+      "expected": {
+        "new_aggregate_row": {
+          "membership_period": "membership_fake_002",
+          "round": "r835",
+          "sample_count": 0,
+          "unverified_exposure_U": 0,
+          "verified_exposure_V": 0,
+          "chargeable_failures_f": 0
+        },
+        "r834_evidence": "retained unchanged; rejoining does not clear round evidence",
+        "derivation": "One aggregate row exists per member/tier membership/round, so the new membership in the new round starts a new row at zero. The r834 row and its removal decision remain the audit record."
+      },
+      "rule": "mining_system.md §8 (because evaluation occurs at round close, a removed member normally begins a newly purchased membership in the new round with new round aggregates; rejoining does not clear round evidence); architecture.md §7.6 (one aggregate row per member/tier membership/round containing sample count, unverified benchmark-blocks, verified benchmark-blocks, chargeable failure count, and the resulting tier decision)"
+    }
+  ]
+}

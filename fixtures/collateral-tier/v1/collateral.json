@@ -1,0 +1,220 @@
+{
+  "_comment": "Deterministic collateral cases (issue #5, docs/pre_build_checklist.md §6). Provenance: constructed. All money values are PreciseNumber-style attoTIG decimal strings (accounting.md §3); every derived amount was computed by hand with integer math only. P, X, J[k], and fees are fixture policy inventions, NOT settled protocol constants (mining_system.md §11 leaves the numerical values of X and J[k] open). Per-track fees F[s,t] are supplied as inputs, never derived, so no precommit-fee formula assumption is embedded (see README open questions). Expected values are recorded independently of any implementation; each names the rule that derives it.",
+  "conventions": {
+    "money_unit": "attoTIG decimal string (1 TIG = 10^18 attoTIG), accounting.md §3",
+    "ids": "obvious fakes (member_m01, bench_b01, track t001/t002)",
+    "policy_version": "policy_v1_fixture — a fixture invention, versioned per architecture.md §7.6"
+  },
+  "fixture_policy": {
+    "penalty_amount_P": "10000000000000000000",
+    "penalty_amount_P_changed": "12000000000000000000",
+    "failure_charge_X": "2000000000000000000",
+    "note": "P = live config.reports.penalty_amount at decision snapshot s (accounting.md §11.4). X = versioned per-failure charge, numerical value intentionally open (mining_system.md §11)."
+  },
+  "cases": [
+    {
+      "name": "per_track_bundle_counts_max_reserve",
+      "description": "One proposed benchmark with two possible tracks and different per-track bundle counts. The precommit reserve is the maximum assignment reserve across all proposed tracks because TIG selects the track only after precommit.",
+      "input_state": {
+        "member_id": "member_m01",
+        "penalty_amount_P": "10000000000000000000",
+        "failure_charge_X": "2000000000000000000",
+        "proposed_tracks": [
+          { "track_id": "t001", "num_bundles": 4, "fee_F": "90000000000000000" },
+          { "track_id": "t002", "num_bundles": 10, "fee_F": "110000000000000000" }
+        ]
+      },
+      "action_or_event": "Decision engine proposes bundle counts for all tracks; Controller computes the reservation before any precommit.",
+      "expected": {
+        "method_reserve_by_track": {
+          "t001": "40000000000000000000",
+          "t002": "100000000000000000000"
+        },
+        "assignment_reserve_by_track": {
+          "t001": "42090000000000000000",
+          "t002": "102110000000000000000"
+        },
+        "precommit_reserve": "102110000000000000000",
+        "derivation": "method_reserve = P*B: 10 TIG*4 = 40 TIG; 10 TIG*10 = 100 TIG. assignment_reserve = method_reserve + F + X: 40 + 0.09 + 2 = 42.09 TIG; 100 + 0.11 + 2 = 102.11 TIG. precommit_reserve = max = 102.11 TIG."
+      },
+      "rule": "accounting.md §11.4 (method_reserve[s,t] = P[s]*B[t]; assignment_reserve[s,t] = method_reserve + F[s,t] + X[policy]; precommit_reserve = max over proposed tracks); mining_system.md §6.1 (reserve at least the maximum live method-penalty and per-failure exposure across proposed tracks; the maximum is required because TIG selects the track only after precommit)"
+    },
+    {
+      "name": "reservation_reduced_after_track_confirmed_never_increased",
+      "description": "After TIG confirms the selected track and exact fee_paid, the open reservation may be reduced to that track's exact requirement. It is never increased.",
+      "input_state": {
+        "member_id": "member_m01",
+        "benchmark_id": "bench_b01",
+        "open_reservation": "102110000000000000000",
+        "reservation_recorded_P": "10000000000000000000",
+        "reservation_recorded_X": "2000000000000000000",
+        "confirmed_track": "t001",
+        "confirmed_num_bundles": 4,
+        "confirmed_fee_paid": "90000000000000000"
+      },
+      "action_or_event": "TIG confirms the precommit with selected track t001 and exact fee_paid.",
+      "expected": {
+        "reservation_after_reduction": "42090000000000000000",
+        "increase_permitted": false,
+        "derivation": "Exact requirement for the confirmed track: P*B + fee_paid + X = 40 + 0.09 + 2 = 42.09 TIG. Reduction from 102.11 TIG is permitted; any increase (e.g. by applying a later pool policy) is forbidden."
+      },
+      "rule": "accounting.md §11.4 (once TIG confirms the selected track and exact fee_paid, the reservation may be reduced to that track's exact requirement, never increased by silently applying a later pool policy)"
+    },
+    {
+      "name": "simultaneous_reservations_second_admitted",
+      "description": "A second benchmark for the same member is admitted while the first reservation is still open, because unreserved eligible collateral still covers the new precommit reserve.",
+      "input_state": {
+        "member_id": "member_m02",
+        "eligible_collateral": "250000000000000000000",
+        "open_reservations": [
+          { "benchmark_id": "bench_b10", "amount": "102110000000000000000" }
+        ],
+        "reserved_exposure": "102110000000000000000",
+        "proposed_precommit_reserve": "102110000000000000000"
+      },
+      "action_or_event": "Controller runs the admission check for a second precommit intent while bench_b10 is still unresolved.",
+      "expected": {
+        "admission": "allowed",
+        "unreserved_before": "147890000000000000000",
+        "reserved_exposure_after": "204220000000000000000",
+        "derivation": "eligible_collateral - reserved_exposure = 250 - 102.11 = 147.89 TIG >= precommit_reserve 102.11 TIG, so admission passes; reserved_exposure becomes 204.22 TIG. Each reservation is attached to its own benchmark."
+      },
+      "rule": "accounting.md §11.4 (new work is allowed only if eligible_collateral[m] - reserved_exposure[m] >= precommit_reserve; reserved_exposure = sum of open assignment reservations); mining_system.md §6.1 (the reservation is specific to that member and benchmark and cannot collateralize another unresolved benchmark)"
+    },
+    {
+      "name": "simultaneous_reservations_third_denied",
+      "description": "A third simultaneous reservation is denied: the two open reservations may not be reused as collateral, and the unreserved remainder is below the new precommit reserve.",
+      "input_state": {
+        "member_id": "member_m02",
+        "eligible_collateral": "250000000000000000000",
+        "open_reservations": [
+          { "benchmark_id": "bench_b10", "amount": "102110000000000000000" },
+          { "benchmark_id": "bench_b11", "amount": "102110000000000000000" }
+        ],
+        "reserved_exposure": "204220000000000000000",
+        "proposed_precommit_reserve": "102110000000000000000"
+      },
+      "action_or_event": "Controller runs the admission check for a third precommit intent while bench_b10 and bench_b11 are both unresolved.",
+      "expected": {
+        "admission": "denied",
+        "unreserved_before": "45780000000000000000",
+        "reserved_exposure_after": "204220000000000000000",
+        "derivation": "250 - 204.22 = 45.78 TIG < 102.11 TIG, so the check fails. No reservation is created and no precommit intent exists. Existing reservations are unchanged."
+      },
+      "rule": "accounting.md §11.4 (admission inequality; one reservation never collateralizes several simultaneous risks); mining_system.md §6.1"
+    },
+    {
+      "name": "insufficient_balance_after_pending_return_and_freeze",
+      "description": "Eligible collateral subtracts pending returns and frozen charge/slash amounts before the admission check; the raw finalized deposit alone would have passed.",
+      "input_state": {
+        "member_id": "member_m03",
+        "finalized_security_deposit_liability": "120000000000000000000",
+        "pending_returns": "10000000000000000000",
+        "frozen_charge_or_slash": "15000000000000000000",
+        "reserved_exposure": "0",
+        "proposed_precommit_reserve": "102110000000000000000"
+      },
+      "action_or_event": "Controller runs the admission check for a first precommit intent.",
+      "expected": {
+        "eligible_collateral": "95000000000000000000",
+        "admission": "denied",
+        "derivation": "eligible_collateral = 120 - 10 - 15 = 95 TIG. 95 - 0 = 95 TIG < precommit_reserve 102.11 TIG, so admission fails even though the raw finalized deposit (120 TIG) exceeds the reserve."
+      },
+      "rule": "accounting.md §11.4 (eligible_collateral[m] = finalized security-deposit liability - pending returns - frozen charge/slash amounts; admission inequality)"
+    },
+    {
+      "name": "new_tier_fee_does_not_bypass_collateral_gate",
+      "description": "A removed member rejoins by paying J[k] again; the fee debit reduces the deposit, the pre-removal reservation persists, and the ordinary collateral gate still denies new work.",
+      "input_state": {
+        "member_id": "member_m04",
+        "finalized_security_deposit_liability_before_fee": "50000000000000000000",
+        "rejoin_fee_J2": "5000000000000000000",
+        "open_reservations": [
+          { "benchmark_id": "bench_b20", "amount": "42090000000000000000", "note": "created before tier removal; not cleared by removal or repurchase" }
+        ],
+        "proposed_precommit_reserve": "42090000000000000000"
+      },
+      "action_or_event": "Member pays J[2] again immediately after removal, then requests new work.",
+      "expected": {
+        "finalized_after_fee": "45000000000000000000",
+        "eligible_minus_reserved": "2910000000000000000",
+        "admission": "denied",
+        "derivation": "Fee debit: 50 - 5 = 45 TIG finalized. 45 - 42.09 (open reservation, unaffected by removal/rejoin) = 2.91 TIG < 42.09 TIG, so admission fails. The newly paid joining fee changes nothing in the collateral gate."
+      },
+      "rule": "accounting.md §11.6 (a newly paid tier fee never bypasses that gate) and §11.3 (rejoining does not release or reset outstanding reservations); mining_system.md §6.1 (a deposit or newly paid joining fee does not erase an outstanding liability) and §10 invariant 24"
+    },
+    {
+      "name": "live_penalty_change_pauses_new_precommits",
+      "description": "penalty_amount changes on the newly accepted block; new precommits pause until compatibility review, while the already-open reservation keeps its recorded value.",
+      "input_state": {
+        "block_before": { "height": 100090, "penalty_amount": "10000000000000000000" },
+        "block_after": { "height": 100091, "penalty_amount": "12000000000000000000" },
+        "open_reservations": [
+          {
+            "benchmark_id": "bench_b30",
+            "member_id": "member_m05",
+            "amount": "102110000000000000000",
+            "recorded_penalty_amount": "10000000000000000000",
+            "recorded_policy_version": "policy_v1_fixture"
+          }
+        ]
+      },
+      "action_or_event": "Pool reads penalty_amount at accepted block 100091 and observes it changed from 10 TIG to 12 TIG.",
+      "expected": {
+        "new_precommits": "paused until compatibility has been reviewed and requirements recomputed",
+        "open_reservation_amount_after_change": "102110000000000000000",
+        "open_reservation_recorded_P": "10000000000000000000",
+        "derivation": "The change alone pauses admission of new precommits. The open reservation is not recomputed: its amount and recorded P/policy version are unchanged by the live change."
+      },
+      "rule": "accounting.md §11.5 (the pool reads penalty_amount every accepted block, records the exact value and policy used by each reservation, and any change immediately pauses new precommits until compatibility has been reviewed and requirements recomputed)"
+    },
+    {
+      "name": "penalty_change_mid_flight_no_retroactive_increase",
+      "description": "After review resumes precommits at the new penalty, the mid-flight benchmark's reservation is still settled at its own assignment-snapshot values; only new decisions use the new P.",
+      "input_state": {
+        "member_id": "member_m05",
+        "mid_flight_reservation": {
+          "benchmark_id": "bench_b30",
+          "amount": "102110000000000000000",
+          "recorded_penalty_amount": "10000000000000000000"
+        },
+        "confirmed_track_for_b30": "t001",
+        "confirmed_num_bundles_b30": 4,
+        "confirmed_fee_paid_b30": "90000000000000000",
+        "resumed_penalty_amount": "12000000000000000000",
+        "new_proposal_after_resume": { "track_id": "t001", "num_bundles": 4, "fee_F": "90000000000000000" }
+      },
+      "action_or_event": "TIG confirms bench_b30's track after the penalty change; the pool separately admits a new benchmark under the reviewed P = 12 TIG.",
+      "expected": {
+        "b30_reservation_after_confirmation": "42090000000000000000",
+        "b30_uses_new_penalty": false,
+        "new_assignment_reserve_t001": "50090000000000000000",
+        "derivation": "bench_b30 reduces to its assignment-snapshot exact requirement 10*4 + 0.09 + 2 = 42.09 TIG; applying the later P = 12 TIG to it is forbidden. The new benchmark's reserve uses the new snapshot: 12*4 + 0.09 + 2 = 50.09 TIG. Whether TIG itself can apply a later penalty retroactively to an open benchmark is an open spike question (see README) — this case asserts only pool-side reservation behavior."
+      },
+      "rule": "accounting.md §11.4 (never increased by silently applying a later pool policy) and §11.5 (retroactivity of TIG report penalties is an explicit pre-mainnet spike question; residual risk is handled by a configured buffer, not by retroactively enlarging the member's reservation)"
+    },
+    {
+      "name": "reservation_release_split_X_vs_method",
+      "description": "On TIG verification without a chargeable tier failure the X portion of the reservation releases, while the method portion stays reserved until the benchmark can no longer generate a method-verification penalty and every report/arbitration is terminal.",
+      "input_state": {
+        "member_id": "member_m06",
+        "benchmark_id": "bench_b40",
+        "open_reservation": "42090000000000000000",
+        "reservation_parts": {
+          "method_reserve": "40000000000000000000",
+          "fee_F": "90000000000000000",
+          "failure_charge_X": "2000000000000000000"
+        },
+        "reports_terminal": false
+      },
+      "action_or_event": "TIG records bench_b40 as verified; no chargeable tier failure is attributed to the member.",
+      "expected": {
+        "released_X_portion": "2000000000000000000",
+        "still_reserved_method_portion": "40000000000000000000",
+        "method_release_condition": "benchmark can no longer generate a method-verification penalty and every report/arbitration is terminal",
+        "derivation": "The X portion (2 TIG) releases on verification without a chargeable failure. The method portion (40 TIG) remains reserved because reports are not yet terminal."
+      },
+      "rule": "accounting.md §11.4 (the method portion remains reserved until the benchmark can no longer generate a method-verification penalty and every report/arbitration is terminal; the X portion releases when TIG verifies the benchmark without a chargeable tier failure)"
+    }
+  ]
+}

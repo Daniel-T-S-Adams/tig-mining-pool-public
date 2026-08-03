@@ -86,10 +86,16 @@ fake server if the spike shows that path matters.
 Recorded per `docs/tig_integration.md` §1 (OpenAPI alone is not authoritative):
 
 1. **Response envelopes** — each response nests under a top-level resource key
-   (`{"block": …}`, `{"challenges": […]}`). Verify against live testnet and
-   correct in a `v2` fixture if wrong.
-2. **`get-algorithms` shape** — assumed to merge the upstream `Code` struct
-   with its confirmed `Binary` under a `binary` key. Verify.
+   (`{"block": …}`, `{"challenges": […]}`). **Partially verified live
+   (2026-08-03, S1):** holds for `get-block`, `get-challenges`,
+   `get-benchmarks`; but `get-player-data` adds top-level `deposits` and
+   `round_earnings` beside `player`, and `get-algorithms` is refuted — see 2.
+2. **`get-algorithms` shape** — assumed to merge `Code` + `Binary` under a
+   `binary` key. **Refuted live (2026-08-03, S1):** the real envelope is
+   `{"advances": […], "binarys": […], "codes": […], "player_details": …}` —
+   codes and binaries are separate arrays joined by `algorithm_id`. A `v2`
+   fixture must adopt this shape; consumers of `get-algorithms.json` v1
+   should treat its shape as historical.
 3. **Enum key casing** — `TxType`/`ActiveType` map keys are lowercase
    (`"precommit"`, `"benchmark"`), per upstream serde attributes. Verify on
    the wire.

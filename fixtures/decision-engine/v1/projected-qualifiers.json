@@ -1,0 +1,334 @@
+{
+  "_comment": "Decision-engine fixture v1: projected qualifiers from confirmed in-flight benchmarks (issue #3). Rule: docs/mining_system.md §6.3 — qualifier_rate[a,t] = qualifiers[a,t] / active_bundles[a,t]; expected_q[j] = num_bundles[j] * qualifier_rate; expected_addition[c] = sum over confirmed in-flight benchmarks in c; projected_raw_factor[c] = (pool_q + addition) / (network_q + addition), 0 when the denominator sum is 0. Only benchmarks matching §2 'In-flight benchmark' (confirmed precommit, TIG-selected track known, not yet active or terminal) contribute; §6.3 restates 'whose selected algorithm and track are known'. V0 makes no legacy-multiplier, competitor, active-quality, verification, or confidence adjustments. Values are exact fractions; decimals are approximations. All randomness is supplied explicitly in the input.",
+  "cases": [
+    {
+      "name": "multiple_in_flight_flip_selection",
+      "description": "Two confirmed in-flight benchmarks in c501 project 8 additional qualifiers, lifting its projected factor from 0.1 to 0.25 and flipping the selection to c502, which the raw factors alone would not have chosen.",
+      "rule": "mining_system.md §6.3: expected_q[j1] = 10 * (6/12) = 5; expected_q[j2] = 4 * (3/4) = 3; expected_addition[c501] = 8; projected[c501] = (4+8)/(40+8) = 12/48 = 1/4; projected[c502] = 6/50 (no in-flight); choose the lowest projected factor.",
+      "input": {
+        "block": { "id": "block_200020", "height": 200020, "round": 901 },
+        "offered_compute": { "type": "cpu", "cpu_cores": 8 },
+        "challenges": [
+          {
+            "id": "c501",
+            "type": "cpu",
+            "active_tracks": { "t1": { "num_nonces_per_bundle": 40 }, "t2": { "num_nonces_per_bundle": 80 } },
+            "min_num_bundles": 1,
+            "network_qualifiers_by_track": { "t1": 25, "t2": 15 }
+          },
+          {
+            "id": "c502",
+            "type": "cpu",
+            "active_tracks": { "t3": { "num_nonces_per_bundle": 25 } },
+            "min_num_bundles": 2,
+            "network_qualifiers_by_track": { "t3": 50 }
+          }
+        ],
+        "pool_qualifiers_by_challenge_by_track": {
+          "c501": { "t1": 3, "t2": 1 },
+          "c502": { "t3": 6 }
+        },
+        "algorithm_track_stats": {
+          "a501": {
+            "t1": { "qualifiers": 6, "active_bundles": 12 },
+            "t2": { "qualifiers": 3, "active_bundles": 4 }
+          }
+        },
+        "hyperparameter_sources_available": { "c501": ["t1", "t2"], "c502": ["t3"] },
+        "confirmed_in_flight_benchmarks": [
+          { "benchmark_id": "bmk_00101", "challenge_id": "c501", "algorithm_id": "a501", "track_id": "t1", "num_bundles": 10 },
+          { "benchmark_id": "bmk_00102", "challenge_id": "c501", "algorithm_id": "a501", "track_id": "t2", "num_bundles": 4 }
+        ],
+        "supplied_randomness": { "challenge_tie_draw_ranks": {} }
+      },
+      "expected": {
+        "qualifier_rate": {
+          "a501": {
+            "t1": { "fraction": "6/12", "decimal_approx": 0.5 },
+            "t2": { "fraction": "3/4", "decimal_approx": 0.75 }
+          }
+        },
+        "expected_q": { "bmk_00101": 5, "bmk_00102": 3 },
+        "expected_addition": { "c501": 8, "c502": 0 },
+        "projected_raw_factor": {
+          "c501": { "fraction": "12/48", "decimal_approx": 0.25 },
+          "c502": { "fraction": "6/50", "decimal_approx": 0.12 }
+        },
+        "raw_factor_for_contrast": {
+          "c501": { "fraction": "4/40", "decimal_approx": 0.1 },
+          "c502": { "fraction": "6/50", "decimal_approx": 0.12 }
+        },
+        "tie_candidates": null,
+        "selected_challenge": "c502"
+      }
+    },
+    {
+      "name": "in_flight_without_active_bundles_adds_zero",
+      "description": "The in-flight benchmark's algorithm and track have no active bundles, so its qualifier rate is unavailable and its expected addition is zero; c501's projected factor stays at its raw value and it remains selected.",
+      "rule": "mining_system.md §6.3: 'If there are no active bundles for that algorithm and track, its rate is unavailable and its expected addition is zero.' projected[c501] = (2+0)/(20+0) = 2/20; projected[c502] = 3/20.",
+      "input": {
+        "block": { "id": "block_200021", "height": 200021, "round": 901 },
+        "offered_compute": { "type": "cpu", "cpu_cores": 8 },
+        "challenges": [
+          {
+            "id": "c501",
+            "type": "cpu",
+            "active_tracks": { "t1": { "num_nonces_per_bundle": 40 } },
+            "min_num_bundles": 1,
+            "network_qualifiers_by_track": { "t1": 20 }
+          },
+          {
+            "id": "c502",
+            "type": "cpu",
+            "active_tracks": { "t3": { "num_nonces_per_bundle": 25 } },
+            "min_num_bundles": 2,
+            "network_qualifiers_by_track": { "t3": 20 }
+          }
+        ],
+        "pool_qualifiers_by_challenge_by_track": {
+          "c501": { "t1": 2 },
+          "c502": { "t3": 3 }
+        },
+        "algorithm_track_stats": {
+          "a501": { "t1": { "qualifiers": 0, "active_bundles": 0 } }
+        },
+        "hyperparameter_sources_available": { "c501": ["t1"], "c502": ["t3"] },
+        "confirmed_in_flight_benchmarks": [
+          { "benchmark_id": "bmk_00111", "challenge_id": "c501", "algorithm_id": "a501", "track_id": "t1", "num_bundles": 6 }
+        ],
+        "supplied_randomness": { "challenge_tie_draw_ranks": {} }
+      },
+      "expected": {
+        "qualifier_rate": { "a501": { "t1": null } },
+        "expected_q": { "bmk_00111": 0 },
+        "expected_addition": { "c501": 0, "c502": 0 },
+        "projected_raw_factor": {
+          "c501": { "fraction": "2/20", "decimal_approx": 0.1 },
+          "c502": { "fraction": "3/20", "decimal_approx": 0.15 }
+        },
+        "tie_candidates": null,
+        "selected_challenge": "c501"
+      }
+    },
+    {
+      "name": "zero_denominator_branches_with_and_without_additions",
+      "description": "Three challenges: c601 has zero network qualifiers but a projected addition of 5, giving projected factor (0+5)/(0+5) = 1 — the pool would own the whole projected qualifier set. c603 has zero counts and no in-flight, hitting the explicit zero branch (factor 0) and winning over c602's 0.1.",
+      "rule": "mining_system.md §6.3: projected_raw_factor = 0 only if network_q + expected_addition = 0; otherwise (pool_q + addition)/(network_q + addition) — our expected qualifiers appear in both numerator and denominator. c601: (0+5)/(0+5) = 1; c602: 5/50; c603: zero branch = 0.",
+      "input": {
+        "block": { "id": "block_200022", "height": 200022, "round": 901 },
+        "offered_compute": { "type": "cpu", "cpu_cores": 8 },
+        "challenges": [
+          {
+            "id": "c601",
+            "type": "cpu",
+            "active_tracks": { "t1": { "num_nonces_per_bundle": 40 } },
+            "min_num_bundles": 1,
+            "network_qualifiers_by_track": { "t1": 0 }
+          },
+          {
+            "id": "c602",
+            "type": "cpu",
+            "active_tracks": { "t2": { "num_nonces_per_bundle": 20 } },
+            "min_num_bundles": 1,
+            "network_qualifiers_by_track": { "t2": 50 }
+          },
+          {
+            "id": "c603",
+            "type": "cpu",
+            "active_tracks": { "t3": { "num_nonces_per_bundle": 10 } },
+            "min_num_bundles": 1,
+            "network_qualifiers_by_track": { "t3": 0 }
+          }
+        ],
+        "pool_qualifiers_by_challenge_by_track": {
+          "c601": { "t1": 0 },
+          "c602": { "t2": 5 },
+          "c603": { "t3": 0 }
+        },
+        "algorithm_track_stats": {
+          "a601": { "t1": { "qualifiers": 5, "active_bundles": 10 } }
+        },
+        "hyperparameter_sources_available": { "c601": ["t1"], "c602": ["t2"], "c603": ["t3"] },
+        "confirmed_in_flight_benchmarks": [
+          { "benchmark_id": "bmk_00121", "challenge_id": "c601", "algorithm_id": "a601", "track_id": "t1", "num_bundles": 10 }
+        ],
+        "supplied_randomness": { "challenge_tie_draw_ranks": {} }
+      },
+      "expected": {
+        "qualifier_rate": { "a601": { "t1": { "fraction": "5/10", "decimal_approx": 0.5 } } },
+        "expected_q": { "bmk_00121": 5 },
+        "expected_addition": { "c601": 5, "c602": 0, "c603": 0 },
+        "projected_raw_factor": {
+          "c601": { "fraction": "5/5", "decimal_approx": 1.0 },
+          "c602": { "fraction": "5/50", "decimal_approx": 0.1 },
+          "c603": { "fraction": "0", "decimal_approx": 0.0, "branch": "network_q + expected_addition = 0" }
+        },
+        "tie_candidates": null,
+        "selected_challenge": "c603"
+      }
+    },
+    {
+      "name": "fractional_expected_additions_summed_exactly",
+      "description": "Two in-flight benchmarks with non-integer expected qualifiers (35/12 and 4/3) sum to 51/12 = 17/4; the projected factor 29/137 (about 0.2117) narrowly exceeds c702's 0.2, so c702 is selected. Compares must use the exact ratios (or a representation faithful enough for this margin).",
+      "rule": "mining_system.md §6.3: expected_q[bmk_00131] = 7 * (5/12) = 35/12; expected_q[bmk_00132] = 3 * (4/9) = 4/3; expected_addition[c701] = 35/12 + 16/12 = 51/12 = 17/4; projected[c701] = (3 + 17/4)/(30 + 17/4) = (29/4)/(137/4) = 29/137; projected[c702] = 8/40 = 1/5; 29/137 > 1/5, choose c702.",
+      "input": {
+        "block": { "id": "block_200023", "height": 200023, "round": 901 },
+        "offered_compute": { "type": "cpu", "cpu_cores": 8 },
+        "challenges": [
+          {
+            "id": "c701",
+            "type": "cpu",
+            "active_tracks": { "t1": { "num_nonces_per_bundle": 40 }, "t2": { "num_nonces_per_bundle": 20 } },
+            "min_num_bundles": 1,
+            "network_qualifiers_by_track": { "t1": 18, "t2": 12 }
+          },
+          {
+            "id": "c702",
+            "type": "cpu",
+            "active_tracks": { "t3": { "num_nonces_per_bundle": 25 } },
+            "min_num_bundles": 1,
+            "network_qualifiers_by_track": { "t3": 40 }
+          }
+        ],
+        "pool_qualifiers_by_challenge_by_track": {
+          "c701": { "t1": 2, "t2": 1 },
+          "c702": { "t3": 8 }
+        },
+        "algorithm_track_stats": {
+          "a701": { "t1": { "qualifiers": 5, "active_bundles": 12 } },
+          "a702": { "t2": { "qualifiers": 4, "active_bundles": 9 } }
+        },
+        "hyperparameter_sources_available": { "c701": ["t1", "t2"], "c702": ["t3"] },
+        "confirmed_in_flight_benchmarks": [
+          { "benchmark_id": "bmk_00131", "challenge_id": "c701", "algorithm_id": "a701", "track_id": "t1", "num_bundles": 7 },
+          { "benchmark_id": "bmk_00132", "challenge_id": "c701", "algorithm_id": "a702", "track_id": "t2", "num_bundles": 3 }
+        ],
+        "supplied_randomness": { "challenge_tie_draw_ranks": {} }
+      },
+      "expected": {
+        "qualifier_rate": {
+          "a701": { "t1": { "fraction": "5/12", "decimal_approx": 0.41667 } },
+          "a702": { "t2": { "fraction": "4/9", "decimal_approx": 0.44444 } }
+        },
+        "expected_q": {
+          "bmk_00131": { "fraction": "35/12", "decimal_approx": 2.91667 },
+          "bmk_00132": { "fraction": "4/3", "decimal_approx": 1.33333 }
+        },
+        "expected_addition": {
+          "c701": { "fraction": "17/4", "decimal_approx": 4.25 },
+          "c702": 0
+        },
+        "projected_raw_factor": {
+          "c701": { "fraction": "29/137", "decimal_approx": 0.21168 },
+          "c702": { "fraction": "8/40", "decimal_approx": 0.2 }
+        },
+        "tie_candidates": null,
+        "selected_challenge": "c702"
+      }
+    },
+    {
+      "name": "unknown_track_benchmark_excluded_from_projection",
+      "description": "bmk_00142's TIG-selected track is not yet known, so it is not an in-flight benchmark for projection and contributes nothing. Only bmk_00141 adds its expected 2 qualifiers; c801 stays lowest and is selected. (Had bmk_00142 been wrongly projected at its algorithm's t1 rate, c801 would have risen to 9/25 = 0.36 and lost to c802.)",
+      "rule": "mining_system.md §2 'In-flight benchmark': the TIG-selected track must be known; §6.3: 'For each confirmed in-flight benchmark j whose selected algorithm and track are known'. projected[c801] = (2+2)/(18+2) = 4/20; projected[c802] = 5/20.",
+      "input": {
+        "block": { "id": "block_200024", "height": 200024, "round": 901 },
+        "offered_compute": { "type": "cpu", "cpu_cores": 8 },
+        "challenges": [
+          {
+            "id": "c801",
+            "type": "cpu",
+            "active_tracks": { "t1": { "num_nonces_per_bundle": 40 } },
+            "min_num_bundles": 1,
+            "network_qualifiers_by_track": { "t1": 18 }
+          },
+          {
+            "id": "c802",
+            "type": "cpu",
+            "active_tracks": { "t3": { "num_nonces_per_bundle": 25 } },
+            "min_num_bundles": 2,
+            "network_qualifiers_by_track": { "t3": 20 }
+          }
+        ],
+        "pool_qualifiers_by_challenge_by_track": {
+          "c801": { "t1": 2 },
+          "c802": { "t3": 5 }
+        },
+        "algorithm_track_stats": {
+          "a801": { "t1": { "qualifiers": 4, "active_bundles": 8 } }
+        },
+        "hyperparameter_sources_available": { "c801": ["t1"], "c802": ["t3"] },
+        "confirmed_in_flight_benchmarks": [
+          { "benchmark_id": "bmk_00141", "challenge_id": "c801", "algorithm_id": "a801", "track_id": "t1", "num_bundles": 4 },
+          { "benchmark_id": "bmk_00142", "challenge_id": "c801", "algorithm_id": "a801", "track_id": null, "num_bundles": 10 }
+        ],
+        "supplied_randomness": { "challenge_tie_draw_ranks": {} }
+      },
+      "expected": {
+        "qualifier_rate": { "a801": { "t1": { "fraction": "4/8", "decimal_approx": 0.5 } } },
+        "expected_q": { "bmk_00141": 2 },
+        "excluded": { "bmk_00142": "TIG-selected track unknown (§2 in-flight definition, §6.3)" },
+        "expected_addition": { "c801": 2, "c802": 0 },
+        "projected_raw_factor": {
+          "c801": { "fraction": "4/20", "decimal_approx": 0.2 },
+          "c802": { "fraction": "5/20", "decimal_approx": 0.25 }
+        },
+        "tie_candidates": null,
+        "selected_challenge": "c801"
+      }
+    },
+    {
+      "name": "projected_tie_resolved_by_supplied_draw_ranks",
+      "description": "Both challenges project to exactly 1/4 after their in-flight additions ((2+2)/(14+2) and (3+1)/(15+1)), producing a tie that the supplied draw ranks resolve: c902's rank 23 beats c901's 58 (smallest rank wins, fixture convention).",
+      "rule": "mining_system.md §6.3: projected[c901] = (2+2)/(14+2) = 4/16 = 1/4 with expected_q[bmk_00151] = 4 * (2/4) = 2; projected[c902] = (3+1)/(15+1) = 4/16 = 1/4 with expected_q[bmk_00152] = 2 * (3/6) = 1; ties are resolved with the recorded random value (architecture.md §3: supplied, never generated). Smallest supplied rank wins (README open question 1).",
+      "input": {
+        "block": { "id": "block_200025", "height": 200025, "round": 901 },
+        "offered_compute": { "type": "cpu", "cpu_cores": 8 },
+        "challenges": [
+          {
+            "id": "c901",
+            "type": "cpu",
+            "active_tracks": { "t1": { "num_nonces_per_bundle": 40 } },
+            "min_num_bundles": 1,
+            "network_qualifiers_by_track": { "t1": 14 }
+          },
+          {
+            "id": "c902",
+            "type": "cpu",
+            "active_tracks": { "t2": { "num_nonces_per_bundle": 20 } },
+            "min_num_bundles": 1,
+            "network_qualifiers_by_track": { "t2": 15 }
+          }
+        ],
+        "pool_qualifiers_by_challenge_by_track": {
+          "c901": { "t1": 2 },
+          "c902": { "t2": 3 }
+        },
+        "algorithm_track_stats": {
+          "a901": { "t1": { "qualifiers": 2, "active_bundles": 4 } },
+          "a902": { "t2": { "qualifiers": 3, "active_bundles": 6 } }
+        },
+        "hyperparameter_sources_available": { "c901": ["t1"], "c902": ["t2"] },
+        "confirmed_in_flight_benchmarks": [
+          { "benchmark_id": "bmk_00151", "challenge_id": "c901", "algorithm_id": "a901", "track_id": "t1", "num_bundles": 4 },
+          { "benchmark_id": "bmk_00152", "challenge_id": "c902", "algorithm_id": "a902", "track_id": "t2", "num_bundles": 2 }
+        ],
+        "supplied_randomness": { "challenge_tie_draw_ranks": { "c901": 58, "c902": 23 } }
+      },
+      "expected": {
+        "qualifier_rate": {
+          "a901": { "t1": { "fraction": "2/4", "decimal_approx": 0.5 } },
+          "a902": { "t2": { "fraction": "3/6", "decimal_approx": 0.5 } }
+        },
+        "expected_q": { "bmk_00151": 2, "bmk_00152": 1 },
+        "expected_addition": { "c901": 2, "c902": 1 },
+        "projected_raw_factor": {
+          "c901": { "fraction": "4/16", "decimal_approx": 0.25 },
+          "c902": { "fraction": "4/16", "decimal_approx": 0.25 }
+        },
+        "tie_candidates": ["c901", "c902"],
+        "tie_resolution": "smallest supplied draw rank: c902 (23) < c901 (58)",
+        "selected_challenge": "c902"
+      }
+    }
+  ]
+}

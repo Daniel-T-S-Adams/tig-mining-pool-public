@@ -1,0 +1,200 @@
+{
+  "_comment": "Decision-engine fixture v1: algorithm selection and track-specific performance (issue #3). Rules: docs/mining_system.md §6.4 (challenge-wide algorithm choice by adoption) and §6.5 (track-specific qualifier rate, best-on-track). Adoption values are PreciseNumber decimal strings exactly as in fixtures/tig/v1/get-algorithms.json block_data.adoption. algorithm_track_stats maps derive from get-algorithms num_qualifiers_by_track_by_player (summed over players) and get-tracks-data num_bundles; see README.md. Tie direction (smallest algorithm_id wins) is a recorded convention, see README open question 2.",
+  "cases": [
+    {
+      "name": "highest_adoption_wins",
+      "description": "Three eligible algorithms; the one with the highest challenge-wide adoption is selected.",
+      "rule": "mining_system.md §6.4 step 3: 'select the algorithm with the highest current challenge-wide adoption'.",
+      "input": {
+        "selected_challenge": "c101",
+        "algorithms": [
+          { "id": "a201", "banned": false, "has_successful_binary": true, "adoption": "600000000000000000" },
+          { "id": "a202", "banned": false, "has_successful_binary": true, "adoption": "300000000000000000" },
+          { "id": "a203", "banned": false, "has_successful_binary": true, "adoption": "100000000000000000" }
+        ]
+      },
+      "expected": {
+        "candidates_after_filters": ["a201", "a202", "a203"],
+        "selected_algorithm": "a201"
+      }
+    },
+    {
+      "name": "zero_adoption_ignored",
+      "description": "An algorithm with zero challenge-wide adoption is ignored even though it is active with a usable binary; the only positive-adoption algorithm wins.",
+      "rule": "mining_system.md §6.4 step 2: 'ignore algorithms whose current challenge-wide adoption is zero'.",
+      "input": {
+        "selected_challenge": "c101",
+        "algorithms": [
+          { "id": "a201", "banned": false, "has_successful_binary": true, "adoption": "0" },
+          { "id": "a202", "banned": false, "has_successful_binary": true, "adoption": "200000000000000000" }
+        ]
+      },
+      "expected": {
+        "candidates_after_filters": ["a202"],
+        "excluded": { "a201": "adoption is zero (§6.4 step 2)" },
+        "selected_algorithm": "a202"
+      }
+    },
+    {
+      "name": "all_zero_adoption_challenge_ineligible",
+      "description": "Every otherwise-usable algorithm has zero adoption, so no algorithm can be selected and the challenge has no eligible algorithm, making it ineligible for challenge selection.",
+      "rule": "mining_system.md §6.4 step 2 leaves no candidate; §6.2: 'A challenge is eligible only when the pool can construct valid settings for every active track using an eligible algorithm'.",
+      "input": {
+        "selected_challenge": "c101",
+        "algorithms": [
+          { "id": "a201", "banned": false, "has_successful_binary": true, "adoption": "0" },
+          { "id": "a202", "banned": false, "has_successful_binary": true, "adoption": "0" }
+        ]
+      },
+      "expected": {
+        "candidates_after_filters": [],
+        "selected_algorithm": null,
+        "challenge_eligibility": "ineligible"
+      }
+    },
+    {
+      "name": "banned_and_missing_binary_filtered_before_adoption",
+      "description": "The two highest-adoption algorithms are excluded (one banned, one without a usable successful binary); the remaining clean algorithm is selected despite lower adoption.",
+      "rule": "mining_system.md §6.4 step 1: 'keep active, non-banned algorithms with a usable successful binary' — filtering precedes the adoption comparison in step 3.",
+      "input": {
+        "selected_challenge": "c101",
+        "algorithms": [
+          { "id": "a201", "banned": true, "has_successful_binary": true, "adoption": "900000000000000000" },
+          { "id": "a202", "banned": false, "has_successful_binary": false, "adoption": "800000000000000000" },
+          { "id": "a203", "banned": false, "has_successful_binary": true, "adoption": "500000000000000000" }
+        ]
+      },
+      "expected": {
+        "candidates_after_filters": ["a203"],
+        "excluded": {
+          "a201": "banned = true (§6.4 step 1)",
+          "a202": "no usable successful binary (§6.4 step 1)"
+        },
+        "selected_algorithm": "a203"
+      }
+    },
+    {
+      "name": "adoption_tie_resolved_by_algorithm_id",
+      "description": "Two algorithms tie on adoption; the tie is resolved deterministically by algorithm_id — the smallest id wins (recorded convention, README open question 2).",
+      "rule": "mining_system.md §6.4 step 4: 'resolve equal adoption deterministically by algorithm_id'. The direction (lexicographically smallest id wins) is a recorded fixture convention because §6.4 does not state it.",
+      "input": {
+        "selected_challenge": "c101",
+        "algorithms": [
+          { "id": "a205", "banned": false, "has_successful_binary": true, "adoption": "400000000000000000" },
+          { "id": "a203", "banned": false, "has_successful_binary": true, "adoption": "400000000000000000" }
+        ]
+      },
+      "expected": {
+        "candidates_after_filters": ["a203", "a205"],
+        "tie_candidates": ["a203", "a205"],
+        "tie_resolution": "deterministic by algorithm_id, smallest wins",
+        "selected_algorithm": "a203"
+      }
+    },
+    {
+      "name": "track_best_by_highest_rate_does_not_change_selection",
+      "description": "a201 wins challenge-wide selection by adoption, but a202 has the higher qualifier rate on track t1 and is best on that track. The track-best result does not change the selected algorithm; it only feeds the CPU bundle-count rule.",
+      "rule": "mining_system.md §6.5: track_qualifier_rate[a,t] = qualifiers[a,t] / active_bundles[a,t]; best on track = greatest available rate; 'This track-best result does not change the already selected challenge-wide algorithm.' §6.4 selects a201 by adoption.",
+      "input": {
+        "selected_challenge": "c101",
+        "algorithms": [
+          { "id": "a201", "banned": false, "has_successful_binary": true, "adoption": "600000000000000000" },
+          { "id": "a202", "banned": false, "has_successful_binary": true, "adoption": "300000000000000000" }
+        ],
+        "algorithm_track_stats": {
+          "a201": { "t1": { "qualifiers": 6, "active_bundles": 12 } },
+          "a202": { "t1": { "qualifiers": 5, "active_bundles": 8 } }
+        }
+      },
+      "expected": {
+        "selected_algorithm": "a201",
+        "track_qualifier_rate": {
+          "t1": {
+            "a201": { "fraction": "6/12", "decimal_approx": 0.5 },
+            "a202": { "fraction": "5/8", "decimal_approx": 0.625 }
+          }
+        },
+        "best_on_track": { "t1": "a202" },
+        "selected_algorithm_is_best_on_track": { "t1": false }
+      }
+    },
+    {
+      "name": "no_active_bundles_no_usable_rate",
+      "description": "On track t2 the algorithm a201 has no active bundles, so it has no usable rate and cannot be best; a202, with the only available rate, is best on the track.",
+      "rule": "mining_system.md §6.5: 'Algorithms with no active bundles on the track do not have a usable rate. An algorithm is best on the track when it has the greatest available rate.'",
+      "input": {
+        "selected_challenge": "c101",
+        "algorithms": [
+          { "id": "a201", "banned": false, "has_successful_binary": true, "adoption": "600000000000000000" },
+          { "id": "a202", "banned": false, "has_successful_binary": true, "adoption": "300000000000000000" }
+        ],
+        "algorithm_track_stats": {
+          "a201": { "t2": { "qualifiers": 0, "active_bundles": 0 } },
+          "a202": { "t2": { "qualifiers": 2, "active_bundles": 10 } }
+        }
+      },
+      "expected": {
+        "selected_algorithm": "a201",
+        "track_qualifier_rate": {
+          "t2": {
+            "a201": null,
+            "a202": { "fraction": "2/10", "decimal_approx": 0.2 }
+          }
+        },
+        "best_on_track": { "t2": "a202" },
+        "selected_algorithm_is_best_on_track": { "t2": false }
+      }
+    },
+    {
+      "name": "no_algorithm_has_active_bundles_no_track_best",
+      "description": "No eligible algorithm has active bundles on track t9, so no algorithm has a usable rate and there is no best algorithm on that track. In particular the selected algorithm is not best on t9, which forces min_num_bundles on t9 for a CPU member (§6.7).",
+      "rule": "mining_system.md §6.5: algorithms without active bundles have no usable rate; with no available rate there is no best-on-track algorithm.",
+      "input": {
+        "selected_challenge": "c101",
+        "algorithms": [
+          { "id": "a201", "banned": false, "has_successful_binary": true, "adoption": "600000000000000000" },
+          { "id": "a202", "banned": false, "has_successful_binary": true, "adoption": "300000000000000000" }
+        ],
+        "algorithm_track_stats": {
+          "a201": { "t9": { "qualifiers": 0, "active_bundles": 0 } },
+          "a202": { "t9": { "qualifiers": 0, "active_bundles": 0 } }
+        }
+      },
+      "expected": {
+        "selected_algorithm": "a201",
+        "track_qualifier_rate": { "t9": { "a201": null, "a202": null } },
+        "best_on_track": { "t9": null },
+        "selected_algorithm_is_best_on_track": { "t9": false }
+      }
+    },
+    {
+      "name": "track_rate_tie_resolved_by_algorithm_id",
+      "description": "Two algorithms have the same qualifier rate (1/2) on track t3 from different counts; the tie is resolved deterministically by algorithm_id — smallest id wins (recorded convention, README open question 2).",
+      "rule": "mining_system.md §6.5: 'Ties are resolved deterministically by algorithm_id.' Rates compare as exact ratios: 2/4 = 3/6.",
+      "input": {
+        "selected_challenge": "c101",
+        "algorithms": [
+          { "id": "a201", "banned": false, "has_successful_binary": true, "adoption": "500000000000000000" },
+          { "id": "a203", "banned": false, "has_successful_binary": true, "adoption": "400000000000000000" }
+        ],
+        "algorithm_track_stats": {
+          "a201": { "t3": { "qualifiers": 2, "active_bundles": 4 } },
+          "a203": { "t3": { "qualifiers": 3, "active_bundles": 6 } }
+        }
+      },
+      "expected": {
+        "selected_algorithm": "a201",
+        "track_qualifier_rate": {
+          "t3": {
+            "a201": { "fraction": "2/4", "decimal_approx": 0.5 },
+            "a203": { "fraction": "3/6", "decimal_approx": 0.5 }
+          }
+        },
+        "tie_candidates": ["a201", "a203"],
+        "tie_resolution": "deterministic by algorithm_id, smallest wins",
+        "best_on_track": { "t3": "a201" },
+        "selected_algorithm_is_best_on_track": { "t3": true }
+      }
+    }
+  ]
+}

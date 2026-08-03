@@ -1,0 +1,297 @@
+{
+  "_comment": "Decision-engine fixture v1: challenge selection (issue #3). Rules: docs/mining_system.md §6.2 (compute compatibility, eligibility), §6.3 (projected raw balancing factor, random tie), §6.6 (missing hyperparameter source makes a challenge ineligible). Inputs are reduced synthetic snapshots; field-to-endpoint mapping is in README.md. All randomness is supplied explicitly in the input (docs/architecture.md §3: the Decision Engine owns no 'random values not supplied explicitly'). Factors are recorded as exact fractions; decimal fields are approximations for readability only.",
+  "cases": [
+    {
+      "name": "lowest_raw_factor_wins_no_in_flight",
+      "description": "Three eligible CPU challenges, no confirmed in-flight benchmarks, so projected factor equals raw factor. The challenge with the lowest factor is selected.",
+      "rule": "mining_system.md §6.3: raw_factor[c] = pool_q[c] / network_q[c] summed across active tracks; with no confirmed in-flight benchmarks expected_addition[c] = 0 so projected_raw_factor[c] = raw_factor[c]; choose the lowest.",
+      "input": {
+        "block": { "id": "block_200010", "height": 200010, "round": 900 },
+        "offered_compute": { "type": "cpu", "cpu_cores": 8 },
+        "challenges": [
+          {
+            "id": "c101",
+            "type": "cpu",
+            "active_tracks": { "t1": { "num_nonces_per_bundle": 40 }, "t2": { "num_nonces_per_bundle": 80 } },
+            "min_num_bundles": 1,
+            "network_qualifiers_by_track": { "t1": 30, "t2": 12 }
+          },
+          {
+            "id": "c102",
+            "type": "cpu",
+            "active_tracks": { "t3": { "num_nonces_per_bundle": 25 } },
+            "min_num_bundles": 2,
+            "network_qualifiers_by_track": { "t3": 20 }
+          },
+          {
+            "id": "c103",
+            "type": "cpu",
+            "active_tracks": { "t4": { "num_nonces_per_bundle": 10 } },
+            "min_num_bundles": 1,
+            "network_qualifiers_by_track": { "t4": 24 }
+          }
+        ],
+        "pool_qualifiers_by_challenge_by_track": {
+          "c101": { "t1": 5, "t2": 2 },
+          "c102": { "t3": 3 },
+          "c103": { "t4": 6 }
+        },
+        "hyperparameter_sources_available": { "c101": ["t1", "t2"], "c102": ["t3"], "c103": ["t4"] },
+        "confirmed_in_flight_benchmarks": [],
+        "supplied_randomness": { "challenge_tie_draw_ranks": {} }
+      },
+      "expected": {
+        "projected_raw_factor": {
+          "c101": { "fraction": "7/42", "decimal_approx": 0.16667 },
+          "c102": { "fraction": "3/20", "decimal_approx": 0.15 },
+          "c103": { "fraction": "6/24", "decimal_approx": 0.25 }
+        },
+        "tie_candidates": null,
+        "selected_challenge": "c102"
+      }
+    },
+    {
+      "name": "zero_network_qualifiers_factor_zero_selected",
+      "description": "A challenge whose active tracks have zero network qualifiers has raw factor 0 by the explicit zero-denominator branch and beats any positive factor.",
+      "rule": "mining_system.md §6.3: raw_factor[c] = 0 if network_q[c] = 0; choose the lowest projected raw balancing factor.",
+      "input": {
+        "block": { "id": "block_200011", "height": 200011, "round": 900 },
+        "offered_compute": { "type": "cpu", "cpu_cores": 4 },
+        "challenges": [
+          {
+            "id": "c101",
+            "type": "cpu",
+            "active_tracks": { "t1": { "num_nonces_per_bundle": 40 } },
+            "min_num_bundles": 1,
+            "network_qualifiers_by_track": { "t1": 0 }
+          },
+          {
+            "id": "c102",
+            "type": "cpu",
+            "active_tracks": { "t3": { "num_nonces_per_bundle": 25 } },
+            "min_num_bundles": 2,
+            "network_qualifiers_by_track": { "t3": 40 }
+          }
+        ],
+        "pool_qualifiers_by_challenge_by_track": {
+          "c101": { "t1": 0 },
+          "c102": { "t3": 4 }
+        },
+        "hyperparameter_sources_available": { "c101": ["t1"], "c102": ["t3"] },
+        "confirmed_in_flight_benchmarks": [],
+        "supplied_randomness": { "challenge_tie_draw_ranks": {} }
+      },
+      "expected": {
+        "projected_raw_factor": {
+          "c101": { "fraction": "0", "decimal_approx": 0.0, "branch": "network_q = 0" },
+          "c102": { "fraction": "4/40", "decimal_approx": 0.1 }
+        },
+        "tie_candidates": null,
+        "selected_challenge": "c101"
+      }
+    },
+    {
+      "name": "two_way_tie_resolved_by_supplied_draw_ranks",
+      "description": "Two challenges tie on projected factor 1/10; a third is higher and not in the tie. The tie is resolved with the explicitly supplied draw ranks: the tied candidate with the smallest rank wins (fixture convention, see README open question 1).",
+      "rule": "mining_system.md §6.3: 'If multiple challenges tie, resolve the tie randomly using a recorded, block-derived random value so the decision is reproducible.' architecture.md §3: the random value is supplied to decide(...), never generated by it. The rank-to-winner mapping (smallest supplied rank wins) is a recorded fixture convention because §6.3 does not define the mapping.",
+      "input": {
+        "block": { "id": "block_200012", "height": 200012, "round": 900 },
+        "offered_compute": { "type": "cpu", "cpu_cores": 8 },
+        "challenges": [
+          {
+            "id": "c101",
+            "type": "cpu",
+            "active_tracks": { "t1": { "num_nonces_per_bundle": 40 } },
+            "min_num_bundles": 1,
+            "network_qualifiers_by_track": { "t1": 20 }
+          },
+          {
+            "id": "c102",
+            "type": "cpu",
+            "active_tracks": { "t3": { "num_nonces_per_bundle": 25 } },
+            "min_num_bundles": 2,
+            "network_qualifiers_by_track": { "t3": 30 }
+          },
+          {
+            "id": "c103",
+            "type": "cpu",
+            "active_tracks": { "t4": { "num_nonces_per_bundle": 10 } },
+            "min_num_bundles": 1,
+            "network_qualifiers_by_track": { "t4": 20 }
+          }
+        ],
+        "pool_qualifiers_by_challenge_by_track": {
+          "c101": { "t1": 2 },
+          "c102": { "t3": 3 },
+          "c103": { "t4": 5 }
+        },
+        "hyperparameter_sources_available": { "c101": ["t1"], "c102": ["t3"], "c103": ["t4"] },
+        "confirmed_in_flight_benchmarks": [],
+        "supplied_randomness": { "challenge_tie_draw_ranks": { "c101": 41, "c102": 17 } }
+      },
+      "expected": {
+        "projected_raw_factor": {
+          "c101": { "fraction": "2/20", "decimal_approx": 0.1 },
+          "c102": { "fraction": "3/30", "decimal_approx": 0.1 },
+          "c103": { "fraction": "5/20", "decimal_approx": 0.25 }
+        },
+        "tie_candidates": ["c101", "c102"],
+        "tie_resolution": "smallest supplied draw rank: c102 (17) < c101 (41)",
+        "selected_challenge": "c102"
+      }
+    },
+    {
+      "name": "all_zero_counts_tie_at_factor_zero",
+      "description": "Every eligible challenge has zero pool and zero network qualifiers, so all factors are 0 by the zero-denominator branch and every challenge is in the tie. Resolved by the supplied draw ranks.",
+      "rule": "mining_system.md §6.3: raw_factor 0 when network_q = 0 (and expected_addition = 0 with no in-flight benchmarks); the resulting multi-way tie is resolved with the recorded random value. Smallest supplied rank wins (fixture convention, README open question 1).",
+      "input": {
+        "block": { "id": "block_200013", "height": 200013, "round": 900 },
+        "offered_compute": { "type": "cpu", "cpu_cores": 4 },
+        "challenges": [
+          {
+            "id": "c201",
+            "type": "cpu",
+            "active_tracks": { "t1": { "num_nonces_per_bundle": 40 } },
+            "min_num_bundles": 1,
+            "network_qualifiers_by_track": { "t1": 0 }
+          },
+          {
+            "id": "c202",
+            "type": "cpu",
+            "active_tracks": { "t2": { "num_nonces_per_bundle": 20 } },
+            "min_num_bundles": 1,
+            "network_qualifiers_by_track": { "t2": 0 }
+          }
+        ],
+        "pool_qualifiers_by_challenge_by_track": {
+          "c201": { "t1": 0 },
+          "c202": { "t2": 0 }
+        },
+        "hyperparameter_sources_available": { "c201": ["t1"], "c202": ["t2"] },
+        "confirmed_in_flight_benchmarks": [],
+        "supplied_randomness": { "challenge_tie_draw_ranks": { "c201": 9, "c202": 4 } }
+      },
+      "expected": {
+        "projected_raw_factor": {
+          "c201": { "fraction": "0", "decimal_approx": 0.0, "branch": "network_q = 0" },
+          "c202": { "fraction": "0", "decimal_approx": 0.0, "branch": "network_q = 0" }
+        },
+        "tie_candidates": ["c201", "c202"],
+        "tie_resolution": "smallest supplied draw rank: c202 (4) < c201 (9)",
+        "selected_challenge": "c202"
+      }
+    },
+    {
+      "name": "gpu_offer_considers_only_gpu_challenges",
+      "description": "A GPU offer must ignore the CPU challenge even though its factor is lower; the only GPU challenge is selected.",
+      "rule": "mining_system.md §6.2: 'CPU offers consider only CPU challenges. GPU offers consider only GPU challenges.'",
+      "input": {
+        "block": { "id": "block_200014", "height": 200014, "round": 900 },
+        "offered_compute": { "type": "gpu" },
+        "challenges": [
+          {
+            "id": "c301",
+            "type": "cpu",
+            "active_tracks": { "t1": { "num_nonces_per_bundle": 40 } },
+            "min_num_bundles": 1,
+            "network_qualifiers_by_track": { "t1": 20 }
+          },
+          {
+            "id": "c302",
+            "type": "gpu",
+            "active_tracks": { "t5": { "num_nonces_per_bundle": 100 } },
+            "min_num_bundles": 1,
+            "network_qualifiers_by_track": { "t5": 10 }
+          }
+        ],
+        "pool_qualifiers_by_challenge_by_track": {
+          "c301": { "t1": 1 },
+          "c302": { "t5": 4 }
+        },
+        "hyperparameter_sources_available": { "c301": ["t1"], "c302": ["t5"] },
+        "confirmed_in_flight_benchmarks": [],
+        "supplied_randomness": { "challenge_tie_draw_ranks": {} }
+      },
+      "expected": {
+        "considered_challenges": ["c302"],
+        "excluded": { "c301": "type cpu incompatible with gpu offer (§6.2)" },
+        "projected_raw_factor": {
+          "c302": { "fraction": "4/10", "decimal_approx": 0.4 }
+        },
+        "tie_candidates": null,
+        "selected_challenge": "c302"
+      }
+    },
+    {
+      "name": "cpu_offer_no_compatible_challenge_no_action",
+      "description": "A CPU offer with only GPU challenges active has no compute-compatible challenge, so decide(...) returns no_action.",
+      "rule": "mining_system.md §6.2 (CPU offers consider only CPU challenges) and §6 signature: decide(...) -> benchmark_plan | no_action.",
+      "input": {
+        "block": { "id": "block_200015", "height": 200015, "round": 900 },
+        "offered_compute": { "type": "cpu", "cpu_cores": 16 },
+        "challenges": [
+          {
+            "id": "c302",
+            "type": "gpu",
+            "active_tracks": { "t5": { "num_nonces_per_bundle": 100 } },
+            "min_num_bundles": 1,
+            "network_qualifiers_by_track": { "t5": 10 }
+          }
+        ],
+        "pool_qualifiers_by_challenge_by_track": {
+          "c302": { "t5": 4 }
+        },
+        "hyperparameter_sources_available": { "c302": ["t5"] },
+        "confirmed_in_flight_benchmarks": [],
+        "supplied_randomness": { "challenge_tie_draw_ranks": {} }
+      },
+      "expected": {
+        "considered_challenges": [],
+        "excluded": { "c302": "type gpu incompatible with cpu offer (§6.2)" },
+        "selected_challenge": null,
+        "decision": "no_action"
+      }
+    },
+    {
+      "name": "lowest_factor_challenge_ineligible_missing_source_next_chosen",
+      "description": "c401 has the lowest factor but track t2 has no valid hyperparameter source benchmark for its eligible algorithm, so complete precommit settings cannot be built and c401 is ineligible. The next-lowest eligible challenge is selected. Eligibility is a precondition of §6.3, not a tie-breaker after it.",
+      "rule": "mining_system.md §6.6: 'If an active track has no valid source benchmark for the selected algorithm, the orchestrator cannot build the required complete precommit settings and the challenge is ineligible.' §6.2: eligibility requires valid settings for every active track. §6.3: choose the lowest projected factor among compatible eligible challenges.",
+      "input": {
+        "block": { "id": "block_200016", "height": 200016, "round": 900 },
+        "offered_compute": { "type": "cpu", "cpu_cores": 8 },
+        "challenges": [
+          {
+            "id": "c401",
+            "type": "cpu",
+            "active_tracks": { "t1": { "num_nonces_per_bundle": 40 }, "t2": { "num_nonces_per_bundle": 80 } },
+            "min_num_bundles": 1,
+            "network_qualifiers_by_track": { "t1": 20, "t2": 20 }
+          },
+          {
+            "id": "c402",
+            "type": "cpu",
+            "active_tracks": { "t3": { "num_nonces_per_bundle": 25 } },
+            "min_num_bundles": 2,
+            "network_qualifiers_by_track": { "t3": 30 }
+          }
+        ],
+        "pool_qualifiers_by_challenge_by_track": {
+          "c401": { "t1": 2, "t2": 2 },
+          "c402": { "t3": 6 }
+        },
+        "hyperparameter_sources_available": { "c401": ["t1"], "c402": ["t3"] },
+        "confirmed_in_flight_benchmarks": [],
+        "supplied_randomness": { "challenge_tie_draw_ranks": {} }
+      },
+      "expected": {
+        "excluded": { "c401": "active track t2 has no valid hyperparameter source benchmark (§6.6), so c401 is ineligible (§6.2)" },
+        "projected_raw_factor": {
+          "c402": { "fraction": "6/30", "decimal_approx": 0.2 }
+        },
+        "note": "c401's factor 4/40 = 0.1 is lower than c402's 0.2 but is never considered because eligibility precedes factor comparison.",
+        "tie_candidates": null,
+        "selected_challenge": "c402"
+      }
+    }
+  ]
+}

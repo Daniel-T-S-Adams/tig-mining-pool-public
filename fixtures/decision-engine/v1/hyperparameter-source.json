@@ -1,0 +1,284 @@
+{
+  "_comment": "Decision-engine fixture v1: hyperparameter and fuel source selection (issue #3). Rule: docs/mining_system.md §6.6 — for the selected algorithm and each active track, consider current active, verified, non-fraudulent benchmarks on that algorithm and track; pick the benchmark containing the highest-quality active bundle; copy its hyperparameters and fuel budget; break quality ties by most recently confirmed then lowest benchmark ID. average_quality_by_bundle follows the shape named in mining_system.md §2 'Active bundle'. 'Most recently confirmed' is read as highest block_confirmed height (README open question 4). Hyperparameter keys/values are synthetic — no live protocol constants.",
+  "cases": [
+    {
+      "name": "highest_quality_bundle_selects_source",
+      "description": "Two valid source benchmarks; bmk_00011 contains the single highest-quality active bundle (62 > 55), so its hyperparameters and fuel budget are copied.",
+      "rule": "mining_system.md §6.6 steps 1-3: consider active, verified, non-fraudulent benchmarks on the selected algorithm and track; find the benchmark containing the highest-quality active bundle; copy that benchmark's hyperparameters and fuel budget.",
+      "input": {
+        "selected_algorithm": "a201",
+        "track": "t1",
+        "active_benchmarks": [
+          {
+            "benchmark_id": "bmk_00011",
+            "algorithm_id": "a201",
+            "track_id": "t1",
+            "verified": true,
+            "fraudulent": false,
+            "block_confirmed": 199900,
+            "average_quality_by_bundle": [48, 62, 51],
+            "hyperparameters": { "max_iterations": 5000, "restart_period": 250 },
+            "fuel_budget": 12000000000
+          },
+          {
+            "benchmark_id": "bmk_00012",
+            "algorithm_id": "a201",
+            "track_id": "t1",
+            "verified": true,
+            "fraudulent": false,
+            "block_confirmed": 199950,
+            "average_quality_by_bundle": [55, 53],
+            "hyperparameters": { "max_iterations": 9000, "restart_period": 100 },
+            "fuel_budget": 15000000000
+          }
+        ]
+      },
+      "expected": {
+        "highest_quality_bundle": { "benchmark_id": "bmk_00011", "quality": 62 },
+        "source_benchmark": "bmk_00011",
+        "hyperparameters": { "max_iterations": 5000, "restart_period": 250 },
+        "fuel_budget": 12000000000
+      }
+    },
+    {
+      "name": "highest_single_bundle_beats_higher_average",
+      "description": "bmk_00021 has the highest single bundle quality (50) although its bundle average is lower than bmk_00022's; the rule keys on the highest-quality bundle, not on any average, so bmk_00021 is the source.",
+      "rule": "mining_system.md §6.6 step 2: 'find the benchmark containing the highest-quality active bundle' — a per-bundle maximum, not a benchmark average. max(50, 20) = 50 > max(40, 42) = 42.",
+      "input": {
+        "selected_algorithm": "a201",
+        "track": "t1",
+        "active_benchmarks": [
+          {
+            "benchmark_id": "bmk_00021",
+            "algorithm_id": "a201",
+            "track_id": "t1",
+            "verified": true,
+            "fraudulent": false,
+            "block_confirmed": 199900,
+            "average_quality_by_bundle": [50, 20],
+            "hyperparameters": { "max_iterations": 4000, "restart_period": 500 },
+            "fuel_budget": 9000000000
+          },
+          {
+            "benchmark_id": "bmk_00022",
+            "algorithm_id": "a201",
+            "track_id": "t1",
+            "verified": true,
+            "fraudulent": false,
+            "block_confirmed": 199910,
+            "average_quality_by_bundle": [40, 42],
+            "hyperparameters": { "max_iterations": 7000, "restart_period": 300 },
+            "fuel_budget": 11000000000
+          }
+        ]
+      },
+      "expected": {
+        "highest_quality_bundle": { "benchmark_id": "bmk_00021", "quality": 50 },
+        "source_benchmark": "bmk_00021",
+        "hyperparameters": { "max_iterations": 4000, "restart_period": 500 },
+        "fuel_budget": 9000000000
+      }
+    },
+    {
+      "name": "quality_tie_prefers_most_recently_confirmed",
+      "description": "Both benchmarks contain a bundle of quality 60; bmk_00032 was confirmed at a higher block height (200050 > 200010) and wins the tie.",
+      "rule": "mining_system.md §6.6 step 4: 'if highest quality is tied, prefer the most recently confirmed source'. Most recently confirmed = highest block_confirmed (README open question 4).",
+      "input": {
+        "selected_algorithm": "a201",
+        "track": "t1",
+        "active_benchmarks": [
+          {
+            "benchmark_id": "bmk_00031",
+            "algorithm_id": "a201",
+            "track_id": "t1",
+            "verified": true,
+            "fraudulent": false,
+            "block_confirmed": 200010,
+            "average_quality_by_bundle": [60, 41],
+            "hyperparameters": { "max_iterations": 3000, "restart_period": 800 },
+            "fuel_budget": 8000000000
+          },
+          {
+            "benchmark_id": "bmk_00032",
+            "algorithm_id": "a201",
+            "track_id": "t1",
+            "verified": true,
+            "fraudulent": false,
+            "block_confirmed": 200050,
+            "average_quality_by_bundle": [60, 55],
+            "hyperparameters": { "max_iterations": 6500, "restart_period": 400 },
+            "fuel_budget": 14000000000
+          }
+        ]
+      },
+      "expected": {
+        "tied_quality": 60,
+        "tie_candidates": ["bmk_00031", "bmk_00032"],
+        "tie_resolution": "most recently confirmed: block_confirmed 200050 > 200010",
+        "source_benchmark": "bmk_00032",
+        "hyperparameters": { "max_iterations": 6500, "restart_period": 400 },
+        "fuel_budget": 14000000000
+      }
+    },
+    {
+      "name": "quality_and_confirmation_tie_prefers_lowest_benchmark_id",
+      "description": "Both benchmarks contain a bundle of quality 60 and were confirmed at the same block height; the lowest benchmark ID wins.",
+      "rule": "mining_system.md §6.6 step 4: '... and then the lowest benchmark ID'. bmk_00003 < bmk_00007.",
+      "input": {
+        "selected_algorithm": "a201",
+        "track": "t1",
+        "active_benchmarks": [
+          {
+            "benchmark_id": "bmk_00007",
+            "algorithm_id": "a201",
+            "track_id": "t1",
+            "verified": true,
+            "fraudulent": false,
+            "block_confirmed": 200040,
+            "average_quality_by_bundle": [60],
+            "hyperparameters": { "max_iterations": 2000, "restart_period": 900 },
+            "fuel_budget": 7000000000
+          },
+          {
+            "benchmark_id": "bmk_00003",
+            "algorithm_id": "a201",
+            "track_id": "t1",
+            "verified": true,
+            "fraudulent": false,
+            "block_confirmed": 200040,
+            "average_quality_by_bundle": [60, 58],
+            "hyperparameters": { "max_iterations": 5500, "restart_period": 350 },
+            "fuel_budget": 13000000000
+          }
+        ]
+      },
+      "expected": {
+        "tied_quality": 60,
+        "tie_candidates": ["bmk_00003", "bmk_00007"],
+        "tie_resolution": "equal block_confirmed 200040; lowest benchmark ID wins",
+        "source_benchmark": "bmk_00003",
+        "hyperparameters": { "max_iterations": 5500, "restart_period": 350 },
+        "fuel_budget": 13000000000
+      }
+    },
+    {
+      "name": "invalid_sources_excluded_before_quality_comparison",
+      "description": "The highest-quality bundles sit in benchmarks that are fraudulent, unverified, or belong to a different algorithm or track; all are excluded before the quality comparison and the only valid benchmark is the source.",
+      "rule": "mining_system.md §6.6 step 1: 'consider current active, verified, non-fraudulent benchmarks using that algorithm and track' — the filter precedes the highest-quality search in step 2.",
+      "input": {
+        "selected_algorithm": "a201",
+        "track": "t1",
+        "active_benchmarks": [
+          {
+            "benchmark_id": "bmk_00041",
+            "algorithm_id": "a201",
+            "track_id": "t1",
+            "verified": true,
+            "fraudulent": true,
+            "block_confirmed": 200060,
+            "average_quality_by_bundle": [90],
+            "hyperparameters": { "max_iterations": 100, "restart_period": 1 },
+            "fuel_budget": 1000000000
+          },
+          {
+            "benchmark_id": "bmk_00042",
+            "algorithm_id": "a201",
+            "track_id": "t1",
+            "verified": false,
+            "fraudulent": false,
+            "block_confirmed": 200061,
+            "average_quality_by_bundle": [85],
+            "hyperparameters": { "max_iterations": 200, "restart_period": 2 },
+            "fuel_budget": 2000000000
+          },
+          {
+            "benchmark_id": "bmk_00043",
+            "algorithm_id": "a209",
+            "track_id": "t1",
+            "verified": true,
+            "fraudulent": false,
+            "block_confirmed": 200062,
+            "average_quality_by_bundle": [80],
+            "hyperparameters": { "max_iterations": 300, "restart_period": 3 },
+            "fuel_budget": 3000000000
+          },
+          {
+            "benchmark_id": "bmk_00044",
+            "algorithm_id": "a201",
+            "track_id": "t2",
+            "verified": true,
+            "fraudulent": false,
+            "block_confirmed": 200063,
+            "average_quality_by_bundle": [75],
+            "hyperparameters": { "max_iterations": 400, "restart_period": 4 },
+            "fuel_budget": 4000000000
+          },
+          {
+            "benchmark_id": "bmk_00045",
+            "algorithm_id": "a201",
+            "track_id": "t1",
+            "verified": true,
+            "fraudulent": false,
+            "block_confirmed": 200000,
+            "average_quality_by_bundle": [44, 47],
+            "hyperparameters": { "max_iterations": 4800, "restart_period": 240 },
+            "fuel_budget": 10000000000
+          }
+        ]
+      },
+      "expected": {
+        "excluded": {
+          "bmk_00041": "fraudulent (§6.6 step 1)",
+          "bmk_00042": "not verified (§6.6 step 1)",
+          "bmk_00043": "different algorithm a209 (§6.6 step 1)",
+          "bmk_00044": "different track t2 (§6.6 step 1)"
+        },
+        "highest_quality_bundle": { "benchmark_id": "bmk_00045", "quality": 47 },
+        "source_benchmark": "bmk_00045",
+        "hyperparameters": { "max_iterations": 4800, "restart_period": 240 },
+        "fuel_budget": 10000000000
+      }
+    },
+    {
+      "name": "no_valid_source_challenge_ineligible",
+      "description": "The track has no active, verified, non-fraudulent benchmark for the selected algorithm (the only candidates are on another track or fraudulent), so complete precommit settings cannot be built and the challenge is ineligible.",
+      "rule": "mining_system.md §6.6 final paragraph: 'If an active track has no valid source benchmark for the selected algorithm, the orchestrator cannot build the required complete precommit settings and the challenge is ineligible.'",
+      "input": {
+        "selected_algorithm": "a201",
+        "track": "t3",
+        "active_benchmarks": [
+          {
+            "benchmark_id": "bmk_00051",
+            "algorithm_id": "a201",
+            "track_id": "t1",
+            "verified": true,
+            "fraudulent": false,
+            "block_confirmed": 200070,
+            "average_quality_by_bundle": [66],
+            "hyperparameters": { "max_iterations": 5200, "restart_period": 260 },
+            "fuel_budget": 12000000000
+          },
+          {
+            "benchmark_id": "bmk_00052",
+            "algorithm_id": "a201",
+            "track_id": "t3",
+            "verified": true,
+            "fraudulent": true,
+            "block_confirmed": 200071,
+            "average_quality_by_bundle": [70],
+            "hyperparameters": { "max_iterations": 500, "restart_period": 5 },
+            "fuel_budget": 5000000000
+          }
+        ]
+      },
+      "expected": {
+        "excluded": {
+          "bmk_00051": "different track t1 (§6.6 step 1)",
+          "bmk_00052": "fraudulent (§6.6 step 1)"
+        },
+        "source_benchmark": null,
+        "challenge_eligibility": "ineligible"
+      }
+    }
+  ]
+}

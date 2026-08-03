@@ -1,0 +1,156 @@
+{
+  "_comment": "Decision-engine fixture v1: number of bundles per track (issue #3). Rule: docs/mining_system.md §6.7. GPU members and CPU members whose selected algorithm is not best on the track use min_num_bundles. A CPU member whose selected algorithm is best on track t uses bundle_multiple = c / gcd(c, n) and num_bundles[t] = ceil(m / bundle_multiple) * bundle_multiple, the smallest count at or above the protocol minimum with (num_bundles * num_nonces_per_bundle) mod c = 0. Inputs supply selected_algorithm_best_on_track explicitly; that flag is itself derived by §6.5 and is covered by the algorithm-selection family. min_num_bundles and num_nonces_per_bundle mirror get-challenges.json config fields (see README.md). V0 applies no runtime, reward, or fee resizing (§6.7 final paragraph).",
+  "cases": [
+    {
+      "name": "gpu_member_always_min_num_bundles",
+      "description": "A GPU member gets min_num_bundles on every track regardless of core counts or best-on-track status.",
+      "rule": "mining_system.md §6.7: 'For a GPU member: num_bundles[t] = min_num_bundles'.",
+      "input": {
+        "offered_compute": { "type": "gpu" },
+        "min_num_bundles": 3,
+        "tracks": {
+          "t1": { "num_nonces_per_bundle": 40, "selected_algorithm_best_on_track": true },
+          "t2": { "num_nonces_per_bundle": 80, "selected_algorithm_best_on_track": false }
+        }
+      },
+      "expected": {
+        "num_bundles": { "t1": 3, "t2": 3 }
+      }
+    },
+    {
+      "name": "cpu_not_best_on_track_min_num_bundles",
+      "description": "A CPU member whose selected algorithm is not best on the track gets min_num_bundles; the core count is ignored.",
+      "rule": "mining_system.md §6.7: 'For a CPU member when the selected algorithm is not best on track t: num_bundles[t] = min_num_bundles'.",
+      "input": {
+        "offered_compute": { "type": "cpu", "cpu_cores": 16 },
+        "min_num_bundles": 2,
+        "tracks": {
+          "t1": { "num_nonces_per_bundle": 40, "selected_algorithm_best_on_track": false }
+        }
+      },
+      "expected": {
+        "num_bundles": { "t1": 2 }
+      }
+    },
+    {
+      "name": "cpu_best_cores_divide_nonces_min_stands",
+      "description": "CPU best-on-track with c = 16 dividing n = 80: gcd(16, 80) = 16, bundle_multiple = 1, so the minimum already aligns and stands.",
+      "rule": "mining_system.md §6.7: bundle_multiple = c / gcd(c, n) = 16/16 = 1; num_bundles = ceil(1/1) * 1 = 1. Check: (1 * 80) mod 16 = 0.",
+      "input": {
+        "offered_compute": { "type": "cpu", "cpu_cores": 16 },
+        "min_num_bundles": 1,
+        "tracks": {
+          "t1": { "num_nonces_per_bundle": 80, "selected_algorithm_best_on_track": true }
+        }
+      },
+      "expected": {
+        "derivation": { "t1": { "gcd_c_n": 16, "bundle_multiple": 1 } },
+        "num_bundles": { "t1": 1 },
+        "alignment_check": { "t1": "(1 * 80) mod 16 = 0" }
+      }
+    },
+    {
+      "name": "cpu_best_partial_overlap_rounds_up_to_multiple",
+      "description": "CPU best-on-track with c = 16, n = 40: gcd = 8, bundle_multiple = 2, so the minimum of 1 is rounded up to 2 bundles.",
+      "rule": "mining_system.md §6.7: bundle_multiple = 16 / gcd(16, 40) = 16/8 = 2; num_bundles = ceil(1/2) * 2 = 2. Check: (2 * 40) mod 16 = 0.",
+      "input": {
+        "offered_compute": { "type": "cpu", "cpu_cores": 16 },
+        "min_num_bundles": 1,
+        "tracks": {
+          "t1": { "num_nonces_per_bundle": 40, "selected_algorithm_best_on_track": true }
+        }
+      },
+      "expected": {
+        "derivation": { "t1": { "gcd_c_n": 8, "bundle_multiple": 2 } },
+        "num_bundles": { "t1": 2 },
+        "alignment_check": { "t1": "(2 * 40) mod 16 = 0" }
+      }
+    },
+    {
+      "name": "cpu_best_coprime_counts_full_multiple",
+      "description": "CPU best-on-track with coprime c = 8 and n = 25: gcd = 1, bundle_multiple = 8, so the minimum of 2 is rounded up to a full multiple of 8.",
+      "rule": "mining_system.md §6.7: bundle_multiple = 8 / gcd(8, 25) = 8/1 = 8; num_bundles = ceil(2/8) * 8 = 8. Check: (8 * 25) mod 8 = 200 mod 8 = 0.",
+      "input": {
+        "offered_compute": { "type": "cpu", "cpu_cores": 8 },
+        "min_num_bundles": 2,
+        "tracks": {
+          "t3": { "num_nonces_per_bundle": 25, "selected_algorithm_best_on_track": true }
+        }
+      },
+      "expected": {
+        "derivation": { "t3": { "gcd_c_n": 1, "bundle_multiple": 8 } },
+        "num_bundles": { "t3": 8 },
+        "alignment_check": { "t3": "(8 * 25) mod 8 = 0" }
+      }
+    },
+    {
+      "name": "cpu_best_minimum_above_multiple_rounds_to_next",
+      "description": "CPU best-on-track with c = 6, n = 40 and a minimum of 4: bundle_multiple = 3, and the smallest multiple of 3 at or above 4 is 6.",
+      "rule": "mining_system.md §6.7: bundle_multiple = 6 / gcd(6, 40) = 6/2 = 3; num_bundles = ceil(4/3) * 3 = 2 * 3 = 6. Check: (6 * 40) mod 6 = 240 mod 6 = 0.",
+      "input": {
+        "offered_compute": { "type": "cpu", "cpu_cores": 6 },
+        "min_num_bundles": 4,
+        "tracks": {
+          "t1": { "num_nonces_per_bundle": 40, "selected_algorithm_best_on_track": true }
+        }
+      },
+      "expected": {
+        "derivation": { "t1": { "gcd_c_n": 2, "bundle_multiple": 3 } },
+        "num_bundles": { "t1": 6 },
+        "alignment_check": { "t1": "(6 * 40) mod 6 = 0" }
+      }
+    },
+    {
+      "name": "cpu_best_single_core_min_stands",
+      "description": "A single-core CPU member best on track: gcd(1, n) = 1, bundle_multiple = 1, so min_num_bundles always stands.",
+      "rule": "mining_system.md §6.7: bundle_multiple = 1 / gcd(1, 33) = 1; num_bundles = ceil(2/1) * 1 = 2. Check: (2 * 33) mod 1 = 0.",
+      "input": {
+        "offered_compute": { "type": "cpu", "cpu_cores": 1 },
+        "min_num_bundles": 2,
+        "tracks": {
+          "t7": { "num_nonces_per_bundle": 33, "selected_algorithm_best_on_track": true }
+        }
+      },
+      "expected": {
+        "derivation": { "t7": { "gcd_c_n": 1, "bundle_multiple": 1 } },
+        "num_bundles": { "t7": 2 },
+        "alignment_check": { "t7": "(2 * 33) mod 1 = 0" }
+      }
+    },
+    {
+      "name": "cpu_more_cores_than_nonces_per_bundle",
+      "description": "CPU best-on-track with more cores than nonces per bundle, c = 64, n = 40: gcd = 8, bundle_multiple = 8, so 8 bundles are needed for the nonce total to divide evenly across cores.",
+      "rule": "mining_system.md §6.7: bundle_multiple = 64 / gcd(64, 40) = 64/8 = 8; num_bundles = ceil(1/8) * 8 = 8. Check: (8 * 40) mod 64 = 320 mod 64 = 0.",
+      "input": {
+        "offered_compute": { "type": "cpu", "cpu_cores": 64 },
+        "min_num_bundles": 1,
+        "tracks": {
+          "t1": { "num_nonces_per_bundle": 40, "selected_algorithm_best_on_track": true }
+        }
+      },
+      "expected": {
+        "derivation": { "t1": { "gcd_c_n": 8, "bundle_multiple": 8 } },
+        "num_bundles": { "t1": 8 },
+        "alignment_check": { "t1": "(8 * 40) mod 64 = 0" }
+      }
+    },
+    {
+      "name": "cpu_mixed_tracks_sized_independently",
+      "description": "One CPU plan across two tracks: the selected algorithm is best on t1 (aligned sizing applies) but not on t2 (minimum applies). Bundle counts are selected separately per track because TIG picks the final track during precommit processing.",
+      "rule": "mining_system.md §6.7: 'Bundle counts are selected separately for every possible track'. t1: bundle_multiple = 12 / gcd(12, 40) = 12/4 = 3; num_bundles = ceil(2/3) * 3 = 3; check (3 * 40) mod 12 = 0. t2: not best, num_bundles = min_num_bundles = 2.",
+      "input": {
+        "offered_compute": { "type": "cpu", "cpu_cores": 12 },
+        "min_num_bundles": 2,
+        "tracks": {
+          "t1": { "num_nonces_per_bundle": 40, "selected_algorithm_best_on_track": true },
+          "t2": { "num_nonces_per_bundle": 80, "selected_algorithm_best_on_track": false }
+        }
+      },
+      "expected": {
+        "derivation": { "t1": { "gcd_c_n": 4, "bundle_multiple": 3 } },
+        "num_bundles": { "t1": 3, "t2": 2 },
+        "alignment_check": { "t1": "(3 * 40) mod 12 = 0" }
+      }
+    }
+  ]
+}

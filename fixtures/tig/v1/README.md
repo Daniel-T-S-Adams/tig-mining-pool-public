@@ -32,6 +32,16 @@ Anchor: block `block_100080`, height `100080`, round `834`.
 | `get-tracks-data.json` | `GET /get-tracks-data?block_id=…&challenge_id=…` | Compact per-track records |
 | `expected.json` | — | Derived values recorded independently of implementation |
 
+## Amendments
+
+- **v1 amendment (PR after #18):** `get-opow.json` coinbase values corrected to
+  satisfy the `accounting.md` §2 equality
+  `sum(coinbase.values()) == reward − reward_share`
+  (2.1 + 0.2 = 2.5 − 0.2 = 2.3 TIG). The original values (0.8 + 0.2 = 1.0)
+  violated it — found by the attribution-payout fixture work (issue #7).
+  Documented exception to the immutability convention: nothing consumed the
+  original values, so amending v1 was preferred over minting a v2.
+
 ## Assumptions to verify during the protocol spike (#10)
 
 Recorded per `docs/tig_integration.md` §1 (OpenAPI alone is not authoritative):

@@ -1,0 +1,8 @@
+{"cpu_arch":"amd64","fuel_consumed":"1310720123","nonce":0,"runtime_signature":"4602930012176195438","solution":"sol-c001-t900-n0"}
+{"cpu_arch":"amd64","fuel_consumed":"1489274201","nonce":1,"runtime_signature":"12157665459056928801","solution":"sol-c001-t900-n1"}
+{"cpu_arch":"amd64","fuel_consumed":"1210000000","nonce":2,"runtime_signature":"305419896","solution":"sol-c001-t900-n2"}
+{"cpu_arch":"amd64","fuel_consumed":"1750001111","nonce":3,"runtime_signature":"8624975790449270271","solution":"sol-c001-t900-n3"}
+{"cpu_arch":"amd64","fuel_consumed":"1750001111","nonce":3,"runtime_signature":"8624975790449270271","solution":"sol-c001-t900-n3"}
+{"cpu_arch":"amd64","fuel_consumed":"1620304050","nonce":5,"runtime_signature":"17446744073709551615","solution":"sol-c001-t900-n5"}
+{"cpu_arch":"amd64","fuel_consumed":"1234567890","nonce":6,"runtime_signature":"9223372036854775809","solution":"sol-c001-t900-n6"}
+{"cpu_arch":"amd64","fuel_consumed":"1999999999","nonce":7,"runtime_signature":"42","solution":"sol-c001-t900-n7"}

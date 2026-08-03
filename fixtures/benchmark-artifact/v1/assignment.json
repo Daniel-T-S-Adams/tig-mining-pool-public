@@ -1,0 +1,70 @@
+{
+  "algorithm_binary_sha256": "4cce945d93f869d2afee03e197d8d242bfd7c2f522a39f1280eb972ea4f573a0",
+  "assignment_id": "66666666-6666-4666-8666-666666666666",
+  "compute": {
+    "compute_kind": "CPU",
+    "compute_type": "aws_c7i",
+    "cpu_arch": "amd64",
+    "cpu_cores": 4,
+    "cpu_vendor": "INTEL"
+  },
+  "confirmed_precommit": {
+    "benchmark_id": "bench_c001_t900_000001",
+    "block_confirmed": 100082,
+    "details": {
+      "block_started": 100081,
+      "compute_type": "aws_c7i",
+      "fee_paid": "18000000000000000",
+      "fuel_budget": "20000000000",
+      "hyperparameters": null,
+      "num_bundles": 2,
+      "num_nonces": 8,
+      "rand_hash": "randhash_block_100081_fixture"
+    },
+    "settings": {
+      "algorithm_id": "a011",
+      "block_id": "block_100081",
+      "challenge_id": "c001",
+      "player_id": "0xp00l00000000000000000000000000000000000",
+      "track_id": "t900"
+    }
+  },
+  "decision_block_id": "block_100080",
+  "member_id": "11111111-1111-4111-8111-111111111111",
+  "merkle": {
+    "algorithm": "tig-merkle-blake3-v1",
+    "leaf_encoding": "tig-output-metadata-v1",
+    "tree_capacity": 8
+  },
+  "network": "testnet",
+  "nonce_range": {
+    "end_exclusive": 8,
+    "num_nonces": 8,
+    "start": 0
+  },
+  "offer_id": "44444444-4444-4444-8444-444444444444",
+  "package_format": "proof-material-v1",
+  "package_limits": {
+    "max_compressed_bytes": 1073741824,
+    "max_manifest_bytes": 262144,
+    "max_output_record_bytes": 1048576,
+    "max_uncompressed_bytes": 2147483648,
+    "max_upload_chunk_bytes": 8388608,
+    "min_upload_chunk_bytes": 1048576
+  },
+  "pool_player_id": "0xp00l00000000000000000000000000000000000",
+  "protocol_version": "0.1.0",
+  "qualification_id": "55555555-5555-4555-8555-555555555555",
+  "qualification_spec_digest": "b612550b76ba377ea435ae81fdfcb4b8c57d2def4ef3d84bd5556e74b494b622",
+  "runtime": {
+    "benchmarker_version": "0.1.0-fixture",
+    "image_manifest_digest": "sha256:07bf991eb1f99d7fc6d9e2735c5f09c73c719118d68a39fbe5fce55d7d4d0828",
+    "image_platform_digest": "sha256:99d933e740cb487e24abd511d4f0afaee1c5cfff400bb7e6f6d71c1f4ff3bad3",
+    "platform": "linux/amd64",
+    "tig_upstream_commit": "ad08d1ea001a73ff5aab3b556d7f59246fece14e"
+  },
+  "slot_generation": 3,
+  "slot_id": "33333333-3333-4333-8333-333333333333",
+  "tig_api_base_url": "https://testnet-api.tig.foundation",
+  "worker_id": "22222222-2222-4222-8222-222222222222"
+}

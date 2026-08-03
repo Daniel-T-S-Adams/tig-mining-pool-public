@@ -1,0 +1,322 @@
+{
+  "_comment": "Expected results for fixtures/benchmark-artifact/v1 (issue #4), recorded independently of any pool implementation. Every value names the rule that derives it. Reviewed before implementation tests may cite this fixture as evidence. Derived hashes were computed with tools/build_fixture.py, a direct transcription of the pinned upstream convention (see README.md).",
+  "assignment": {
+    "file": "assignment.json",
+    "assignment_digest": {
+      "value": "1cd20851afc3fb6152b9b42a0b7b4858c07f590e80c01fb5534091b9a15b92a4",
+      "rule": "assignment_digest = SHA-256(RFC 8785 canonical JSON(assignment_identity)) (member_protocol.md §7)"
+    },
+    "schema_validation": {
+      "schema": "schemas/member_protocol/v0.1.0/api.schema.json#/$defs/AssignmentIdentity",
+      "result": "pass"
+    },
+    "num_nonces": {
+      "value": 8,
+      "rule": "num_nonces = num_bundles (2) x num_nonces_per_bundle (4, invented track t900; deliberately not a track from fixtures/tig/v1) per the sizing rule in fixtures/tig/v1/expected.json"
+    },
+    "tree_capacity": {
+      "value": 8,
+      "rule": "next power of two >= num_nonces (schemas/member_protocol/v0.1.0/README.md, Validation beyond JSON Schema)"
+    },
+    "fee_paid": {
+      "value": "18000000000000000",
+      "rule": "base_fee 10000000000000000 + per_nonce_fee 1000000000000000 x 8 nonces (c001 fee config in fixtures/tig/v1/get-challenges.json; rule in fixtures/tig/v1/expected.json)"
+    },
+    "deadlines": {
+      "block_started": 100081,
+      "workflow_expiry_block": 100201,
+      "proof_reserve_blocks": 10,
+      "package_due_before_block": 100191,
+      "rule": "workflow_expiry_block = block_started + 120; package_due_before_block = workflow_expiry_block - proof_reserve_blocks (member_protocol.md §7 spike constants)"
+    }
+  },
+  "context": {
+    "min_verification_quality": {
+      "value": 40,
+      "rule": "Invented fixture threshold standing in for TIG's minimum verification quality (mining_system.md §8). Not a live protocol constant; see README open questions."
+    },
+    "sampled_nonces": {
+      "value": [1, 4, 6],
+      "rule": "Sample count 3 follows the c001 sample_counts convention in fixtures/tig/v1/expected.json; the specific nonces are a fixture choice standing in for TIG's published sample."
+    }
+  },
+  "golden": {
+    "description": "Complete 8-nonce proof-material package. Passes JSON Schema validation, every mechanical check in member_protocol.md §10.2/§12, and sampled-proof verification.",
+    "schema_validation": {
+      "manifest": "pass",
+      "output_records": "pass"
+    },
+    "manifest_bytes": {
+      "size_bytes": 2146,
+      "sha256": "2bd3cdf1184f6d58d0af97e91351af2bf0134a7f281d721d7ecb03ad7735a87e",
+      "rule": "manifest.json is RFC 8785 canonical bytes with no BOM or trailing whitespace (member_protocol.md §10.2); this is the manifest SHA-256 declared at upload creation (member_protocol.md §11)"
+    },
+    "quality_vector": {
+      "value": [55, 62, 48, 71, 55, 60, 49, 66],
+      "rule": "qualities.i32le: exactly num_nonces signed 32-bit little-endian qualities in ascending nonce order (member_protocol.md §10.2); all >= fixture min_verification_quality 40"
+    },
+    "solution_signatures": {
+      "rule": "OutputData::calc_solution_signature = u64s_from_str(jsonify(solution))[0]: first 8 bytes, little-endian, of blake3(canonical JSON string of solution) (tig-structs/src/core.rs and tig-utils/src/hash.rs at pinned commit ad08d1ea001a73ff5aab3b556d7f59246fece14e)",
+      "by_nonce": {
+        "0": "11157496117252635666",
+        "1": "9737207527632619535",
+        "2": "5870887940533683204",
+        "3": "7523842745242394398",
+        "4": "2190120177637881591",
+        "5": "13622062891224092988",
+        "6": "3952498913357255309",
+        "7": "10721565419126723794"
+      }
+    },
+    "leaf_hashes": {
+      "rule": "leaf = blake3(jsonify(OutputMetaData{fuel_consumed, nonce, runtime_signature, solution_signature} as bare JSON integers, keys sorted)) (tig-structs/src/core.rs From<OutputMetaData> for MerkleHash at pinned commit); leaf-hashes.bin is these 32-byte hashes concatenated in ascending nonce order (member_protocol.md §10.2)",
+      "by_nonce": [
+        "54a8ca4f8117c842e228f2bdb02bdb9a9632d6c2302dbc2dacef3c65ae0e03ac",
+        "663e536c5fb4a25a80cf0f2b742a16fc81308ec6b5558480d6c7ec1db3b04f51",
+        "f95a3036b005dfa622decd789d72f343035f9049232823fb8ddc7072ce515831",
+        "a331b5d3bfa86d720dfc54d8740e353637beb57009a62722a52bb6d78815d711",
+        "650e8f7c27eee4c716a71799536d77895eba58eb6944206eb0db9dcd78435b17",
+        "9337127d26bc219461af18f348336e8d6f78af28c242c3b1ba08f3750965bf0b",
+        "0aa99664aaae7632c529ff871e9f7778fbbd9f9ca354a1ab472e10fa297b4d4c",
+        "1839f90a65e30e7dc99624068906db2acb6da1648e8c0c2fd3dffca144bed8b4"
+      ]
+    },
+    "merkle_root": {
+      "value": "d734f0c0e487f4dde9d2d7b162fbf9abc1dce47cad4df6bb70fee8a91e221c8f",
+      "rule": "MerkleTree::calc_merkle_root: pairwise blake3(left32 || right32), unpaired node promoted unchanged, leaves not padded to capacity (tig-utils/src/merkle_tree.rs at pinned commit); must equal manifest merkle.root (member_protocol.md §10.2, §12)"
+    },
+    "proofs": {
+      "rule": "Branch entries are (depth, sibling-hash) pairs per MerkleTree::calc_merkle_branch; serialized form concatenates {depth:02x}{hash:064x}; MerkleBranch::calc_merkle_root(leaf_hash, nonce) must reproduce merkle_root (tig-utils/src/merkle_tree.rs at pinned commit). The complete ordered leaf-hash array is sufficient Merkle material for any sampled nonce (member_protocol.md §10.2).",
+      "expected_verification_result": "each sampled branch reproduces merkle_root d734f0c0e487f4dde9d2d7b162fbf9abc1dce47cad4df6bb70fee8a91e221c8f",
+      "by_sampled_nonce": {
+        "1": {
+          "leaf_hash": "663e536c5fb4a25a80cf0f2b742a16fc81308ec6b5558480d6c7ec1db3b04f51",
+          "branch": [
+            [0, "54a8ca4f8117c842e228f2bdb02bdb9a9632d6c2302dbc2dacef3c65ae0e03ac"],
+            [1, "12acad737aeb998f8429fc17c12f6391bad5ccc2759b9aaffe6bcff4c3105482"],
+            [2, "1b5c7b6950f7ce0abafbcf60763abc595030095f30e15a6e88a08e22bbf7bd13"]
+          ],
+          "branch_serialized": "0054a8ca4f8117c842e228f2bdb02bdb9a9632d6c2302dbc2dacef3c65ae0e03ac0112acad737aeb998f8429fc17c12f6391bad5ccc2759b9aaffe6bcff4c3105482021b5c7b6950f7ce0abafbcf60763abc595030095f30e15a6e88a08e22bbf7bd13"
+        },
+        "4": {
+          "leaf_hash": "650e8f7c27eee4c716a71799536d77895eba58eb6944206eb0db9dcd78435b17",
+          "branch": [
+            [0, "9337127d26bc219461af18f348336e8d6f78af28c242c3b1ba08f3750965bf0b"],
+            [1, "9915fd9b78737a62171eea825eaacfb184c42bfde2685a09a96c11532b214a48"],
+            [2, "f93f22b01f5a458b6557b1ddd28601db7ef15c8fce7a59d5de1706587b6d4e8b"]
+          ],
+          "branch_serialized": "009337127d26bc219461af18f348336e8d6f78af28c242c3b1ba08f3750965bf0b019915fd9b78737a62171eea825eaacfb184c42bfde2685a09a96c11532b214a4802f93f22b01f5a458b6557b1ddd28601db7ef15c8fce7a59d5de1706587b6d4e8b"
+        },
+        "6": {
+          "leaf_hash": "0aa99664aaae7632c529ff871e9f7778fbbd9f9ca354a1ab472e10fa297b4d4c",
+          "branch": [
+            [0, "1839f90a65e30e7dc99624068906db2acb6da1648e8c0c2fd3dffca144bed8b4"],
+            [1, "86d42a2649f37b44e673c54fd29ddef2b9e79aa83db044d6d044715b0aeb5f1b"],
+            [2, "f93f22b01f5a458b6557b1ddd28601db7ef15c8fce7a59d5de1706587b6d4e8b"]
+          ],
+          "branch_serialized": "001839f90a65e30e7dc99624068906db2acb6da1648e8c0c2fd3dffca144bed8b40186d42a2649f37b44e673c54fd29ddef2b9e79aa83db044d6d044715b0aeb5f1b02f93f22b01f5a458b6557b1ddd28601db7ef15c8fce7a59d5de1706587b6d4e8b"
+        }
+      }
+    },
+    "expected_result": {
+      "value": "RECEIVED -> STRUCTURALLY_ACCEPTED -> DURABLY_ACCEPTED eligible; sampled-proof verification succeeds; TIG verification reproduces every record",
+      "attribution": "NONE",
+      "rule": "member_protocol.md §12 acceptance stages; §15 (no failure event)"
+    }
+  },
+  "cases": {
+    "bad-package-checksum": {
+      "category": "corrupt upload (byte level)",
+      "files": ["cases/bad-package-checksum/upload.json"],
+      "expected_check_result": "finalize fails: whole-package SHA-256 of received bytes != declared package_sha256; package never reaches RECEIVED (member_protocol.md §11 finalize, §12 RECEIVED definition)",
+      "expected_classification": {
+        "attribution": "NONE_YET",
+        "retryable": true,
+        "chargeable_tier_failure": false,
+        "rule": "member_protocol.md §15: 'A checksum mismatch in transit is retried and investigated; it is not a member penalty until the received bytes are stable and evidence establishes a member-originated bad package.' Member may retry or upload a corrected generation (§12). Escalates to MEMBER only with stable-bytes evidence; if origin cannot be established, UNRESOLVED (§15 table, last row)."
+      }
+    },
+    "truncated-upload": {
+      "category": "incomplete upload (byte level)",
+      "files": ["cases/truncated-upload/upload.json"],
+      "expected_check_result": "committed_offset 24576 < declared 40960 at package_due_before_block 100191; finalize never valid; assignment cannot reach DURABLY_ACCEPTED before the deadline (member_protocol.md §7 deadline rule, §11 upload contract)",
+      "expected_classification": {
+        "attribution": "MEMBER",
+        "retryable": false,
+        "chargeable_tier_failure": true,
+        "rule": "member_protocol.md §15 table: 'misses the package block deadline while pool and TIG services were available' -> MEMBER; mining_system.md §8: missing the package-upload deadline before durable acceptance is member-attributable and chargeable once classified MEMBER",
+        "variant": "if pool unavailability for the upload window is evidenced instead, attribution is POOL ('was unavailable for the upload window', member_protocol.md §15) and no member failure is recorded (mining_system.md §8)"
+      }
+    },
+    "missing-manifest-entries": {
+      "category": "corrupt package (structural)",
+      "files": ["cases/missing-manifest-entries/"],
+      "delta_from_golden": "manifest.json lacks files.leaf_hashes and merkle.root; member files are byte-identical to golden",
+      "schema_validation": {
+        "manifest": "fail",
+        "errors": [
+          "$.files: 'leaf_hashes' is a required property",
+          "$.merkle: 'root' is a required property"
+        ],
+        "schema": "schemas/member_protocol/v0.1.0/package-manifest.schema.json"
+      },
+      "manifest_bytes": { "size_bytes": 1882, "sha256": "a1bd1ef5f50a2ae405dc91ad881ca6d2e77e20cb5cbfcb20846972fdacef18b9" },
+      "expected_check_result": "rejected before STRUCTURALLY_ACCEPTED: manifest does not conform to package-manifest.schema.json (member_protocol.md §10.2); missing required field is incompatible input, not a value to coerce (§14)",
+      "expected_classification": {
+        "attribution": "MEMBER",
+        "retryable": false,
+        "chargeable_tier_failure": true,
+        "rule": "member_protocol.md §15 table row 1: bytes match the declared checksum but structure is wrong -> MEMBER; mining_system.md §8: 'incomplete, malformed, or internally inconsistent even though the received bytes match the member's declared checksum'. Member may submit a corrected package generation before the deadline (§11, §12)."
+      }
+    },
+    "wrong-declared-size": {
+      "category": "corrupt package (structural)",
+      "files": ["cases/wrong-declared-size/"],
+      "delta_from_golden": "manifest files.outputs.size_bytes declares 1038; actual outputs.ndjson is 1031 bytes (sha256 unchanged)",
+      "schema_validation": { "manifest": "pass", "output_records": "pass" },
+      "manifest_bytes": { "size_bytes": 2146, "sha256": "001c8af1c4aed5b9ea872b8f7c9124dbbfaa60fa00dd0bdc958d71a64e061cfa" },
+      "expected_check_result": "first failing check: declared file size does not match observed member bytes ('file lengths and hashes match', member_protocol.md §12 STRUCTURALLY_ACCEPTED; 'declared file sizes, SHA-256 values ... match', schemas README cross-field list; §10.3 declared-vs-observed enforcement)",
+      "expected_classification": {
+        "attribution": "MEMBER",
+        "retryable": false,
+        "chargeable_tier_failure": true,
+        "rule": "member_protocol.md §15 table row 1 (structure/consistency wrong with matching package checksum); mining_system.md §8 member-attributable list"
+      }
+    },
+    "missing-nonce": {
+      "category": "incomplete package",
+      "files": ["cases/missing-nonce/"],
+      "delta_from_golden": "nonce 5 absent from all three member files; record_count 7 and file hashes/sizes are internally consistent, so JSON Schema passes and only the cross-field coverage checks fail",
+      "schema_validation": { "manifest": "pass", "output_records": "pass" },
+      "manifest_bytes": { "size_bytes": 2145, "sha256": "360c70308a2e94ef61787b6238e4c988d93981c5d85f03882ea1c46ed80a1d29" },
+      "expected_check_result": "first failing checks: record_count 7 != num_nonces 8, quality bytes 28 != 4*num_nonces, leaf-hash bytes 224 != 32*num_nonces, output nonces not exactly 0..7 (schemas README cross-field list; member_protocol.md §10.2; §16 invariant 7: package covers exactly [0, num_nonces))",
+      "expected_classification": {
+        "attribution": "MEMBER",
+        "retryable": false,
+        "chargeable_tier_failure": true,
+        "rule": "member_protocol.md §15 table row 2: 'missing or duplicate nonce' -> MEMBER; mining_system.md §8: 'required nonce data is missing'"
+      }
+    },
+    "duplicate-nonce": {
+      "category": "corrupt package (coverage)",
+      "files": ["cases/duplicate-nonce/"],
+      "delta_from_golden": "output record 4 replaced by a copy of record 3 (nonce sequence 0,1,2,3,3,5,6,7); qualities, leaf hashes, and root recomputed so the package is internally consistent",
+      "schema_validation": { "manifest": "pass", "output_records": "pass" },
+      "manifest_bytes": { "size_bytes": 2146, "sha256": "6b3a7dcee2f76e4e74377a52cc3f427df167b70f42a721dcfbff94d3c03cf7db" },
+      "expected_check_result": "first failing check: output nonces are not exactly 0..num_nonces-1 in ascending order (member_protocol.md §10.2; schemas README cross-field list; §16 invariant 7)",
+      "expected_classification": {
+        "attribution": "MEMBER",
+        "retryable": false,
+        "chargeable_tier_failure": true,
+        "rule": "member_protocol.md §15 table row 2: 'missing or duplicate nonce' -> MEMBER; mining_system.md §8: 'required nonce data is ... duplicated'"
+      }
+    },
+    "leaf-hash-mismatch": {
+      "category": "corrupt package (cryptographic)",
+      "files": ["cases/leaf-hash-mismatch/"],
+      "delta_from_golden": "leaf hash for nonce 3 has its first byte XORed with 0x01 (a3 -> a2); merkle.root recomputed over the corrupted leaf array (64439b9d...) so leaf file and root agree with each other but leaf 3 does not reproduce from its output record",
+      "schema_validation": { "manifest": "pass", "output_records": "pass" },
+      "manifest_bytes": { "size_bytes": 2146, "sha256": "19af332667c2c600d4b55428f81629b951a17e4dfbf0f5d2057114cd6ae450e7" },
+      "expected_check_result": "first failing check: reproduced OutputData metadata hash for nonce 3 (a331b5d3...) != leaf-hashes.bin entry (a231b5d3...) ('every leaf hash reproduces', member_protocol.md §12; reproduction procedure in §10.2)",
+      "expected_classification": {
+        "attribution": "MEMBER",
+        "retryable": false,
+        "chargeable_tier_failure": true,
+        "rule": "member_protocol.md §15 table row 1: 'leaf hashes ... wrong' with matching package checksum -> MEMBER; mining_system.md §8 'internally inconsistent'"
+      }
+    },
+    "merkle-root-mismatch": {
+      "category": "corrupt package (cryptographic)",
+      "files": ["cases/merkle-root-mismatch/"],
+      "delta_from_golden": "all leaf hashes reproduce; manifest merkle.root last hex digit changed (…1c8f -> …1c80)",
+      "schema_validation": { "manifest": "pass", "output_records": "pass" },
+      "manifest_bytes": { "size_bytes": 2146, "sha256": "48a39c98281de67027de86b1a3d937c87c67f30b44e24331d915dd4898770ac3" },
+      "expected_check_result": "first failing check: calculated Merkle root d734f0c0…1c8f != declared d734f0c0…1c80 ('the calculated Merkle root matches', member_protocol.md §12; §10.2 root comparison)",
+      "expected_classification": {
+        "attribution": "MEMBER",
+        "retryable": false,
+        "chargeable_tier_failure": true,
+        "rule": "member_protocol.md §15 table row 1: 'Merkle root ... wrong' with matching package checksum -> MEMBER"
+      }
+    },
+    "identity-mismatch": {
+      "category": "structurally valid, wrong binding (fail-closed)",
+      "files": ["cases/identity-mismatch/"],
+      "delta_from_golden": "manifest slot_generation 2 (assignment says 3), assignment_digest befce771d7742ea253242b6c6c2f821198d4f1364be6dc84e47bab433c93f1ca (digest of the slot_generation-2 mutation of assignment_identity, not the assignment's 1cd20851…), and versions.algorithm_binary_sha256 a54434b7… = SHA-256('fixture:algorithm-binary:WRONG') instead of the assignment's 4cce945d…",
+      "schema_validation": { "manifest": "pass", "output_records": "pass" },
+      "manifest_bytes": { "size_bytes": 2146, "sha256": "5a32e966bce717c6d26b35e7d97c117d28fbaa23796463db87b8953f7f5ddbf7" },
+      "expected_check_result": "first failing check: manifest does not bind to the confirmed assignment (assignment_digest, slot generation, algorithm binary digest all differ) — 'the manifest and assignment match', member_protocol.md §12; the manifest binds every identity, exact slot generation, and versions (§10.2); incompatibility fails closed (§14)",
+      "expected_classification": {
+        "attribution": "MEMBER",
+        "retryable": false,
+        "chargeable_tier_failure": true,
+        "rule": "member_protocol.md §15 table rows 1-2: identity wrong / 'wrong binary/runtime used' -> MEMBER",
+        "variant": "if evidence shows the pool itself published an assignment inconsistent with confirmed TIG data, attribution is POOL (member_protocol.md §15 table: 'Pool issued an assignment inconsistent with confirmed TIG data')"
+      }
+    },
+    "solution-invalid": {
+      "category": "structurally valid, solution-invalid (local screening)",
+      "files": ["cases/solution-invalid/"],
+      "delta_from_golden": "self-consistent package (own leaf hashes 4432c755… root) whose solutions are semantically worthless: quality vector [-1, 0, 3, -5, 2, 0, -2, 1], every value below fixture min_verification_quality 40",
+      "schema_validation": { "manifest": "pass", "output_records": "pass" },
+      "manifest_bytes": { "size_bytes": 2146, "sha256": "48be263dba220e98614876db04a3a2eea36be100af3af7d522207bbb13c02768" },
+      "merkle_root": "4432c755173da64f364fa4e977eb0e07d5cb7b482b77a4734b01ed66a1aa6576",
+      "expected_check_result": "all mechanical checks pass -> STRUCTURALLY_ACCEPTED and DURABLY_ACCEPTED are reachable; mechanical checks 'do not decide whether a solution is semantically valid' (member_protocol.md §10.2). Screening/TIG outcome: zero bundles meet the minimum verification quality.",
+      "expected_classification": {
+        "attribution": "NONE",
+        "fraud": false,
+        "retryable": false,
+        "chargeable_tier_failure": true,
+        "rule": "member_protocol.md §15 table: 'Complete benchmark has zero bundles meeting TIG's minimum verification quality' -> no fraud attribution, chargeable tier failure unless a pool/TIG/compatibility incident applies; mining_system.md §8: such a benchmark 'counts as a chargeable failure for this tier policy even though it is not described as fraud'. Contrast: verified work that merely earns no qualifier is no failure at all (§15 table; mining_system.md §8)."
+      }
+    },
+    "method-non-reproducible": {
+      "category": "structurally valid, method-non-reproducible (fault attribution)",
+      "files": ["cases/method-non-reproducible/", "cases/method-non-reproducible/reproduction.json"],
+      "delta_from_golden": "runtime_signature at nonces 2 and 5 is golden value + 1 (fabricated); leaf hashes and root (0301c853…) recomputed so the package is internally perfect. reproduction.json records the re-executed (golden) values; mismatch set {2, 5}.",
+      "schema_validation": { "manifest": "pass", "output_records": "pass" },
+      "manifest_bytes": { "size_bytes": 2146, "sha256": "264fb44be27bae774254e98c163d7f82c4c790f52902549b761b13f72d54239a" },
+      "merkle_root": "0301c853c972e4210b08c91107c83826b762478e52d6dcb72232331558432f69",
+      "expected_check_result": "every mechanical check passes; the package reaches DURABLY_ACCEPTED and the benchmark/proof are submitted. Later re-execution with the pinned binary, runtime, and assignment seed material does not reproduce nonces 2 and 5; TIG confirms the benchmark non-reproducible (terminal state FRAUDULENT).",
+      "expected_classification": {
+        "attribution": "MEMBER",
+        "retryable": false,
+        "chargeable_tier_failure": false,
+        "method_loss_rule": true,
+        "rule": "member_protocol.md §15 table row 2: 'TIG confirms non-reproducible/fraudulent member output' -> MEMBER; §15: 'a MEMBER method-verification outcome instead uses the separate method-loss rule' and does not increment f unless another chargeable failure also occurred; mining_system.md §8: 'Method-verification fraud remains separate: the pool ... charges the exact TIG loss under the method-penalty policy.'"
+      }
+    }
+  },
+  "scenarios_without_package_files": {
+    "_comment": "Attribution contrast cases the Artifact Worker and fault attribution must also distinguish; they reuse the golden package bytes and differ only in pool/TIG-side events.",
+    "pool-lost-after-receipt": {
+      "event": "golden package DURABLY_ACCEPTED with receipt issued; pool later cannot read the artifact",
+      "expected_classification": {
+        "attribution": "POOL",
+        "rule": "member_protocol.md §12: 'If the pool loses an artifact after issuing the receipt, it is a pool failure and cannot be charged to the member'; §15 table: 'lost data after receipt' -> POOL; mining_system.md §8 not-member list; §8: after durable acceptance, member unavailability or deletion of local artifacts cannot be a member failure"
+      }
+    },
+    "pool-rejects-structurally-valid": {
+      "event": "pool rejects the golden package even though every §10.2/§12 check objectively passes",
+      "expected_classification": {
+        "attribution": "POOL",
+        "rule": "member_protocol.md §15 table: 'Pool rejected a structurally valid package' -> POOL; mining_system.md §8: 'the pool incorrectly rejected a structurally usable package' is not member fraud"
+      }
+    },
+    "transient-network-retry": {
+      "event": "upload chunk fails with 5xx/timeout; heartbeats lost; member retries with backoff and completes before the deadline",
+      "expected_classification": {
+        "attribution": "NONE",
+        "retryable": true,
+        "rule": "member_protocol.md §13 retry rules; §15 table: 'lost heartbeat, or transient member network error by itself' -> no trust effect; §16 invariant 13: missing connectivity alone never becomes a trust penalty"
+      }
+    },
+    "unresolved-corruption-origin": {
+      "event": "received bytes unstable across retries; neither member-origin corruption nor pool/transit fault can be established",
+      "expected_classification": {
+        "attribution": "UNRESOLVED",
+        "rule": "member_protocol.md §15 table: 'Corruption origin ... cannot be established' -> UNRESOLVED; mining_system.md §8: record an unresolved operational outcome rather than automatically penalizing the member"
+      }
+    }
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "declared": {
+    "assignment_digest": "1cd20851afc3fb6152b9b42a0b7b4858c07f590e80c01fb5534091b9a15b92a4",
+    "compressed_size_bytes": 40960,
+    "manifest_sha256": "2bd3cdf1184f6d58d0af97e91351af2bf0134a7f281d721d7ecb03ad7735a87e",
+    "media_type": "application/vnd.tig-pool.proof-material-v1.tar+zstd",
+    "package_id": "77777777-7777-4777-8777-777777777777",
+    "package_sha256": "d7c9494c755a8406a0c7a02cdaccdb052ecc85adeffb00e4fe0d4308a0b526e7",
+    "uncompressed_size_bytes": 65536
+  },
+  "note": "Upload stalls before all declared bytes arrive; the package deadline passes. See expected.json for both attribution sub-outcomes.",
+  "observed": {
+    "committed_offset": 24576,
+    "finalize_called": false,
+    "latest_confirmed_height_at_evaluation": 100191,
+    "package_due_before_block": 100191,
+    "pool_and_tig_available_through_deadline": true
+  }
+}

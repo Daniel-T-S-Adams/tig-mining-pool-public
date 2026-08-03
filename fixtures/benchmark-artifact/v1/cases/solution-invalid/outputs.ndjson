@@ -1,0 +1,8 @@
+{"cpu_arch":"amd64","fuel_consumed":"1310000001","nonce":0,"runtime_signature":"7000000000000000001","solution":"badsol-c001-t900-n0"}
+{"cpu_arch":"amd64","fuel_consumed":"1310000002","nonce":1,"runtime_signature":"7000000000000000002","solution":"badsol-c001-t900-n1"}
+{"cpu_arch":"amd64","fuel_consumed":"1310000003","nonce":2,"runtime_signature":"7000000000000000003","solution":"badsol-c001-t900-n2"}
+{"cpu_arch":"amd64","fuel_consumed":"1310000004","nonce":3,"runtime_signature":"7000000000000000004","solution":"badsol-c001-t900-n3"}
+{"cpu_arch":"amd64","fuel_consumed":"1310000005","nonce":4,"runtime_signature":"7000000000000000005","solution":"badsol-c001-t900-n4"}
+{"cpu_arch":"amd64","fuel_consumed":"1310000006","nonce":5,"runtime_signature":"7000000000000000006","solution":"badsol-c001-t900-n5"}
+{"cpu_arch":"amd64","fuel_consumed":"1310000007","nonce":6,"runtime_signature":"7000000000000000007","solution":"badsol-c001-t900-n6"}
+{"cpu_arch":"amd64","fuel_consumed":"1310000008","nonce":7,"runtime_signature":"7000000000000000008","solution":"badsol-c001-t900-n7"}

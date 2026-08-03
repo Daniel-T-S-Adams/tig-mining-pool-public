@@ -1,0 +1,419 @@
+{
+  "fixture_set": "queue-lifecycle",
+  "version": "v1",
+  "family": "availability-queue",
+  "provenance": "constructed",
+  "notes": [
+    "All identifiers, timestamps, block heights, and policy numbers are invented and internally consistent only within this fixture set. No value is a live protocol or policy constant.",
+    "internal_pool_unverified_limit, tier assignments, and collateral amounts are versioned policy whose numeric values are intentionally open (mining_system.md §11 'Required before full product implementation'); the values below carry policy_version 'fixture-v1' and bind nothing.",
+    "Offer states use the member-visible names of member_protocol.md §9 (OFFER_QUEUED -> OFFER_READY_CHECK -> OFFER_PENDING); architecture.md §5.1 uses the equivalent server-side QUEUED/PENDING vocabulary.",
+    "The 90-second lease and 30-second heartbeat interval are the documented spike defaults of member_protocol.md §6, not settled production values.",
+    "An unverified benchmark counts from creation of its pool precommit intent until TIG records it verified or terminal (mining_system.md §6.1); pool_unverified below is counted on that definition."
+  ],
+  "cases": [
+    {
+      "name": "direct_pending_empty_queue",
+      "description": "Baseline: an eligible offer with global capacity open and no live queue reserves the slot as PENDING immediately; no queue entry is created.",
+      "rule": "architecture.md §5.1 step 2 (eligible offer with capacity reserves the slot as PENDING); member_protocol.md §6 handling steps 1-6",
+      "initial_state": {
+        "policy": { "policy_version": "fixture-v1", "internal_pool_unverified_limit": 4 },
+        "pool_unverified": 2,
+        "members": [
+          { "member_id": "member_alpha", "tier": 2, "member_unverified": 0, "collateral_ok": true }
+        ],
+        "slots": [
+          { "slot_id": "slot_alpha_1", "member_id": "member_alpha", "state": "AVAILABLE", "qualification": "QUALIFIED", "slot_generation": 3 }
+        ],
+        "availability_queue": []
+      },
+      "events": [
+        { "at": "2026-01-15T12:00:00Z", "event": "capacity_offer_received", "offer_id": "offer_0001", "member_id": "member_alpha", "slot_id": "slot_alpha_1", "idempotency_key": "offer_0001" }
+      ],
+      "expected_transitions": [
+        { "subject": "slot slot_alpha_1", "from": "AVAILABLE", "to": "RESERVED", "rule": "member_protocol.md §9 slot transitions (AVAILABLE -> RESERVED on the non-queued path); member_protocol.md §6 step 6 'Otherwise reserve the slot and return PENDING with a renewable lease'" },
+        { "subject": "offer offer_0001", "from": "(new)", "to": "OFFER_PENDING", "rule": "architecture.md §5.1 step 2 'Otherwise it reserves the slot as PENDING'; lease semantics member_protocol.md §6 (spike default 90 s from last accepted heartbeat)" }
+      ],
+      "final_state": {
+        "offers": [
+          { "offer_id": "offer_0001", "state": "OFFER_PENDING", "lease_expires_at": "2026-01-15T12:01:30Z", "precommit": "NOT_STARTED" }
+        ],
+        "availability_queue": [],
+        "tig_writes_created": 0,
+        "collateral_reserved": false,
+        "note": "Precommit state NOT_STARTED is recorded explicitly per member_protocol.md §6 step 7; the financial reservation happens later, at decision time (member_protocol.md §6 last paragraph)."
+      }
+    },
+    {
+      "name": "queued_when_global_limit_full",
+      "description": "An eligible offer meets a full pool-wide unverified budget: it is recorded QUEUED with a renewable lease, holds no TIG capacity, and reserves no collateral.",
+      "rule": "mining_system.md §4.1 'If the pool-wide unverified-benchmark budget is full, an otherwise eligible offer enters the compute-availability queue instead of causing a TIG precommit'; mining_system.md §6.1 'pool_unverified < internal_pool_unverified_limit'; architecture.md §5.1 step 2",
+      "initial_state": {
+        "policy": { "policy_version": "fixture-v1", "internal_pool_unverified_limit": 4 },
+        "pool_unverified": 4,
+        "members": [
+          { "member_id": "member_alpha", "tier": 2, "member_unverified": 0, "collateral_ok": true }
+        ],
+        "slots": [
+          { "slot_id": "slot_alpha_1", "member_id": "member_alpha", "state": "AVAILABLE", "qualification": "QUALIFIED", "slot_generation": 3 }
+        ],
+        "availability_queue": []
+      },
+      "events": [
+        { "at": "2026-01-15T12:00:00Z", "event": "capacity_offer_received", "offer_id": "offer_0002", "member_id": "member_alpha", "slot_id": "slot_alpha_1", "idempotency_key": "offer_0002" }
+      ],
+      "expected_transitions": [
+        { "subject": "offer offer_0002", "from": "(new)", "to": "OFFER_QUEUED", "rule": "architecture.md §5.1 step 2 'the Controller records QUEUED with a renewable lease and no TIG or collateral reservation'; member_protocol.md §6 step 5" },
+        { "subject": "slot slot_alpha_1", "from": "AVAILABLE", "to": "QUEUED", "rule": "member_protocol.md §9 slot transitions 'AVAILABLE -> QUEUED -> RESERVED'" }
+      ],
+      "final_state": {
+        "availability_queue": [
+          { "offer_id": "offer_0002", "member_id": "member_alpha", "queue_accepted_at": "2026-01-15T12:00:00Z", "lease_expires_at": "2026-01-15T12:01:30Z" }
+        ],
+        "tig_writes_created": 0,
+        "collateral_reserved": false,
+        "pool_unverified": 4,
+        "note": "Queued capacity offers consume no TIG pending capacity (mining_system.md §10 invariant 23)."
+      }
+    },
+    {
+      "name": "fifo_tie_broken_by_offer_id",
+      "description": "Two live queued entries share the same durable queue_accepted_at. When one capacity position opens, the entry with the smaller offer_id is promoted first.",
+      "rule": "mining_system.md §4.1 'FIFO by durable server acceptance time, with offer_id as the deterministic tie-break'; architecture.md §5.1 step 3 'selects the live queued offer with the smallest (queue_accepted_at, offer_id)'",
+      "initial_state": {
+        "policy": { "policy_version": "fixture-v1", "internal_pool_unverified_limit": 2 },
+        "pool_unverified": 2,
+        "members": [
+          { "member_id": "member_alpha", "tier": 2, "member_unverified": 1, "collateral_ok": true },
+          { "member_id": "member_beta", "tier": 2, "member_unverified": 1, "collateral_ok": true }
+        ],
+        "availability_queue": [
+          { "offer_id": "offer_0007", "member_id": "member_beta", "slot_id": "slot_beta_1", "queue_accepted_at": "2026-01-15T12:00:00Z", "lease_state": "LIVE" },
+          { "offer_id": "offer_0002", "member_id": "member_alpha", "slot_id": "slot_alpha_1", "queue_accepted_at": "2026-01-15T12:00:00Z", "lease_state": "LIVE" }
+        ]
+      },
+      "events": [
+        { "at": "2026-01-15T12:05:00Z", "event": "benchmark_verified", "benchmark_id": "bm_1001", "effect": "pool_unverified 2 -> 1" },
+        { "at": "2026-01-15T12:05:10Z", "event": "scheduler_pass" },
+        { "at": "2026-01-15T12:05:20Z", "event": "heartbeat_ready_check_echo", "offer_id": "offer_0002", "ready_check_id": "rc_0002_1" },
+        { "at": "2026-01-15T12:05:21Z", "event": "atomic_promotion_transaction", "offer_id": "offer_0002", "recount": { "pool_unverified": 1, "member_alpha_unverified": 1 }, "outcome": "gates_pass" }
+      ],
+      "expected_transitions": [
+        { "subject": "offer offer_0002", "from": "OFFER_QUEUED", "to": "OFFER_READY_CHECK", "rule": "architecture.md §5.1 step 3: smallest (queue_accepted_at, offer_id) is (12:00:00Z, offer_0002) < (12:00:00Z, offer_0007); controller 'requests a short availability confirmation' with a fresh ready_check_id (member_protocol.md §6)" },
+        { "subject": "offer offer_0007", "from": "OFFER_QUEUED", "to": "OFFER_QUEUED", "rule": "no-op: not selected; mining_system.md §4.1 'the Controller offers each open position to the oldest eligible live entry first' and only one position opened" },
+        { "subject": "offer offer_0002", "from": "OFFER_READY_CHECK", "to": "OFFER_PENDING", "rule": "member_protocol.md §6 'Only that confirmation permits the atomic capacity check, collateral reservation, and precommit intent'; architecture.md §7.6 atomic recount under the serialized precommit-admission lease" },
+        { "subject": "workflow wf_0002", "from": "(none)", "to": "PRECOMMIT_INTENT_CREATED", "rule": "architecture.md §5.1 step 4: decision plus one PRECOMMIT write intent recorded in one transaction; unverified count increments at intent creation (mining_system.md §6.1)" }
+      ],
+      "final_state": {
+        "availability_queue": [
+          { "offer_id": "offer_0007", "member_id": "member_beta", "queue_accepted_at": "2026-01-15T12:00:00Z", "lease_state": "LIVE" }
+        ],
+        "offers": [ { "offer_id": "offer_0002", "state": "OFFER_PENDING" } ],
+        "pool_unverified": 2,
+        "tig_write_intents": [ { "workflow_id": "wf_0002", "write_kind": "PRECOMMIT", "generation": 1 } ]
+      }
+    },
+    {
+      "name": "multi_member_multi_slot_promotion_order",
+      "description": "Three queued entries across two members; two capacity positions open in one pass. The two oldest eligible live entries are promoted strictly in FIFO order; the third stays queued because the recount finds the limit full again.",
+      "rule": "mining_system.md §4.1 'the Controller offers each open position to the oldest eligible live entry first'; architecture.md §7.6 serialized recount per promotion; member_protocol.md §6 per-member cap 'max(0, tier_number - member_unverified) queued or reserved offers'",
+      "initial_state": {
+        "policy": { "policy_version": "fixture-v1", "internal_pool_unverified_limit": 3 },
+        "pool_unverified": 3,
+        "members": [
+          { "member_id": "member_alpha", "tier": 3, "member_unverified": 1, "collateral_ok": true, "queued_or_reserved_cap": 2 },
+          { "member_id": "member_beta", "tier": 2, "member_unverified": 1, "collateral_ok": true, "queued_or_reserved_cap": 1 }
+        ],
+        "availability_queue": [
+          { "offer_id": "offer_0003", "member_id": "member_alpha", "slot_id": "slot_alpha_1", "queue_accepted_at": "2026-01-15T12:00:01Z", "lease_state": "LIVE" },
+          { "offer_id": "offer_0004", "member_id": "member_beta", "slot_id": "slot_beta_1", "queue_accepted_at": "2026-01-15T12:00:02Z", "lease_state": "LIVE" },
+          { "offer_id": "offer_0005", "member_id": "member_alpha", "slot_id": "slot_alpha_2", "queue_accepted_at": "2026-01-15T12:00:03Z", "lease_state": "LIVE" }
+        ]
+      },
+      "events": [
+        { "at": "2026-01-15T12:10:00Z", "event": "benchmark_verified", "benchmark_id": "bm_1002", "effect": "pool_unverified 3 -> 2" },
+        { "at": "2026-01-15T12:10:00Z", "event": "benchmark_terminal_stopped", "benchmark_id": "bm_1003", "effect": "pool_unverified 2 -> 1" },
+        { "at": "2026-01-15T12:10:10Z", "event": "scheduler_pass" },
+        { "at": "2026-01-15T12:10:20Z", "event": "heartbeat_ready_check_echo", "offer_id": "offer_0003", "ready_check_id": "rc_0003_1" },
+        { "at": "2026-01-15T12:10:21Z", "event": "atomic_promotion_transaction", "offer_id": "offer_0003", "recount": { "pool_unverified": 1 }, "outcome": "gates_pass" },
+        { "at": "2026-01-15T12:10:30Z", "event": "heartbeat_ready_check_echo", "offer_id": "offer_0004", "ready_check_id": "rc_0004_1" },
+        { "at": "2026-01-15T12:10:31Z", "event": "atomic_promotion_transaction", "offer_id": "offer_0004", "recount": { "pool_unverified": 2 }, "outcome": "gates_pass" }
+      ],
+      "expected_transitions": [
+        { "subject": "offer offer_0003", "from": "OFFER_QUEUED", "to": "OFFER_READY_CHECK", "rule": "architecture.md §5.1 step 3: oldest eligible live entry (12:00:01Z) first" },
+        { "subject": "offer offer_0003", "from": "OFFER_READY_CHECK", "to": "OFFER_PENDING", "rule": "member_protocol.md §6 ready-check confirmation permits the atomic capacity check; recount 1 < 3 passes (architecture.md §7.6)" },
+        { "subject": "workflow wf_0003", "from": "(none)", "to": "PRECOMMIT_INTENT_CREATED", "rule": "architecture.md §5.1 step 4; pool_unverified 1 -> 2 at intent creation (mining_system.md §6.1)" },
+        { "subject": "offer offer_0004", "from": "OFFER_QUEUED", "to": "OFFER_READY_CHECK", "rule": "architecture.md §5.1 step 3: next-oldest live entry (12:00:02Z) receives the second open position" },
+        { "subject": "offer offer_0004", "from": "OFFER_READY_CHECK", "to": "OFFER_PENDING", "rule": "member_protocol.md §6; recount 2 < 3 passes (architecture.md §7.6)" },
+        { "subject": "workflow wf_0004", "from": "(none)", "to": "PRECOMMIT_INTENT_CREATED", "rule": "architecture.md §5.1 step 4; pool_unverified 2 -> 3" },
+        { "subject": "offer offer_0005", "from": "OFFER_QUEUED", "to": "OFFER_QUEUED", "rule": "no-op: recount would find pool_unverified 3, not < internal_pool_unverified_limit 3 (mining_system.md §6.1; mining_system.md §10 invariant 23); entry remains live in FIFO position" }
+      ],
+      "final_state": {
+        "availability_queue": [
+          { "offer_id": "offer_0005", "member_id": "member_alpha", "queue_accepted_at": "2026-01-15T12:00:03Z", "lease_state": "LIVE" }
+        ],
+        "offers": [
+          { "offer_id": "offer_0003", "state": "OFFER_PENDING" },
+          { "offer_id": "offer_0004", "state": "OFFER_PENDING" }
+        ],
+        "pool_unverified": 3,
+        "note": "member_alpha holds one reserved (offer_0003) and one queued (offer_0005) offer: 2 <= cap max(0, 3 - 1) = 2 (member_protocol.md §6)."
+      }
+    },
+    {
+      "name": "member_queue_cap_rejects_extra_offer",
+      "description": "A member whose queued-plus-reserved offers already equal max(0, tier_number - member_unverified) sends another offer; it is rejected without queuing.",
+      "rule": "member_protocol.md §6 'One member may have no more than max(0, tier_number - member_unverified) queued or reserved offers, and a slot may have only one'; member_protocol.md §6 step 4 'Return NO_ACTION or REJECTED without queuing when the member is not eligible for work'",
+      "initial_state": {
+        "policy": { "policy_version": "fixture-v1", "internal_pool_unverified_limit": 4 },
+        "pool_unverified": 4,
+        "members": [
+          { "member_id": "member_alpha", "tier": 2, "member_unverified": 1, "queued_or_reserved_cap": 1 }
+        ],
+        "availability_queue": [
+          { "offer_id": "offer_0020", "member_id": "member_alpha", "slot_id": "slot_alpha_1", "queue_accepted_at": "2026-01-15T12:00:00Z", "lease_state": "LIVE" }
+        ]
+      },
+      "events": [
+        { "at": "2026-01-15T12:01:00Z", "event": "capacity_offer_received", "offer_id": "offer_0021", "member_id": "member_alpha", "slot_id": "slot_alpha_2", "idempotency_key": "offer_0021" }
+      ],
+      "expected_transitions": [
+        { "subject": "offer offer_0021", "from": "(new)", "to": "REJECTED", "rule": "member_protocol.md §6: cap max(0, 2 - 1) = 1 already consumed by offer_0020; rejection response name is a derivation, see README open question 4" }
+      ],
+      "final_state": {
+        "availability_queue": [
+          { "offer_id": "offer_0020", "member_id": "member_alpha", "queue_accepted_at": "2026-01-15T12:00:00Z", "lease_state": "LIVE" }
+        ],
+        "offers": [ { "offer_id": "offer_0021", "state": "REJECTED", "terminal_reason": "member_queue_cap_exceeded" } ],
+        "note": "No queue entry, no trust effect: the cap 'prevents unused queue entries from exceeding the work the member could legally receive' (member_protocol.md §6)."
+      }
+    },
+    {
+      "name": "stale_lease_expired_entry_skipped",
+      "description": "The oldest queued entry stopped heartbeating and its lease lapsed. At promotion it is removed without member penalty and the next live entry is examined.",
+      "rule": "member_protocol.md §6 'If the lease expires before a precommit is submitted, the offer is cancelled without trust effect'; mining_system.md §4.1 'An expired or cancelled offer leaves the queue without a member penalty'; architecture.md §5.1 step 3 'Expired, cancelled, or ineligible entries are skipped without creating a TIG write'",
+      "initial_state": {
+        "policy": { "policy_version": "fixture-v1", "internal_pool_unverified_limit": 1 },
+        "pool_unverified": 1,
+        "availability_queue": [
+          { "offer_id": "offer_0006", "member_id": "member_alpha", "slot_id": "slot_alpha_1", "queue_accepted_at": "2026-01-15T12:00:00Z", "last_heartbeat_at": "2026-01-15T12:00:00Z", "lease_expires_at": "2026-01-15T12:01:30Z" },
+          { "offer_id": "offer_0008", "member_id": "member_beta", "slot_id": "slot_beta_1", "queue_accepted_at": "2026-01-15T12:00:30Z", "last_heartbeat_at": "2026-01-15T12:04:30Z", "lease_expires_at": "2026-01-15T12:06:00Z" }
+        ]
+      },
+      "events": [
+        { "at": "2026-01-15T12:05:00Z", "event": "benchmark_verified", "benchmark_id": "bm_1004", "effect": "pool_unverified 1 -> 0" },
+        { "at": "2026-01-15T12:05:10Z", "event": "scheduler_pass", "note": "offer_0006 lease expired at 12:01:30Z" }
+      ],
+      "expected_transitions": [
+        { "subject": "offer offer_0006", "from": "OFFER_QUEUED", "to": "EXPIRED", "rule": "member_protocol.md §6 lease expiry before precommit cancels without trust effect; terminal reason recorded per architecture.md §7.6 (offer state includes 'terminal reason')" },
+        { "subject": "slot slot_alpha_1", "from": "QUEUED", "to": "AVAILABLE", "rule": "member_protocol.md §9: only QUEUED-side reservation existed; no assignment was created, so the slot's local reservation ends with the offer" },
+        { "subject": "offer offer_0008", "from": "OFFER_QUEUED", "to": "OFFER_READY_CHECK", "rule": "member_protocol.md §6 'the pool removes the offer without a member penalty and examines the next queue entry'; architecture.md §5.1 step 3" }
+      ],
+      "final_state": {
+        "offers": [
+          { "offer_id": "offer_0006", "state": "EXPIRED", "terminal_reason": "offer_lease_expired", "trust_effect": "none" },
+          { "offer_id": "offer_0008", "state": "OFFER_READY_CHECK", "ready_check_id": "rc_0008_1" }
+        ],
+        "availability_queue": [],
+        "tig_writes_created": 0
+      }
+    },
+    {
+      "name": "worker_cancelled_queued_offer",
+      "description": "A worker withdraws a queued offer. It leaves the queue with no member penalty and the slot returns to AVAILABLE.",
+      "rule": "mining_system.md §4.1 'An expired or cancelled offer leaves the queue without a member penalty'; architecture.md §5.1 step 3 (cancelled entries are skipped without a TIG write)",
+      "initial_state": {
+        "policy": { "policy_version": "fixture-v1", "internal_pool_unverified_limit": 2 },
+        "pool_unverified": 2,
+        "availability_queue": [
+          { "offer_id": "offer_0009", "member_id": "member_alpha", "slot_id": "slot_alpha_1", "queue_accepted_at": "2026-01-15T12:00:00Z", "lease_state": "LIVE" },
+          { "offer_id": "offer_0010", "member_id": "member_beta", "slot_id": "slot_beta_1", "queue_accepted_at": "2026-01-15T12:00:05Z", "lease_state": "LIVE" }
+        ]
+      },
+      "events": [
+        { "at": "2026-01-15T12:02:00Z", "event": "offer_cancelled_by_worker", "offer_id": "offer_0009", "cancel_id": "cancel_0009_1" }
+      ],
+      "expected_transitions": [
+        { "subject": "offer offer_0009", "from": "OFFER_QUEUED", "to": "CANCELLED", "rule": "mining_system.md §4.1: cancellation before promotion carries no member penalty; no protocol commitment exists because a queued offer holds no TIG capacity (mining_system.md §4.1)" },
+        { "subject": "slot slot_alpha_1", "from": "QUEUED", "to": "AVAILABLE", "rule": "member_protocol.md §9 slot transitions; the queued reservation ends with the offer" }
+      ],
+      "final_state": {
+        "offers": [ { "offer_id": "offer_0009", "state": "CANCELLED", "terminal_reason": "worker_cancelled", "trust_effect": "none" } ],
+        "availability_queue": [
+          { "offer_id": "offer_0010", "member_id": "member_beta", "queue_accepted_at": "2026-01-15T12:00:05Z", "lease_state": "LIVE" }
+        ],
+        "tig_writes_created": 0,
+        "note": "offer_0010 becomes the head but is not promoted here: no capacity opened (cancellation frees no unverified position)."
+      }
+    },
+    {
+      "name": "ready_check_expiry_advances_queue",
+      "description": "The head entry receives CONFIRM_AVAILABLE but never echoes the ready_check_id. On expiry the offer is removed without penalty and the next entry is examined.",
+      "rule": "member_protocol.md §6 'If the ready check or ordinary offer lease expires, the pool removes the offer without a member penalty and examines the next queue entry'",
+      "initial_state": {
+        "policy": { "policy_version": "fixture-v1", "internal_pool_unverified_limit": 1 },
+        "pool_unverified": 0,
+        "availability_queue": [
+          { "offer_id": "offer_0011", "member_id": "member_alpha", "slot_id": "slot_alpha_1", "queue_accepted_at": "2026-01-15T12:00:00Z", "lease_state": "LIVE" },
+          { "offer_id": "offer_0012", "member_id": "member_beta", "slot_id": "slot_beta_1", "queue_accepted_at": "2026-01-15T12:00:10Z", "lease_state": "LIVE" }
+        ]
+      },
+      "events": [
+        { "at": "2026-01-15T12:01:00Z", "event": "ready_check_issued", "offer_id": "offer_0011", "ready_check_id": "rc_0011_1", "directive": "CONFIRM_AVAILABLE" },
+        { "at": "2026-01-15T12:02:30Z", "event": "ready_check_expired", "offer_id": "offer_0011", "note": "no heartbeat echoed rc_0011_1 before the offer lease deadline; see README open question 2 for the window derivation" },
+        { "at": "2026-01-15T12:02:40Z", "event": "scheduler_pass" }
+      ],
+      "expected_transitions": [
+        { "subject": "offer offer_0011", "from": "OFFER_QUEUED", "to": "OFFER_READY_CHECK", "rule": "member_protocol.md §6: controller returns CONFIRM_AVAILABLE with a fresh ready_check_id; member_protocol.md §9 state chain OFFER_QUEUED -> OFFER_READY_CHECK" },
+        { "subject": "offer offer_0011", "from": "OFFER_READY_CHECK", "to": "EXPIRED", "rule": "member_protocol.md §6 ready-check expiry removes the offer without member penalty" },
+        { "subject": "offer offer_0012", "from": "OFFER_QUEUED", "to": "OFFER_READY_CHECK", "rule": "member_protocol.md §6 '…and examines the next queue entry'; architecture.md §5.1 step 3 FIFO selection" }
+      ],
+      "final_state": {
+        "offers": [
+          { "offer_id": "offer_0011", "state": "EXPIRED", "terminal_reason": "ready_check_expired", "trust_effect": "none" },
+          { "offer_id": "offer_0012", "state": "OFFER_READY_CHECK", "ready_check_id": "rc_0012_1" }
+        ],
+        "availability_queue": [],
+        "tig_writes_created": 0
+      }
+    },
+    {
+      "name": "ready_check_replay_stale_id_ignored",
+      "description": "After a controller restart re-issues a fresh ready_check_id, a heartbeat echoing the older id does not permit promotion. Only the fresh id does, and a duplicate echo after promotion creates no second precommit intent.",
+      "rule": "member_protocol.md §6 'a fresh ready_check_id… The worker confirms… by echoing that ID… Only that confirmation permits the atomic capacity check'; member_protocol.md §5 idempotency (repeating the same key and body returns the recorded result); architecture.md §7.3 unique constraint (network, workflow_id, write_kind, generation)",
+      "initial_state": {
+        "policy": { "policy_version": "fixture-v1", "internal_pool_unverified_limit": 2 },
+        "pool_unverified": 1,
+        "availability_queue": [
+          { "offer_id": "offer_0013", "member_id": "member_alpha", "slot_id": "slot_alpha_1", "queue_accepted_at": "2026-01-15T12:00:00Z", "lease_state": "LIVE" }
+        ]
+      },
+      "events": [
+        { "at": "2026-01-15T12:01:00Z", "event": "ready_check_issued", "offer_id": "offer_0013", "ready_check_id": "rc_0013_1", "directive": "CONFIRM_AVAILABLE" },
+        { "at": "2026-01-15T12:01:05Z", "event": "controller_restart" },
+        { "at": "2026-01-15T12:01:20Z", "event": "ready_check_issued", "offer_id": "offer_0013", "ready_check_id": "rc_0013_2", "directive": "CONFIRM_AVAILABLE", "note": "fresh id after restart" },
+        { "at": "2026-01-15T12:01:25Z", "event": "heartbeat_ready_check_echo", "offer_id": "offer_0013", "ready_check_id": "rc_0013_1", "heartbeat_id": "hb_0013_7", "note": "stale id: replay of the pre-restart directive" },
+        { "at": "2026-01-15T12:01:55Z", "event": "heartbeat_ready_check_echo", "offer_id": "offer_0013", "ready_check_id": "rc_0013_2", "heartbeat_id": "hb_0013_8" },
+        { "at": "2026-01-15T12:01:56Z", "event": "atomic_promotion_transaction", "offer_id": "offer_0013", "recount": { "pool_unverified": 1 }, "outcome": "gates_pass" },
+        { "at": "2026-01-15T12:02:10Z", "event": "heartbeat_ready_check_echo", "offer_id": "offer_0013", "ready_check_id": "rc_0013_2", "heartbeat_id": "hb_0013_8", "note": "network retry of the identical heartbeat" }
+      ],
+      "expected_transitions": [
+        { "subject": "offer offer_0013", "from": "OFFER_READY_CHECK", "to": "OFFER_READY_CHECK", "rule": "no-op on stale rc_0013_1: member_protocol.md §6 requires echoing the fresh ready_check_id for the same offer_id; disposition of the stale echo is a derivation, see README open question 6" },
+        { "subject": "offer offer_0013", "from": "OFFER_READY_CHECK", "to": "OFFER_PENDING", "rule": "member_protocol.md §6: fresh rc_0013_2 echoed; atomic capacity check, collateral reservation, and precommit intent follow (architecture.md §5.1 step 4, §7.6)" },
+        { "subject": "workflow wf_0013", "from": "(none)", "to": "PRECOMMIT_INTENT_CREATED", "rule": "architecture.md §5.1 step 4; exactly one intent for (network, wf_0013, PRECOMMIT, 1)" },
+        { "subject": "workflow wf_0013", "from": "PRECOMMIT_INTENT_CREATED", "to": "PRECOMMIT_INTENT_CREATED", "rule": "no-op on replayed heartbeat hb_0013_8: member_protocol.md §5 idempotent replay returns the recorded result; architecture.md §7.3 unique constraint forbids a duplicate intent" }
+      ],
+      "final_state": {
+        "offers": [ { "offer_id": "offer_0013", "state": "OFFER_PENDING" } ],
+        "tig_write_intents": [ { "workflow_id": "wf_0013", "write_kind": "PRECOMMIT", "generation": 1, "count": 1 } ],
+        "pool_unverified": 2
+      }
+    },
+    {
+      "name": "tier_removal_cancels_queued_and_ready_check",
+      "description": "Round-close tier removal cancels the member's queued offer and unconfirmed ready check in one transaction; an offer that already owns a precommit intent is untouched and its benchmark stays member-owned.",
+      "rule": "mining_system.md §8 'Removal cancels that member's queued offers and unconfirmed ready checks… A precommit intent already created before removal remains an outstanding member-owned benchmark'; architecture.md §7.6 'Closing a tier membership and cancelling its still-queued/ready-check offers is one transaction. Offers that already own a precommit intent are not cancelled'",
+      "initial_state": {
+        "policy": { "policy_version": "fixture-v1", "internal_pool_unverified_limit": 4 },
+        "members": [
+          { "member_id": "member_alpha", "tier": 2, "round_aggregates": { "round": 834, "sample_count": 600, "unverified_exposure": 480, "verified_exposure": 130 } }
+        ],
+        "availability_queue": [
+          { "offer_id": "offer_0014", "member_id": "member_alpha", "slot_id": "slot_alpha_1", "queue_accepted_at": "2026-01-15T11:50:00Z", "lease_state": "LIVE" }
+        ],
+        "offers": [
+          { "offer_id": "offer_0015", "member_id": "member_alpha", "state": "OFFER_READY_CHECK", "ready_check_id": "rc_0015_1", "confirmed": false },
+          { "offer_id": "offer_0016", "member_id": "member_alpha", "state": "OFFER_PENDING", "workflow_id": "wf_0099" }
+        ],
+        "workflows": [
+          { "workflow_id": "wf_0099", "member_id": "member_alpha", "state": "PRECOMMIT_SUBMITTED", "write_intents": [ { "write_kind": "PRECOMMIT", "generation": 1 } ] }
+        ]
+      },
+      "events": [
+        { "at": "2026-01-15T12:00:00Z", "event": "round_close_tier_evaluation", "round": 834, "member_id": "member_alpha", "comparison": "unverified_exposure 480 > verified_exposure 130", "decision": "remove" }
+      ],
+      "expected_transitions": [
+        { "subject": "tier membership member_alpha", "from": "TIER_2", "to": "NONE", "rule": "mining_system.md §8 'if unverified_exposure[m, round] > verified_exposure[m, round]: remove tier membership'; removal means tier = NONE, concurrency zero, no new precommits" },
+        { "subject": "offer offer_0014", "from": "OFFER_QUEUED", "to": "CANCELLED", "rule": "mining_system.md §8: queued offers contain no protocol commitment and are cancelled; same transaction as the membership close (architecture.md §7.6)" },
+        { "subject": "offer offer_0015", "from": "OFFER_READY_CHECK", "to": "CANCELLED", "rule": "mining_system.md §8: unconfirmed ready checks are cancelled with the queued offers; architecture.md §7.6" },
+        { "subject": "workflow wf_0099", "from": "PRECOMMIT_SUBMITTED", "to": "PRECOMMIT_SUBMITTED", "rule": "no-op: architecture.md §7.6 'Offers that already own a precommit intent are not cancelled'; the benchmark and its financial exposure remain attached to member_alpha (mining_system.md §8, §10 invariant 24)" }
+      ],
+      "final_state": {
+        "members": [ { "member_id": "member_alpha", "tier": "NONE" } ],
+        "availability_queue": [],
+        "offers": [
+          { "offer_id": "offer_0014", "state": "CANCELLED", "terminal_reason": "tier_removed" },
+          { "offer_id": "offer_0015", "state": "CANCELLED", "terminal_reason": "tier_removed" },
+          { "offer_id": "offer_0016", "state": "OFFER_PENDING", "workflow_id": "wf_0099" }
+        ],
+        "workflows": [ { "workflow_id": "wf_0099", "state": "PRECOMMIT_SUBMITTED", "member_id": "member_alpha" } ],
+        "note": "wf_0099 continues to count against any tier member_alpha later repurchases (mining_system.md §6.1)."
+      }
+    },
+    {
+      "name": "new_capacity_does_not_bypass_live_queue",
+      "description": "Capacity opens between scheduler passes. A new eligible offer arriving in that window appends behind the existing live entry; only queue promotion consumes the open position.",
+      "rule": "mining_system.md §4.1 'While a live FIFO queue exists, a newly received offer cannot bypass it merely because a capacity position becomes visible between scheduler passes'; member_protocol.md §6 'If any live entry is already queued, a new eligible offer appends behind it even if the global count has just fallen below the internal limit. Only the queue promotion path may consume that newly open position'",
+      "initial_state": {
+        "policy": { "policy_version": "fixture-v1", "internal_pool_unverified_limit": 2 },
+        "pool_unverified": 2,
+        "availability_queue": [
+          { "offer_id": "offer_0017", "member_id": "member_alpha", "slot_id": "slot_alpha_1", "queue_accepted_at": "2026-01-15T12:00:00Z", "lease_state": "LIVE" }
+        ]
+      },
+      "events": [
+        { "at": "2026-01-15T12:04:00Z", "event": "benchmark_verified", "benchmark_id": "bm_1005", "effect": "pool_unverified 2 -> 1" },
+        { "at": "2026-01-15T12:04:05Z", "event": "capacity_offer_received", "offer_id": "offer_0018", "member_id": "member_beta", "slot_id": "slot_beta_1", "idempotency_key": "offer_0018", "note": "arrives after capacity opened but before the next scheduler pass" },
+        { "at": "2026-01-15T12:04:30Z", "event": "scheduler_pass" },
+        { "at": "2026-01-15T12:04:40Z", "event": "heartbeat_ready_check_echo", "offer_id": "offer_0017", "ready_check_id": "rc_0017_1" },
+        { "at": "2026-01-15T12:04:41Z", "event": "atomic_promotion_transaction", "offer_id": "offer_0017", "recount": { "pool_unverified": 1 }, "outcome": "gates_pass" }
+      ],
+      "expected_transitions": [
+        { "subject": "offer offer_0018", "from": "(new)", "to": "OFFER_QUEUED", "rule": "member_protocol.md §6: a live entry (offer_0017) exists, so the new offer appends behind it even though pool_unverified 1 < limit 2; mining_system.md §4.1 'New offers append to the queue'" },
+        { "subject": "offer offer_0017", "from": "OFFER_QUEUED", "to": "OFFER_READY_CHECK", "rule": "architecture.md §5.1 step 3: promotion selects the smallest (queue_accepted_at, offer_id) = (12:00:00Z, offer_0017)" },
+        { "subject": "offer offer_0017", "from": "OFFER_READY_CHECK", "to": "OFFER_PENDING", "rule": "member_protocol.md §6 confirmed ready check; atomic recount 1 < 2 passes (architecture.md §7.6)" },
+        { "subject": "workflow wf_0017", "from": "(none)", "to": "PRECOMMIT_INTENT_CREATED", "rule": "architecture.md §5.1 step 4; pool_unverified 1 -> 2 (mining_system.md §6.1)" }
+      ],
+      "final_state": {
+        "offers": [ { "offer_id": "offer_0017", "state": "OFFER_PENDING" } ],
+        "availability_queue": [
+          { "offer_id": "offer_0018", "member_id": "member_beta", "queue_accepted_at": "2026-01-15T12:04:05Z", "lease_state": "LIVE" }
+        ],
+        "pool_unverified": 2
+      }
+    },
+    {
+      "name": "atomic_recount_limit_failure_at_promotion",
+      "description": "A confirmed ready check reaches the atomic promotion transaction, but the fresh authoritative recount finds the global limit consumed (restart reconciliation attached a previously OUTCOME_UNKNOWN precommit). No intent or reservation is created; the entry stays live with its original FIFO key.",
+      "rule": "architecture.md §7.6 'In the same transaction the Controller recounts authoritative unverified workflows, checks pool_unverified < internal_pool_unverified_limit… A cached metric can drive alerts but can never authorize work'; mining_system.md §10 invariant 23 'The pool never creates a precommit at or above internal_pool_unverified_limit'",
+      "initial_state": {
+        "policy": { "policy_version": "fixture-v1", "internal_pool_unverified_limit": 3 },
+        "pool_unverified_cached_at_ready_check": 2,
+        "availability_queue": [
+          { "offer_id": "offer_0019", "member_id": "member_alpha", "slot_id": "slot_alpha_1", "queue_accepted_at": "2026-01-15T12:00:00Z", "lease_state": "LIVE" }
+        ],
+        "workflows": [
+          { "workflow_id": "wf_0090", "state": "PRECOMMIT_SUBMITTED", "intent_state": "OUTCOME_UNKNOWN", "note": "lost HTTP response awaiting reconciliation (architecture.md §7.3)" }
+        ]
+      },
+      "events": [
+        { "at": "2026-01-15T12:05:00Z", "event": "ready_check_issued", "offer_id": "offer_0019", "ready_check_id": "rc_0019_1", "directive": "CONFIRM_AVAILABLE", "cached_pool_unverified": 2 },
+        { "at": "2026-01-15T12:05:10Z", "event": "gateway_reconciliation", "workflow_id": "wf_0090", "evidence": "get-benchmarks.precommits entry with non-null state.block_confirmed", "effect": "intent OUTCOME_UNKNOWN -> CONFIRMED; authoritative pool_unverified 2 -> 3", "rule": "tig_integration.md §10; tig_integration.md §7" },
+        { "at": "2026-01-15T12:05:20Z", "event": "heartbeat_ready_check_echo", "offer_id": "offer_0019", "ready_check_id": "rc_0019_1" },
+        { "at": "2026-01-15T12:05:21Z", "event": "atomic_promotion_transaction", "offer_id": "offer_0019", "recount": { "pool_unverified": 3 }, "outcome": "global_limit_gate_fails" }
+      ],
+      "expected_transitions": [
+        { "subject": "offer offer_0019", "from": "OFFER_QUEUED", "to": "OFFER_READY_CHECK", "rule": "architecture.md §5.1 step 3" },
+        { "subject": "offer offer_0019", "from": "OFFER_READY_CHECK", "to": "OFFER_QUEUED", "rule": "recount 3 is not < internal_pool_unverified_limit 3, so no precommit intent may be created (architecture.md §7.6; mining_system.md §10 invariant 23). The member is not at fault, so none of the documented removal reasons (expiry, cancellation, member ineligibility — mining_system.md §4.1, member_protocol.md §6) applies; the entry remains live with its immutable FIFO key. Retention is a derivation — see README open question 3" }
+      ],
+      "final_state": {
+        "availability_queue": [
+          { "offer_id": "offer_0019", "member_id": "member_alpha", "queue_accepted_at": "2026-01-15T12:00:00Z", "lease_state": "LIVE", "note": "FIFO key unchanged" }
+        ],
+        "pool_unverified": 3,
+        "tig_writes_created": 0,
+        "collateral_reserved": false,
+        "note": "The stale cached count of 2 never authorized work; only the in-transaction recount decides (architecture.md §7.6)."
+      }
+    }
+  ]
+}

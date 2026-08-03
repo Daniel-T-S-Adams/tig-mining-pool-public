@@ -1,0 +1,293 @@
+{
+  "fixture_set": "queue-lifecycle",
+  "version": "v1",
+  "family": "lifecycle",
+  "provenance": "constructed",
+  "notes": [
+    "Workflow states are the local state machine of mining_system.md §4.5; terminal branches are STOPPED, EXPIRED, FAILED, FRAUDULENT.",
+    "Every confirmation transition names its authoritative TIG evidence per the tig_integration.md §7 mapping table; TIG HTTP acceptance alone is never protocol confirmation (mining_system.md §4.5).",
+    "Block-age guardrails are the spike values 60 / 110 / 120 from tig_integration.md §8, recorded under spike.workflow_guardrails in config/tig_integration.json. They are spike safeguards, not permanent constants.",
+    "Block heights are invented around the fixtures/tig/v1 anchor (block height 100080, round 834) for cross-fixture coherence; they are not live protocol values.",
+    "All IDs are obvious fakes; no credentials, signatures, or real addresses appear anywhere (fixtures/tig/v1/README.md convention)."
+  ],
+  "cases": [
+    {
+      "name": "duplicate_capacity_offer_request",
+      "description": "A worker retries a capacity offer after a lost HTTP response. The identical key and body return the recorded result; the same key with a different body is rejected. Exactly one offer exists.",
+      "rule": "member_protocol.md §5 'All state-changing JSON calls atomically store the idempotency key, canonical body hash, and result. Repeating the same key and body returns the recorded result. Repeating the key with a different body returns 409 IDEMPOTENCY_CONFLICT'; architecture.md §5.1 step 1 (Pool API records the idempotent command)",
+      "initial_state": {
+        "policy": { "policy_version": "fixture-v1", "internal_pool_unverified_limit": 4 },
+        "pool_unverified": 2,
+        "members": [ { "member_id": "member_alpha", "tier": 2, "member_unverified": 0 } ],
+        "slots": [ { "slot_id": "slot_alpha_1", "member_id": "member_alpha", "state": "AVAILABLE", "qualification": "QUALIFIED" } ],
+        "offers": []
+      },
+      "events": [
+        { "at": "2026-01-15T12:00:00Z", "event": "capacity_offer_received", "offer_id": "offer_1001", "idempotency_key": "offer_1001", "body_sha256": "sha256:fixture-body-a" },
+        { "at": "2026-01-15T12:00:01Z", "event": "http_response_lost_to_client" },
+        { "at": "2026-01-15T12:00:30Z", "event": "capacity_offer_received", "offer_id": "offer_1001", "idempotency_key": "offer_1001", "body_sha256": "sha256:fixture-body-a", "note": "identical retry" },
+        { "at": "2026-01-15T12:00:45Z", "event": "capacity_offer_received", "offer_id": "offer_1001", "idempotency_key": "offer_1001", "body_sha256": "sha256:fixture-body-b", "note": "same key, different body" }
+      ],
+      "expected_transitions": [
+        { "subject": "offer offer_1001", "from": "(new)", "to": "OFFER_PENDING", "rule": "architecture.md §5.1 step 2 (eligible, capacity open); command recorded once with its key and body hash (member_protocol.md §5)" },
+        { "subject": "offer offer_1001", "from": "OFFER_PENDING", "to": "OFFER_PENDING", "rule": "no-op: identical retry returns the recorded result (member_protocol.md §5); no second offer, slot reservation, or command row" },
+        { "subject": "offer offer_1001", "from": "OFFER_PENDING", "to": "OFFER_PENDING", "rule": "no-op: same key with different body returns 409 IDEMPOTENCY_CONFLICT and changes nothing (member_protocol.md §5)" }
+      ],
+      "final_state": {
+        "offers": [ { "offer_id": "offer_1001", "state": "OFFER_PENDING", "count": 1 } ],
+        "responses": [
+          { "at": "2026-01-15T12:00:30Z", "result": "recorded result replayed" },
+          { "at": "2026-01-15T12:00:45Z", "result": "409 IDEMPOTENCY_CONFLICT" }
+        ]
+      }
+    },
+    {
+      "name": "duplicate_durable_acceptance_receipt",
+      "description": "The durable-acceptance transaction commits but the HTTP response is lost. Status/retry returns the same immutable receipt; the slot is released exactly once and the member may delete its local package.",
+      "rule": "architecture.md §5.2 step 4 'A lost HTTP response returns that same receipt on status or retry'; architecture.md §12 'Pool API dies after durable receipt commit: Retry/status returns the same receipt and the slot remains released exactly once'; member_protocol.md §9 (receipt sets member_may_delete_package and slot_released)",
+      "initial_state": {
+        "workflows": [ { "workflow_id": "wf_2000", "benchmark_id": "bm_2000", "member_id": "member_alpha", "state": "PACKAGE_STRUCTURALLY_ACCEPTED" } ],
+        "slots": [ { "slot_id": "slot_alpha_1", "state": "UPLOADING" } ]
+      },
+      "events": [
+        { "at": "2026-01-15T12:10:00Z", "event": "fenced_publication_result_committed", "workflow_id": "wf_2000", "package_id": "pkg_2000", "accepted_object": "accepted/bm_2000/pkg_2000", "sha256": "sha256:fixture-pkg-2000" },
+        { "at": "2026-01-15T12:10:01Z", "event": "durable_acceptance_transaction", "workflow_id": "wf_2000", "receipt_id": "receipt_2000_1" },
+        { "at": "2026-01-15T12:10:02Z", "event": "http_response_lost_to_client" },
+        { "at": "2026-01-15T12:10:40Z", "event": "upload_status_retry", "package_id": "pkg_2000" }
+      ],
+      "expected_transitions": [
+        { "subject": "workflow wf_2000", "from": "PACKAGE_STRUCTURALLY_ACCEPTED", "to": "PACKAGE_DURABLY_ACCEPTED", "rule": "architecture.md §5.2 step 4: one database transaction records the accepted artifact reference, transitions the assignment, releases the slot, creates the immutable receipt, and creates the controller event" },
+        { "subject": "slot slot_alpha_1", "from": "UPLOADING", "to": "AVAILABLE", "rule": "mining_system.md §4.5 'The slot returns to AVAILABLE at PACKAGE_DURABLY_ACCEPTED'; mining_system.md §10 invariant 9" },
+        { "subject": "workflow wf_2000", "from": "PACKAGE_DURABLY_ACCEPTED", "to": "PACKAGE_DURABLY_ACCEPTED", "rule": "no-op: the status retry returns receipt_2000_1 unchanged; the slot is not released a second time (architecture.md §12)" }
+      ],
+      "final_state": {
+        "workflows": [ { "workflow_id": "wf_2000", "state": "PACKAGE_DURABLY_ACCEPTED" } ],
+        "slots": [ { "slot_id": "slot_alpha_1", "state": "AVAILABLE", "release_count": 1 } ],
+        "receipts": [ { "receipt_id": "receipt_2000_1", "member_may_delete_package": true, "slot_released": true, "count": 1 } ],
+        "note": "The member persists the receipt before deleting its local package (member_protocol.md §9); benchmark submission is now permitted (mining_system.md §4.5)."
+      }
+    },
+    {
+      "name": "delayed_precommit_confirmation",
+      "description": "A precommit submission times out with an unknown outcome. The gateway reconciles instead of resubmitting; confirmation arrives blocks later through a read, and the assignment is created only then, with the confirmed settings replacing the proposed ones.",
+      "rule": "architecture.md §7.3 'On an ambiguous outcome it leaves the intent OUTCOME_UNKNOWN, reconciles against confirmed TIG state, and never blindly duplicates the write'; tig_integration.md §10 (single unresolved precommit lane, match search); tig_integration.md §7 (precommit confirmed = get-benchmarks.precommits entry with non-null state.block_confirmed)",
+      "initial_state": {
+        "workflows": [
+          {
+            "workflow_id": "wf_2001",
+            "member_id": "member_alpha",
+            "state": "PRECOMMIT_SUBMITTED",
+            "decision_block": "block_100080",
+            "proposed_settings": { "challenge_id": "c001", "algorithm_id": "a011", "compute_type": "aws_t4g" },
+            "write_intents": [ { "write_kind": "PRECOMMIT", "generation": 1, "intent_state": "OUTCOME_UNKNOWN", "note": "HTTP timeout at 2026-01-15T12:00:05Z" } ]
+          }
+        ],
+        "tig_latest_block_height": 100081
+      },
+      "events": [
+        { "at": "2026-01-15T12:03:00Z", "event": "gateway_reconciliation_read", "endpoint": "get-benchmarks", "result": "no matching confirmed precommit yet", "rule": "tig_integration.md §10: only one unresolved precommit per serialized lane; no resubmission while unresolved" },
+        { "at": "2026-01-15T12:06:00Z", "event": "gateway_reconciliation_read", "endpoint": "get-benchmarks", "result": "exactly one precommits entry matching player, decision block, challenge c001, algorithm a011, compute type, and selected-track settings; benchmark_id bm_2001; state.block_confirmed = 100083" },
+        { "at": "2026-01-15T12:06:10Z", "event": "controller_observes_confirmed_precommit", "workflow_id": "wf_2001", "benchmark_id": "bm_2001", "confirmed_settings": { "selected_track": "track_c001_t2", "num_bundles": 8, "num_nonces": 4096, "block_started": 100083 }, "current_block_height": 100085 }
+      ],
+      "expected_transitions": [
+        { "subject": "write intent (wf_2001, PRECOMMIT, 1)", "from": "OUTCOME_UNKNOWN", "to": "CONFIRMED", "rule": "tig_integration.md §10: the lane search found exactly one candidate, so the intent resolves without resubmission; more than one candidate would stop for operator resolution" },
+        { "subject": "workflow wf_2001", "from": "PRECOMMIT_SUBMITTED", "to": "PRECOMMIT_CONFIRMED", "rule": "tig_integration.md §7: non-null state.block_confirmed in get-benchmarks.precommits is the authoritative evidence; 'Confirmed settings/details replace proposed values'" },
+        { "subject": "workflow wf_2001", "from": "PRECOMMIT_CONFIRMED", "to": "ASSIGNED", "rule": "architecture.md §5.1 step 6: the controller records authoritative settings, creates the assignment, and makes it visible; age check passes because current height 100085 - block_started 100083 = 2 < 60 (tig_integration.md §8 'do not assign a confirmed precommit at age >= 60 blocks')" }
+      ],
+      "final_state": {
+        "workflows": [
+          { "workflow_id": "wf_2001", "state": "ASSIGNED", "benchmark_id": "bm_2001", "authoritative_settings_source": "confirmed precommit, not the proposal (mining_system.md §4.2)" }
+        ],
+        "precommit_submissions_sent": 1
+      }
+    },
+    {
+      "name": "member_package_timeout_failed",
+      "description": "An assigned member never achieves durable package acceptance before the package deadline. After fault attribution classifies the outcome as MEMBER, the workflow fails and one chargeable tier failure charges X.",
+      "rule": "tig_integration.md §8 'require durable member-package acceptance before block_started + 110'; mining_system.md §8 member-attributable outcomes ('the member abandons an assigned benchmark or misses the computation or package-upload deadline before durable acceptance'); config/tig_integration.json spike.workflow_guardrails.package_due_age_blocks = 110",
+      "initial_state": {
+        "policy": { "policy_version": "fixture-v1", "failure_charge_X": "policy-versioned amount, numeric value intentionally open (mining_system.md §11)" },
+        "workflows": [
+          { "workflow_id": "wf_2002", "benchmark_id": "bm_2002", "member_id": "member_alpha", "state": "COMPUTING", "block_started": 100000, "package_due_block": 100110, "workflow_expiry_block": 100120 }
+        ],
+        "slots": [ { "slot_id": "slot_alpha_1", "state": "COMPUTING" } ],
+        "member_round_aggregates": { "member_id": "member_alpha", "round": 834, "chargeable_failures": 0 }
+      },
+      "events": [
+        { "at": "2026-01-16T08:00:00Z", "event": "block_accepted", "height": 100110, "note": "no PACKAGE_DURABLY_ACCEPTED recorded for wf_2002" },
+        { "at": "2026-01-16T08:00:10Z", "event": "fault_attribution", "workflow_id": "wf_2002", "classification": "MEMBER", "evidence": "member heartbeats ceased at block 100060; no upload session opened; no confirmed pool infrastructure failure", "rule": "mining_system.md §8: chargeable only after member_attack_model.md fault-attribution rules classify the outcome as MEMBER" }
+      ],
+      "expected_transitions": [
+        { "subject": "workflow wf_2002", "from": "COMPUTING", "to": "FAILED", "rule": "mining_system.md §8: missing the package-upload deadline before durable acceptance is member-attributable; deadline is block_started + 110 = 100110 (tig_integration.md §8), leaving the ten pool-owned blocks before local expiry at 100120 (mining_system.md §4.2, §10 invariant 21)" },
+        { "subject": "slot slot_alpha_1", "from": "COMPUTING", "to": "AVAILABLE", "rule": "member_protocol.md §9: terminal assignment state ends the slot occupation; the member-visible terminal branch is FAILED" },
+        { "subject": "member_alpha round aggregate", "from": "chargeable_failures = 0", "to": "chargeable_failures = 1, charge X from reserved security collateral", "rule": "mining_system.md §8 'Each failure charges the versioned amount X from reserved security collateral'; removal only if f > k at round close" },
+        { "subject": "pool_unverified", "from": "includes wf_2002", "to": "excludes wf_2002", "rule": "mining_system.md §6.1: unverified until 'a terminal stopped, expired, or failed state'; FAILED is terminal" }
+      ],
+      "final_state": {
+        "workflows": [ { "workflow_id": "wf_2002", "state": "FAILED", "terminal_reason": "member_missed_package_deadline", "fault_attribution": "MEMBER" } ],
+        "member_round_aggregates": { "member_id": "member_alpha", "round": 834, "chargeable_failures": 1 },
+        "note": "Artifacts for the failed benchmark may be deleted once terminal with no pending submission (mining_system.md §9)."
+      }
+    },
+    {
+      "name": "stopped_benchmark_no_proof",
+      "description": "TIG confirms the benchmark with details.stopped = true: no bundle passed the active-quality threshold. No proof is sent, no qualifiers will exist, and the outcome is a chargeable capacity failure but not fraud.",
+      "rule": "mining_system.md §4.4 'If TIG determines that no bundle passed the active-quality threshold, the benchmark is stopped, requires no proof, and will produce no qualifiers. A valid stopped benchmark is not automatically a false benchmark'; tig_integration.md §7 'If details.stopped is true, no proof is sent'",
+      "initial_state": {
+        "workflows": [
+          { "workflow_id": "wf_2003", "benchmark_id": "bm_2003", "member_id": "member_beta", "state": "BENCHMARK_SUBMITTED", "block_started": 100080 }
+        ]
+      },
+      "events": [
+        { "at": "2026-01-15T13:00:00Z", "event": "tig_read", "endpoint": "get-benchmarks", "result": "benchmarks entry for bm_2003 with non-null state.block_confirmed = 100088 and details.stopped = true" }
+      ],
+      "expected_transitions": [
+        { "subject": "workflow wf_2003", "from": "BENCHMARK_SUBMITTED", "to": "BENCHMARK_CONFIRMED", "rule": "tig_integration.md §7: benchmark confirmed = matching get-benchmarks.benchmarks entry with non-null state.block_confirmed" },
+        { "subject": "workflow wf_2003", "from": "BENCHMARK_CONFIRMED", "to": "STOPPED", "rule": "mining_system.md §4.4 and §4.5 terminal branch STOPPED; no PROOF write intent is ever created (tig_integration.md §7)" },
+        { "subject": "member_beta round aggregate", "from": "chargeable_failures = f", "to": "chargeable_failures = f + 1", "rule": "mining_system.md §8 'A benchmark with no bundles meeting TIG's minimum verification quality counts as a chargeable failure for this tier policy even though it is not described as fraud'; the charge does not relabel the outcome as fraud (mining_system.md §8, §10 invariant 18)" },
+        { "subject": "pool_unverified", "from": "includes wf_2003", "to": "excludes wf_2003", "rule": "mining_system.md §6.1: terminal stopped state ends the unverified interval" }
+      ],
+      "final_state": {
+        "workflows": [ { "workflow_id": "wf_2003", "state": "STOPPED", "fraud": false } ],
+        "proof_write_intents_created": 0,
+        "note": "Artifacts deletable once no pending protocol submission depends on them (mining_system.md §9)."
+      }
+    },
+    {
+      "name": "expired_workflow_pool_side_stall",
+      "description": "A benchmark commitment is submitted but never confirmed (TIG outage) and the local workflow reaches age 120. It is marked EXPIRED. The stall is not a member failure: durable acceptance had already transferred responsibility to the pool.",
+      "rule": "tig_integration.md §8 'mark unfinished local workflow expired at age >= 120 blocks' (config/tig_integration.json spike.workflow_guardrails.workflow_expiry_age_blocks = 120); mining_system.md §8 'Outcomes that are not member fraud' (pool missed/failed protocol submission; TIG or pool infrastructure failed independently of the member); mining_system.md §4.5 terminal branch EXPIRED",
+      "initial_state": {
+        "workflows": [
+          { "workflow_id": "wf_2004", "benchmark_id": "bm_2004", "member_id": "member_alpha", "state": "BENCHMARK_SUBMITTED", "block_started": 100000, "package_durably_accepted_at_block": 100100, "workflow_expiry_block": 100120 }
+        ]
+      },
+      "events": [
+        { "at": "2026-01-16T09:00:00Z", "event": "tig_outage", "note": "no confirmed benchmark entry appears for bm_2004 in any read" },
+        { "at": "2026-01-16T10:00:00Z", "event": "block_accepted", "height": 100120, "note": "workflow age reaches 120 blocks without benchmark confirmation" }
+      ],
+      "expected_transitions": [
+        { "subject": "workflow wf_2004", "from": "BENCHMARK_SUBMITTED", "to": "EXPIRED", "rule": "tig_integration.md §8: local workflow expiry at age >= 120; the ten-block reserve from 100110 to 100120 was pool-owned time (mining_system.md §4.2), so exhausting it is not attributable to the member" },
+        { "subject": "member_alpha round aggregate", "from": "chargeable_failures = f", "to": "chargeable_failures = f", "rule": "no-op: durable acceptance at block 100100 (before deadline 100110) transferred artifact and submission responsibility to the pool (mining_system.md §4.3, §10 invariant 7); pool/TIG/unresolved incidents are neither tier failures nor chargeable member failures (mining_system.md §8)" },
+        { "subject": "pool_unverified", "from": "includes wf_2004", "to": "excludes wf_2004", "rule": "mining_system.md §6.1: terminal expired state ends the unverified interval" }
+      ],
+      "final_state": {
+        "workflows": [ { "workflow_id": "wf_2004", "state": "EXPIRED", "terminal_reason": "workflow_age_120_without_confirmation", "fault_attribution": "NOT_MEMBER" } ],
+        "note": "The pool records the outcome and reason durably (mining_system.md §8 last paragraph); artifacts deletable once terminal (mining_system.md §9)."
+      }
+    },
+    {
+      "name": "active_full_happy_path",
+      "description": "Complete lifecycle from precommit submission to ACTIVE, with the authoritative evidence for every confirmation step and the slot released at durable acceptance rather than at activation.",
+      "rule": "mining_system.md §4.5 local state machine; tig_integration.md §7 confirmation mapping; mining_system.md §4 end-to-end flow",
+      "initial_state": {
+        "workflows": [
+          { "workflow_id": "wf_2005", "member_id": "member_alpha", "state": "PRECOMMIT_SUBMITTED", "decision_block": "block_100080" }
+        ],
+        "slots": [ { "slot_id": "slot_alpha_1", "state": "RESERVED" } ]
+      },
+      "events": [
+        { "at": "2026-01-15T12:02:00Z", "event": "tig_read", "result": "precommits entry bm_2005, state.block_confirmed = 100081, selected track track_c001_t1, block_started = 100081" },
+        { "at": "2026-01-15T12:02:30Z", "event": "assignment_published_and_acknowledged", "assignment_id": "asg_2005" },
+        { "at": "2026-01-15T12:03:00Z", "event": "member_event", "kind": "COMPUTING" },
+        { "at": "2026-01-15T12:40:00Z", "event": "member_event", "kind": "PACKAGING" },
+        { "at": "2026-01-15T12:45:00Z", "event": "member_event", "kind": "PACKAGE_READY, upload begins", "package_id": "pkg_2005" },
+        { "at": "2026-01-15T12:55:00Z", "event": "upload_finalized_all_bytes_committed" },
+        { "at": "2026-01-15T12:56:00Z", "event": "structural_checks_pass", "checks": "expected benchmark_id, manifest match, complete nonce records, quality vector, Merkle material, sizes/encoding, checksum agreement" },
+        { "at": "2026-01-15T12:57:00Z", "event": "durable_acceptance_transaction", "receipt_id": "receipt_2005_1", "at_block": 100085 },
+        { "at": "2026-01-15T12:58:00Z", "event": "benchmark_commitment_submitted", "payload": "ordered quality vector + Merkle root" },
+        { "at": "2026-01-15T13:00:00Z", "event": "tig_read", "result": "benchmarks entry bm_2005, state.block_confirmed = 100087, details.stopped = false, details.sampled_nonces published" },
+        { "at": "2026-01-15T13:00:10Z", "event": "proof_job_completed", "note": "branches built from the retained package, checked against the committed root" },
+        { "at": "2026-01-15T13:01:00Z", "event": "proof_submitted" },
+        { "at": "2026-01-15T13:03:00Z", "event": "tig_read", "result": "proofs entry bm_2005 with non-null state.block_confirmed = 100089" },
+        { "at": "2026-01-15T13:05:00Z", "event": "tig_read", "result": "bm_2005 in block.data.confirmed_ids.verified at height 100091" },
+        { "at": "2026-01-15T13:09:00Z", "event": "tig_read", "result": "bm_2005 in block.data.active_ids.benchmark at height 100095" }
+      ],
+      "expected_transitions": [
+        { "subject": "workflow wf_2005", "from": "PRECOMMIT_SUBMITTED", "to": "PRECOMMIT_CONFIRMED", "rule": "tig_integration.md §7: precommits entry with non-null state.block_confirmed; HTTP success alone could not do this (architecture.md §5.1 step 6)" },
+        { "subject": "workflow wf_2005", "from": "PRECOMMIT_CONFIRMED", "to": "ASSIGNED", "rule": "architecture.md §5.1 step 6; work starts only from a confirmed precommit and confirmed selected track (mining_system.md §10 invariant 3); age 100081 within < 60 guardrail (tig_integration.md §8)" },
+        { "subject": "workflow wf_2005", "from": "ASSIGNED", "to": "COMPUTING", "rule": "mining_system.md §4.5; member event stream (member_protocol.md §8)" },
+        { "subject": "workflow wf_2005", "from": "COMPUTING", "to": "PACKAGING", "rule": "mining_system.md §4.5; member_protocol.md §8" },
+        { "subject": "workflow wf_2005", "from": "PACKAGING", "to": "PACKAGE_UPLOADING", "rule": "mining_system.md §4.5; upload declared under package_id (member_protocol.md §11)" },
+        { "subject": "workflow wf_2005", "from": "PACKAGE_UPLOADING", "to": "PACKAGE_RECEIVED", "rule": "mining_system.md §4.5 'all advertised bytes arrived but are not yet trusted or durable'; complete size and SHA-256 verified before RECEIVED (architecture.md §5.2 step 3)" },
+        { "subject": "workflow wf_2005", "from": "PACKAGE_RECEIVED", "to": "PACKAGE_STRUCTURALLY_ACCEPTED", "rule": "mining_system.md §4.3 mechanical ingestion checks; §4.5 'bounded mechanical checks succeeded'" },
+        { "subject": "workflow wf_2005", "from": "PACKAGE_STRUCTURALLY_ACCEPTED", "to": "PACKAGE_DURABLY_ACCEPTED", "rule": "architecture.md §5.2 step 4 single transaction; durable acceptance before block_started + 110 = 100191 satisfied at 100085 (tig_integration.md §8)" },
+        { "subject": "slot slot_alpha_1", "from": "UPLOADING", "to": "AVAILABLE", "rule": "mining_system.md §4.5 'The slot returns to AVAILABLE at PACKAGE_DURABLY_ACCEPTED; it does not wait for BENCHMARK_CONFIRMED, proof construction, verification, or ACTIVE'; §10 invariant 9" },
+        { "subject": "workflow wf_2005", "from": "PACKAGE_DURABLY_ACCEPTED", "to": "BENCHMARK_SUBMITTED", "rule": "mining_system.md §4.4 and §10 invariant 5: commitment never submitted before durable acceptance" },
+        { "subject": "workflow wf_2005", "from": "BENCHMARK_SUBMITTED", "to": "BENCHMARK_CONFIRMED", "rule": "tig_integration.md §7: benchmarks entry with non-null state.block_confirmed; details.sampled_nonces drives proof construction" },
+        { "subject": "workflow wf_2005", "from": "BENCHMARK_CONFIRMED", "to": "PROOF_BUILDING", "rule": "tig_integration.md §8 'construct and submit a proof immediately after confirmed sampled nonces appear'; architecture.md §5.3 steps 1-2" },
+        { "subject": "workflow wf_2005", "from": "PROOF_BUILDING", "to": "PROOF_READY", "rule": "architecture.md §5.3 step 2: branches recomputed from the accepted package and checked against the committed root (mining_system.md §10 invariant 8)" },
+        { "subject": "workflow wf_2005", "from": "PROOF_READY", "to": "PROOF_SUBMITTED", "rule": "architecture.md §5.3 steps 3-4; mining_system.md §4.5" },
+        { "subject": "workflow wf_2005", "from": "PROOF_SUBMITTED", "to": "PROOF_CONFIRMED", "rule": "tig_integration.md §7: proofs entry with non-null state.block_confirmed; a synchronous 'verified' HTTP response is not block confirmation" },
+        { "subject": "workflow wf_2005", "from": "PROOF_CONFIRMED", "to": "VERIFYING", "rule": "mining_system.md §4.5; verification event evidence is the ID in block.data.confirmed_ids.verified (tig_integration.md §7)" },
+        { "subject": "workflow wf_2005", "from": "VERIFYING", "to": "ACTIVE", "rule": "tig_integration.md §7: 'Active: Benchmark ID in block.data.active_ids.benchmark. This set is authoritative even if a locally calculated activation height differs'" },
+        { "subject": "member_alpha unverified count", "from": "includes wf_2005", "to": "excludes wf_2005", "rule": "mining_system.md §6.1: unverified until TIG records it as verified" }
+      ],
+      "final_state": {
+        "workflows": [ { "workflow_id": "wf_2005", "state": "ACTIVE", "benchmark_id": "bm_2005" } ],
+        "slots": [ { "slot_id": "slot_alpha_1", "state": "AVAILABLE", "note": "released at 12:57, long before ACTIVE" } ],
+        "artifact_retention": "heavy full-output and Merkle artifacts deletable now that the benchmark is ACTIVE; compact permanent record retained (mining_system.md §9)"
+      }
+    },
+    {
+      "name": "fraud_confirmed_after_proof",
+      "description": "TIG records a confirmed fraud for a benchmark in VERIFYING. The workflow becomes FRAUDULENT, the exact TIG loss is charged under the method-penalty policy, and the member owns the outcome.",
+      "rule": "tig_integration.md §7 'Fraud confirmed: matching entry in get-benchmarks.frauds with non-null state.block_confirmed'; mining_system.md §4.5 terminal branch FRAUDULENT; mining_system.md §8 (TIG finding the member-owned benchmark fraudulent is member-attributable; method-verification fraud charges the exact TIG loss)",
+      "initial_state": {
+        "workflows": [
+          { "workflow_id": "wf_2006", "benchmark_id": "bm_2006", "member_id": "member_beta", "state": "VERIFYING", "reserved_method_exposure": "bundle-scaled reservation held since admission (mining_system.md §6.1)" }
+        ]
+      },
+      "events": [
+        { "at": "2026-01-15T14:00:00Z", "event": "tig_read", "endpoint": "get-benchmarks", "result": "frauds entry for bm_2006 with non-null state.block_confirmed = 100093" },
+        { "at": "2026-01-15T14:00:10Z", "event": "fault_attribution", "workflow_id": "wf_2006", "classification": "MEMBER", "rule": "mining_system.md §8: TIG finding the member-owned benchmark fraudulent or non-reproducible is member-attributable" }
+      ],
+      "expected_transitions": [
+        { "subject": "workflow wf_2006", "from": "VERIFYING", "to": "FRAUDULENT", "rule": "tig_integration.md §7 fraud-confirmed evidence; mining_system.md §4.5 terminal branch" },
+        { "subject": "member_beta method exposure", "from": "reserved", "to": "charged: exact TIG loss under the method-penalty policy", "rule": "mining_system.md §8 'when member attribution is established, charges the exact TIG loss under the method-penalty policy'; it does not also consume X unless an independently evidenced tier failure occurred" },
+        { "subject": "pool_unverified", "from": "includes wf_2006", "to": "excludes wf_2006", "rule": "mining_system.md §6.1: fraud is a terminal outcome for the unverified interval (TIG recorded a terminal state); the financial exposure outlives tier concurrency (mining_system.md §6.1, §10 invariant 24)" }
+      ],
+      "final_state": {
+        "workflows": [ { "workflow_id": "wf_2006", "state": "FRAUDULENT", "fault_attribution": "MEMBER" } ],
+        "note": "One TIG benchmark has exactly one member owner (mining_system.md §10 invariant 1), so the charge lands on member_beta alone; artifacts deletable once terminal with no pending submission (mining_system.md §9); the durable record retains outcome and reason for later correction by compensating event if attribution proves wrong (mining_system.md §8)."
+      }
+    },
+    {
+      "name": "restart_recovery_reconciles_three_workflows",
+      "description": "A controller restart finds three nonterminal workflows. Reconciliation advances each monotonically from confirmed TIG evidence: an unknown-outcome precommit resolves via the serialized-lane search, a submitted proof is found confirmed and active, and a pending benchmark commitment is retried only after the accepted artifact availability check.",
+      "rule": "tig_integration.md §10 restart steps 1-7; architecture.md §12 restart table ('Controller dies after TIG changes state: Reconciliation advances monotonically from confirmed TIG evidence'); architecture.md §7.3 (reconcile before any retry)",
+      "initial_state": {
+        "note": "state as persisted before the crash",
+        "workflows": [
+          { "workflow_id": "wf_2007", "state": "PRECOMMIT_SUBMITTED", "write_intents": [ { "write_kind": "PRECOMMIT", "generation": 1, "intent_state": "OUTCOME_UNKNOWN" } ], "decision_block": "block_100080", "proposed_settings": { "challenge_id": "c003", "algorithm_id": "a031" } },
+          { "workflow_id": "wf_2008", "benchmark_id": "bm_2008", "state": "PROOF_SUBMITTED" },
+          { "workflow_id": "wf_2009", "benchmark_id": "bm_2009", "state": "PACKAGE_DURABLY_ACCEPTED", "write_intents": [ { "write_kind": "BENCHMARK", "generation": 1, "intent_state": "PENDING" } ], "accepted_object": "accepted/bm_2009/pkg_2009", "sha256": "sha256:fixture-pkg-2009" }
+        ]
+      },
+      "events": [
+        { "at": "2026-01-15T15:00:00Z", "event": "controller_restart" },
+        { "at": "2026-01-15T15:00:05Z", "event": "load_nonterminal_workflows", "result": [ "wf_2007", "wf_2008", "wf_2009" ], "rule": "tig_integration.md §10 step 1" },
+        { "at": "2026-01-15T15:00:10Z", "event": "snapshot_fetch_and_validate", "block": "block_100096", "rule": "tig_integration.md §10 step 2; §9 block-consistent snapshot" },
+        { "at": "2026-01-15T15:00:20Z", "event": "tig_read", "endpoint": "get-benchmarks", "result": "precommits: exactly one entry matching wf_2007 (player, decision block, c003, a031, compute type, settings) as bm_2007, block_confirmed 100082; proofs: bm_2008 block_confirmed 100090; active_ids.benchmark includes bm_2008; benchmarks: no entry for bm_2009", "rule": "tig_integration.md §10 steps 3-5" },
+        { "at": "2026-01-15T15:00:30Z", "event": "artifact_availability_check", "workflow_id": "wf_2009", "object": "accepted/bm_2009/pkg_2009", "result": "object present, SHA-256 matches", "rule": "tig_integration.md §10 step 6; architecture.md §12 'Benchmark commitment may proceed only after the object availability check'" },
+        { "at": "2026-01-15T15:00:40Z", "event": "benchmark_commitment_submitted", "workflow_id": "wf_2009", "rule": "tig_integration.md §10 step 7: reconciled (not yet on TIG) before retrying the write" }
+      ],
+      "expected_transitions": [
+        { "subject": "write intent (wf_2007, PRECOMMIT, 1)", "from": "OUTCOME_UNKNOWN", "to": "CONFIRMED", "rule": "tig_integration.md §10: single-candidate lane search resolves the lost precommit response without resubmission; an ambiguous multi-candidate result would stop for operator resolution" },
+        { "subject": "workflow wf_2007", "from": "PRECOMMIT_SUBMITTED", "to": "PRECOMMIT_CONFIRMED", "rule": "tig_integration.md §7 precommit-confirmed evidence; monotonic advance (tig_integration.md §10 step 4)" },
+        { "subject": "workflow wf_2008", "from": "PROOF_SUBMITTED", "to": "PROOF_CONFIRMED", "rule": "tig_integration.md §7: proofs entry with non-null state.block_confirmed = 100090" },
+        { "subject": "workflow wf_2008", "from": "PROOF_CONFIRMED", "to": "ACTIVE", "rule": "tig_integration.md §7: bm_2008 present in block.data.active_ids.benchmark; reconciliation advances through intermediate confirmed states monotonically, never backwards (tig_integration.md §10 step 4; architecture.md §12)" },
+        { "subject": "workflow wf_2009", "from": "PACKAGE_DURABLY_ACCEPTED", "to": "BENCHMARK_SUBMITTED", "rule": "retry permitted only after the artifact availability check and write reconciliation (tig_integration.md §10 steps 6-7); the pending intent keeps its identity (network, wf_2009, BENCHMARK, 1) so no duplicate write can exist (architecture.md §7.3)" }
+      ],
+      "final_state": {
+        "workflows": [
+          { "workflow_id": "wf_2007", "state": "PRECOMMIT_CONFIRMED", "benchmark_id": "bm_2007" },
+          { "workflow_id": "wf_2008", "state": "ACTIVE" },
+          { "workflow_id": "wf_2009", "state": "BENCHMARK_SUBMITTED" }
+        ],
+        "duplicate_tig_writes": 0,
+        "note": "No state moved backwards and nothing was blindly resubmitted; a missing or corrupt accepted object would instead have stopped wf_2009 and alerted (architecture.md §12)."
+      }
+    }
+  ]
+}

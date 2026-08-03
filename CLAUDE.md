@@ -9,10 +9,12 @@ workflow bus, S3/filesystem artifact store.
 
 ## Project phase
 
-**Pre-build.** This repository currently contains design documents, schemas,
-and config — no code. The rules below that reference code, tests, or CI take
-effect as those artifacts are created. Until then, changes are edits to design
-docs and follow the same PR workflow.
+**Pre-build.** The design documents are settled; implementation is beginning.
+The repository skeleton exists: a pinned Rust toolchain, a Cargo workspace
+(`crates/pool-domain`), `make check` (fmt, clippy `-D warnings`, tests), and CI
+that runs it on every PR. Next milestones are the deterministic test fixtures
+and the protocol spike (`docs/pre_build_checklist.md` §6–7). Doc-only changes
+follow the same PR workflow as code.
 
 ## Source of truth
 

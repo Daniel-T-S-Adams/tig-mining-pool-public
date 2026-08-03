@@ -1,0 +1,10 @@
+[package]
+name = "pool-domain"
+description = "Shared domain types for the TIG mining pool"
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+version = "0.1.0"
+
+[lints]
+workspace = true

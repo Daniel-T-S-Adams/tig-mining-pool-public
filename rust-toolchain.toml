@@ -1,0 +1,5 @@
+[toolchain]
+# Pinned per docs/architecture.md §1: reproducible builds. Bump deliberately in
+# a reviewed PR, never implicitly.
+channel = "1.90.0"
+components = ["rustfmt", "clippy"]

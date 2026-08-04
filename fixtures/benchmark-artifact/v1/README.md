@@ -116,6 +116,12 @@ Recorded honestly rather than invented:
    bytes. Decide during the spike whether a canonical compression recipe is
    worth pinning, or whether tests should compress on the fly and treat the
    compressed digest as run-scoped.
+   **Settled (spike S3/S6, PR #28):** compressed digests are run-scoped; no
+   canonical compression recipe is pinned. The member-declared whole-package
+   SHA-256 binds each upload (`member_protocol.md` §11) and no protocol step
+   requires two parties to reproduce identical compressed bytes. The recipe
+   is recorded per run for audit (spike runs: single zstd frame, level 19,
+   frame checksum, pledged content size).
 2. **`jsonify` vs RFC 8785.** Equivalence is exact for the ASCII/integer-only
    values used here. Upstream `jsonify` does not escape or sort exactly like
    JCS for non-ASCII or exotic strings; if real solutions can contain such
@@ -126,10 +132,21 @@ Recorded honestly rather than invented:
    the pool's reproduction path parses the strings and hashes bare integers,
    as this fixture assumes (most golden runtime signatures exceed 2^53, and
    nonces 1, 5, 6 exceed 2^63).
+   **Verified live (spike S4/S6):** the pool parsed the member's decimal
+   strings to u64 and hashed/submitted bare integers; TIG confirmed the
+   proofs and activated the benchmarks, which requires every leaf hash (and
+   the quoted-solution signature preimage, assumption 2's ASCII case) to be
+   byte-exact. Non-ASCII/exotic solution strings remain unexercised
+   (assumption 2 stays open for those); see `tig_integration.md` §6.3.
 4. **Non-power-of-two leaf counts.** The promotion rule for unpaired nodes is
    taken from the pinned source but is not exercised by the 8-leaf golden
    tree (only by the internally-consistent `missing-nonce` tree over 7
    leaves). Confirm against TIG verification before relying on it.
+   **Confirmed against live TIG verification (spike S4/S6):** both live
+   10-nonce benchmarks (`894e4d4f…`, `818b03c1…`) build 10-leaf trees whose
+   pairwise fold exercises promotion at two levels; TIG confirmed the
+   sampled-nonce proofs and activated both benchmarks, which requires every
+   branch over the promoted tree to resolve to the committed root.
 5. **Published chargeable reason codes.** `member_protocol.md` §15 says only
    *published* chargeable tier-failure reason codes increment `f`; that list
    does not exist yet. `chargeable_tier_failure` values in `expected.json`

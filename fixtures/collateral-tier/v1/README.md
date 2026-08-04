@@ -77,6 +77,12 @@ open"):
    are inputs (decision 1). The discrepancy should be resolved during the
    protocol spike and, if needed, corrected in a `v2` of whichever fixture is
    wrong.
+   **Resolved (spike S6):** the pinned source multiplies by bundles
+   (`tig-protocol/src/contracts/benchmarks.rs` lines 98–99 at `ad08d1ea…`);
+   `mining_system.md` §6.8 was already correct and now carries the citation;
+   `fixtures/tig/v1/expected.json` is the refuted side, to be corrected in
+   the `v2` snapshot fixture (follow-up issue;
+   `docs/protocol_spike_report.md`).
 4. **Same-instant rejoin timing.** mining_system.md §8 says a removed member
    "normally" begins a new membership in the new round with new aggregates.
    The word "normally" leaves the same-boundary edge (rejoin transacted in the

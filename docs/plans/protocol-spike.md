@@ -1,12 +1,19 @@
 ---
 title: End-to-end protocol spike
-status: active
+status: implemented
 created: 2026-08-03
 source: docs/pre_build_checklist.md §7, issues #9–#15
-last_verified: 2026-08-03
+last_verified: 2026-08-04
 ---
 
 # Protocol spike plan
+
+> **Status: implemented.** All findings, measurements, both live-run
+> timelines, the viability verdict, and the spike-code disposal
+> recommendation are consolidated in
+> [`docs/protocol_spike_report.md`](../protocol_spike_report.md) (S6, issue
+> #15). This plan is retained as a historical record and is superseded by the
+> report.
 
 Plans describe intended work and may go stale; `docs/pre_build_checklist.md`
 §7 owns the authoritative checklist, and code/tests outrank this document once

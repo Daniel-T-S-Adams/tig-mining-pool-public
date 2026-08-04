@@ -53,6 +53,15 @@ Anchor: block `block_100080`, height `100080`, round `834`.
   confirmed settings, selected `hyperparameters` and `fuel_budget`, counts,
   and `average_quality_by_bundle`.
 
+- **v1 annotation (spike S6 close-out, no byte changes):** the
+  `precommit_fee_examples` rule in `expected.json`
+  (`fee = base_fee + per_nonce_fee × num_nonces`) is **refuted** by the pinned
+  source: `tig-protocol/src/contracts/benchmarks.rs` lines 98–99 at
+  `ad08d1ea…` multiply `per_nonce_fee` by **`num_bundles`**, not nonces
+  (`mining_system.md` §6.8, `docs/protocol_spike_report.md`). Treat those
+  example fees as historical; the `v2` fixture set (follow-up issue) corrects
+  them together with the real `get-algorithms` envelope and opaque block ids.
+
 ## Coverage audit (issue #2)
 
 `mining_system.md` §5.1's ingestion list mapped to this fixture, checked
@@ -97,10 +106,14 @@ Recorded per `docs/tig_integration.md` §1 (OpenAPI alone is not authoritative):
    fixture must adopt this shape; consumers of `get-algorithms.json` v1
    should treat its shape as historical.
 3. **Enum key casing** — `TxType`/`ActiveType` map keys are lowercase
-   (`"precommit"`, `"benchmark"`), per upstream serde attributes. Verify on
-   the wire.
+   (`"precommit"`, `"benchmark"`), per upstream serde attributes.
+   **Verified live (2026-08-04, S4):** the ACTIVE observation read
+   `block.data.active_ids.benchmark` (lowercase key) on live testnet.
 4. **Activation timing** — the fake server approximates
    `block_active = proof_confirmed + ceil(submission_delay ×
    submission_delay_multiplier)`. The pool never computes activation from this
    rule (it reads `active_ids`); the approximation only sequences the fake
-   world. Verify plausibility during the spike.
+   world. **Plausibility observed live (S4/S6):** TIG published
+   `submission_delay = 4` with `block_active = proof_confirmed + 4`
+   (1270241 → 1270245), consistent with the approximation; `active_ids`
+   remains the only authority (`tig_integration.md` §7).

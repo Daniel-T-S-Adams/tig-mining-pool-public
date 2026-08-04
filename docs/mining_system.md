@@ -698,11 +698,18 @@ fee = base_fee + per_nonce_fee * num_bundles
 ```
 
 Despite its name, current protocol code multiplies `per_nonce_fee` by bundles.
-At the time this document was written, mainnet configured `per_nonce_fee` as
-zero for every active challenge, so the effective fee was the fixed base fee
-per benchmark. This observation is not a constant: the orchestrator reads the
-live challenge configuration and requires sufficient pool fee balance before
-submitting.
+Settled during the protocol spike (S6) against the pinned upstream commit
+`ad08d1ea001a73ff5aab3b556d7f59246fece14e`:
+`tig-protocol/src/contracts/benchmarks.rs` lines 98–99 compute
+`submission_fee = base_fee + per_nonce_fee * PreciseNumber::from(num_bundles)`
+while line 113 sets `num_nonces = num_bundles * num_nonces_per_bundle` — the
+fee scales with **bundles**, not nonces, exactly as stated here
+(`docs/protocol_spike_report.md`; the per-nonce derivation in
+`fixtures/tig/v1/expected.json` is the refuted side). At the time this
+document was written, mainnet configured `per_nonce_fee` as zero for every
+active challenge, so the effective fee was the fixed base fee per benchmark.
+This observation is not a constant: the orchestrator reads the live challenge
+configuration and requires sufficient pool fee balance before submitting.
 
 The fee check is protocol admission, not a bundle-sizing rule.
 

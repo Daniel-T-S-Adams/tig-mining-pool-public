@@ -297,6 +297,27 @@ The proof set must contain every sampled nonce exactly once and no other
 nonce. Array order is not significant. Each branch must resolve its output
 metadata hash to the exact root previously submitted for that benchmark.
 
+Wire-encoding facts verified end-to-end on live testnet (spike S4, benchmark
+`894e4d4f2b865ee33eb85e334931bc6d` confirmed and activated, which requires
+every branch to resolve to the committed root):
+
+- The leaf's `nonce`, `runtime_signature`, and `fuel_consumed` are **bare
+  JSON u64 integers** on this write (serde_json prints `u64` exactly, even
+  above 2^53), while the member-protocol wire carries full-width values as
+  decimal strings — the pool parses those strings before hashing or
+  submitting.
+- The `solution` rides as a JSON string, and its signature preimage includes
+  the JSON quoting: pinned `OutputData::calc_solution_signature`
+  (`tig-structs/src/core.rs`) computes
+  `u64_le(blake3(jsonify(solution))[0..8])` where the solution is jsonified
+  **as a JSON string, quote characters included**. Reproducing the signature
+  from the raw solution bytes without the quoting produces a different leaf
+  and a rejected proof.
+- `MerkleBranch` serializes as the concatenation of
+  `{depth:02x}{sibling_hash:064x}` per element, matching both pinned Rust
+  (`tig-utils/src/merkle_tree.rs`) and the pinned Python benchmarker
+  (`common/merkle_tree.py`).
+
 ### 6.4 Writes deliberately excluded
 
 The pool does not use TIG's `set-coinbase` operation to pay internal members in
@@ -528,6 +549,22 @@ choose the wrong shape:
   benchmarker `.env` specifies `0.0.7`.
 - The reference method-verification helper contains a `g4dn` spelling while the
   protocol enum and API use `aws_g4dn`.
+- The `per_nonce_fee` field name is misleading: pinned
+  `tig-protocol/src/contracts/benchmarks.rs` lines 98–99 compute
+  `submission_fee = base_fee + per_nonce_fee * PreciseNumber::from(num_bundles)`
+  (field declared in `tig-structs/src/config.rs` line 88), so the fee scales
+  with **bundles**, not nonces (line 113 separately derives
+  `num_nonces = num_bundles * num_nonces_per_bundle`). Settled in spike S6;
+  `mining_system.md` §6.8 states the correct basis. Live testnet could not
+  discriminate (S1 observed `per_nonce_fee = 0` on all active challenges).
+- Live envelope shapes verified in spike S1 (2026-08-03): `get-algorithms`
+  returns `{"advances": […], "binarys": […], "codes": […], "player_details":
+  …}` — codes and binaries are separate arrays joined by `algorithm_id`, not
+  a merged record; `get-player-data` carries top-level `deposits` and
+  `round_earnings` beside `player`. Other read envelopes nest under a single
+  top-level resource key as expected. `fixtures/tig/v1` predates this finding;
+  a `v2` fixture must adopt the real shapes before pool code consumes
+  `get-algorithms`.
 
 These known discrepancies do not authorize accepting new mismatches. They are
 handled by the explicit v0 models and must have regression fixtures before

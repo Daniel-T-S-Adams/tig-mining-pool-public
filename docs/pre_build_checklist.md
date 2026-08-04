@@ -353,59 +353,103 @@ testnet precommit
     -> confirmed active benchmark
 ```
 
-- [ ] Create and fund the testnet Benchmarker identity required for the spike.
-- [ ] Submit a valid precommit through the pool's TIG gateway.
-- [ ] Reconcile the confirmed selected track and settings.
-- [ ] Execute the assignment through a prototype member agent.
-- [ ] Produce and upload a complete proof-material package.
-- [ ] Persist the package outside the relational database and record its
+- [x] Create and fund the testnet Benchmarker identity required for the spike.
+  — PR #25 (plan §4: address `0xbeefbeefbeefbeefbeefbeefbeefbeefbeefbeef`)
+- [x] Submit a valid precommit through the pool's TIG gateway.
+  — PR #26 (S1); repeated in every live run
+  ([spike report §4](protocol_spike_report.md))
+- [x] Reconcile the confirmed selected track and settings.
+  — PR #26 (S1): block-anchored reads, never the write response
+- [x] Execute the assignment through a prototype member agent.
+  — PR #27 (S2): all nonces in the pinned runtime container
+- [x] Produce and upload a complete proof-material package.
+  — PRs #27 (produce, schema-validated) and #28 (resumable chunked upload)
+- [x] Persist the package outside the relational database and record its
   checksum and lifecycle state.
-- [ ] Demonstrate that the member compute slot can be offered again after
+  — PR #28 (S3): filesystem artifact store, §8.3 artifact reference
+- [x] Demonstrate that the member compute slot can be offered again after
   durable acceptance.
-- [ ] Submit the benchmark commitment.
-- [ ] Observe TIG's sampled nonces from confirmed state.
-- [ ] Construct every requested proof solely from the pool's retained package.
-- [ ] Submit the proof idempotently and observe confirmed protocol state.
-- [ ] Reach `ACTIVE` with at least one valid test benchmark.
-- [ ] Exercise at least one stopped or failed path without misclassifying it as
+  — PR #28 (S3): slot released exactly once, re-offer admissible immediately
+- [x] Submit the benchmark commitment.
+  — PR #29 (S4): only after durable acceptance, live testnet
+- [x] Observe TIG's sampled nonces from confirmed state.
+  — PR #29 (S4): from `get-benchmarks` confirmed entries only
+- [x] Construct every requested proof solely from the pool's retained package.
+  — PR #29 (S4): package re-verified before use; tamper refused
+- [x] Submit the proof idempotently and observe confirmed protocol state.
+  — PR #29 (S4): live repeat refused with no second attempt
+- [x] Reach `ACTIVE` with at least one valid test benchmark.
+  — PR #29 (`894e4d4f…`, block 1270245) and the second clean run
+  (`818b03c1…`; [spike report §4](protocol_spike_report.md))
+- [x] Exercise at least one stopped or failed path without misclassifying it as
   member fraud.
-- [ ] Against the local fake TIG/verifier, exercise invalid-solution and
+  — PR #30 (S5): live stopped benchmark `e74b60fb…`, classified not-fraud
+- [x] Against the local fake TIG/verifier, exercise invalid-solution and
   method-non-reproducible packages and prove the member circuit breaker stops
   further commitments. Do not deliberately submit fraudulent work to shared
   TIG testnet without TIG operator approval.
-- [ ] Capture the live penalty/fee inputs and calculate the maximum collateral
+  — PR #30 (S5): fake-tig only, as this item requires; nothing invalid
+  touched testnet
+- [x] Capture the live penalty/fee inputs and calculate the maximum collateral
   reservation across every proposed track before precommit.
-- [ ] Determine from pinned behavior or TIG confirmation which configuration
+  — PR #26 (S1): both candidate fee bases recorded per intent
+- [x] Determine from pinned behavior or TIG confirmation which configuration
   block controls a later method-report penalty.
-- [ ] Restart the controller during at least one pending protocol transition
+  — PR #30 (S5): `tig_integration.md` §14.1; live confirmation tracked in
+  issue #33
+- [x] Restart the controller during at least one pending protocol transition
   and demonstrate reconciliation without a duplicate write.
-- [ ] Delete the retained package only after the documented retention condition
+  — PR #30 (S5): two crash points against fake-tig with server-side
+  write-count assertions (deterministic; not a shared-testnet exercise)
+- [x] Delete the retained package only after the documented retention condition
   is satisfied.
+  — PR #29 (S4) and the second clean run: deletion gated on
+  `active_ids.benchmark` ([spike report §4](protocol_spike_report.md))
 
-Measure and record:
+Measure and record (all consolidated in
+[`protocol_spike_report.md`](protocol_spike_report.md) §5):
 
-- [ ] total artifact bytes and bytes per nonce;
-- [ ] package creation and upload time;
-- [ ] artifact-ingestion time and peak temporary disk use;
-- [ ] Merkle-proof construction time and memory use;
-- [ ] number and timing of blocks between lifecycle stages;
-- [ ] TIG API call count, observed rate-limit behavior, and retry behavior;
+- [x] total artifact bytes and bytes per nonce;
+  — [spike report §5.1](protocol_spike_report.md)
+- [x] package creation and upload time;
+  — [spike report §5.2](protocol_spike_report.md)
+- [x] artifact-ingestion time and peak temporary disk use;
+  — [spike report §5.3](protocol_spike_report.md)
+- [x] Merkle-proof construction time and memory use;
+  — [spike report §5.4](protocol_spike_report.md)
+- [x] number and timing of blocks between lifecycle stages;
+  — [spike report §5.5](protocol_spike_report.md)
+- [x] TIG API call count, observed rate-limit behavior, and retry behavior;
+  — [spike report §5.6](protocol_spike_report.md)
 - [ ] member CPU/GPU time spent outside actual nonce execution; and
-- [ ] cost/time of full local solution verification and hidden method
+  — CPU measured ([spike report §5.7](protocol_spike_report.md)); left
+  unticked because the GPU half was not exercised (the spike ran CPU/arm64
+  only, `gpu_enabled = false`); GPU measurement tracked in issue #35
+- [x] cost/time of full local solution verification and hidden method
   re-execution samples, including the maximum safe sample under deadlines;
-- [ ] throughput lost to each invalid-work path and whether the proposed
+  — PR #30 and [spike report §5.8](protocol_spike_report.md)
+- [x] throughput lost to each invalid-work path and whether the proposed
   failure charge `X` makes repeated abuse uneconomic; and
-- [ ] storage and bandwidth projections at the intended initial pool size.
+  — PR #30 and [spike report §5.9](protocol_spike_report.md) (parameterized
+  on the still-open policy value `X`)
+- [x] storage and bandwidth projections at the intended initial pool size.
+  — [spike report §6](protocol_spike_report.md)
 
 Section completion criteria:
 
-- [ ] The full path is repeatable from documented commands.
-- [ ] No member machine is needed after the pool acknowledges durable artifact
+- [x] The full path is repeatable from documented commands.
+  — second clean run from a fresh data directory
+  ([spike report §3–§4](protocol_spike_report.md))
+- [x] No member machine is needed after the pool acknowledges durable artifact
   acceptance.
-- [ ] All spike findings that change an assumption have been reflected in the
+  — demonstrated in both live runs; commitment→ACTIVE→deletion used only the
+  pool's retained object ([spike report §4](protocol_spike_report.md))
+- [x] All spike findings that change an assumption have been reflected in the
   mining, integration, member-protocol, architecture, or security documents.
-- [ ] The artifact-storage and pool-side proof design is viable at the intended
+  — findings→diff table in [spike report §7](protocol_spike_report.md)
+- [x] The artifact-storage and pool-side proof design is viable at the intended
   initial scale, or a replacement design has been approved.
+  — verdict in [spike report §1](protocol_spike_report.md)
 
 ## 8. Prepare the repository for full implementation
 

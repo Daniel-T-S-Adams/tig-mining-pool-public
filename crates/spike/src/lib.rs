@@ -8,6 +8,8 @@
 //! never treated as confirmation; the precommit lane is serialized (at most
 //! one unresolved precommit intent).
 
+pub mod member;
+
 use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::io::Write as _;

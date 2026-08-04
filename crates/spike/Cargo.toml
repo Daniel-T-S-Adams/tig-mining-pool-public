@@ -10,11 +10,19 @@ version = "0.1.0"
 name = "spike-gateway"
 path = "src/bin/spike_gateway.rs"
 
+[[bin]]
+name = "spike-member"
+path = "src/bin/spike_member.rs"
+
 [dependencies]
 anyhow = "1"
+blake3 = "1"
+flate2 = "1"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 serde_json = "1"
 sha2 = "0.10"
+tar = "0.4"
+zstd = "0.13"
 
 [dev-dependencies]
 axum = "0.8"

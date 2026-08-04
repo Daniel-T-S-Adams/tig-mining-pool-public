@@ -787,7 +787,10 @@ async fn submit_precommit(
 
     let seq = w.next_bench_seq;
     w.next_bench_seq += 1;
-    let id = format!("bench_{seq:04}");
+    // Dash-form id so pool-side identifier validation (lowercase alnum +
+    // dash) accepts fake benchmark ids on the S4 end-to-end path; real TIG
+    // ids are 32-hex and pass the same rule.
+    let id = format!("bench-{seq:04}");
     let bench = Bench {
         id: id.clone(),
         settings: json!({

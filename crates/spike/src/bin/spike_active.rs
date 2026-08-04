@@ -13,6 +13,8 @@
 //!   submit-proof     --benchmark-id <id>
 //!   await-active     --benchmark-id <id> [--poll-secs 20] [--max-secs 3900]
 //!   retire           --package-id <id> --pool-root <dir>
+//!   stop             --benchmark-id <id>       (S5: explicit stopped submission)
+//!   await-stopped    --benchmark-id <id> [--poll-secs 15] [--max-secs 1800]
 //!   status
 //!
 //! Common flags: --base-url <url> --api-key-file <path> --player <address>
@@ -507,6 +509,153 @@ fn cmd_retire(gw: &Gateway, a: &Args) -> Result<()> {
     record_step(gw, "retire", started, &record)
 }
 
+/// S5 stopped path (`docs/plans/protocol-spike.md` §5 phase S5, issue #14):
+/// submit the explicit stopped benchmark write for a confirmed assignment.
+/// No package, no acceptance, no proof will ever exist for it.
+fn cmd_stop(gw: &Gateway, a: &Args) -> Result<()> {
+    let started = unix_now();
+    let benchmark_id = require(&a.benchmark_id, "--benchmark-id")?;
+    // The stop decision must reference a confirmed assignment (work exists).
+    let assignment = gw
+        .ledger
+        .read_doc(&format!("assignment-{benchmark_id}.json"))?
+        .ok_or_else(|| anyhow!("no confirmed assignment for {benchmark_id}; nothing to stop"))?;
+    let (block_id, height) = latest_height(gw)?;
+    let stop_evidence = json!({
+        "reason": "spike S5 deliberate stop: member produced no usable package for this \
+                   assignment; explicit stopped submission per tig_integration.md §6.2",
+        "confirmed_assignment_block": assignment.get("confirmed_at_block"),
+        "decided_at_block": { "block_id": block_id, "height": height },
+    });
+    pace_post_lane(&gw.ledger)?;
+    let result = gw.submit_benchmark_stopped(benchmark_id, &stop_evidence)?;
+    println!(
+        "stopped submission for {benchmark_id}: intent {} state {} (sent: {}) at height {height}",
+        result.intent_id, result.state, result.sent
+    );
+    record_step(
+        gw,
+        "stop",
+        started,
+        &json!({ "benchmark_id": benchmark_id, "intent_id": result.intent_id,
+                 "state": result.state, "sent": result.sent,
+                 "block_id": block_id, "height": height }),
+    )
+}
+
+/// Await confirmation of the stopped benchmark from confirmed reads, then
+/// classify the outcome locally per the fixtures: STOPPED terminal state,
+/// chargeable member capacity outcome, NOT fraud, no proof expected
+/// (`mining_system.md` §8 + invariant 18; `fixtures/queue-lifecycle/v1`
+/// `stopped_benchmark_no_proof`). The classification evidence document is
+/// durably persisted beside the confirmed entry.
+fn cmd_await_stopped(gw: &Gateway, a: &Args) -> Result<()> {
+    let started = unix_now();
+    let benchmark_id = require(&a.benchmark_id, "--benchmark-id")?;
+    let poll = a.poll_secs.unwrap_or(15).max(1);
+    let max = a.max_secs.unwrap_or(1800);
+    let confirmed = loop {
+        for line in gw.reconcile()? {
+            println!("{line}");
+        }
+        if let Some(doc) = gw
+            .ledger
+            .read_doc(&format!("benchmark-confirmed-{benchmark_id}.json"))?
+        {
+            break doc;
+        }
+        if unix_now().saturating_sub(started) > max {
+            record_step(gw, "await-stopped", started, &json!({ "timed_out": true }))?;
+            bail!("stopped benchmark not confirmed within {max} seconds");
+        }
+        std::thread::sleep(std::time::Duration::from_secs(poll));
+    };
+    let stopped = confirmed
+        .pointer("/entry/details/stopped")
+        .and_then(Value::as_bool);
+    if stopped != Some(true) {
+        bail!(
+            "confirmed benchmark {benchmark_id} has details.stopped = {stopped:?}; \
+             not the stopped path"
+        );
+    }
+    let sampled = confirmed.pointer("/entry/details/sampled_nonces").cloned();
+    // No proof may ever exist for a stopped benchmark (tig_integration §7).
+    let proof_intents: Vec<String> = fold_intents(&gw.ledger.read_all("intents")?)
+        .into_iter()
+        .filter(|(_, rec)| {
+            rec.get("write_kind").and_then(Value::as_str) == Some("PROOF")
+                && rec.get("benchmark_id").and_then(Value::as_str) == Some(benchmark_id)
+        })
+        .map(|(id, _)| id)
+        .collect();
+    // Fraud evidence check: the confirmed frauds section must not contain
+    // this benchmark (misclassification guard, invariant 18).
+    let (block_id, height) = latest_height(gw)?;
+    let benches = gw.client.benchmarks(&block_id, &gw.player_id)?;
+    let fraud_entries = benches
+        .get("frauds")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter(|e| {
+                    e.get("benchmark_id").and_then(Value::as_str) == Some(benchmark_id)
+                        || e.get("id").and_then(Value::as_str) == Some(benchmark_id)
+                })
+                .count()
+        })
+        .unwrap_or(0);
+    let classification = json!({
+        "benchmark_id": benchmark_id,
+        "terminal_state": "STOPPED",
+        "confirmed_at_block": confirmed.get("confirmed_at_block"),
+        "observed_via": confirmed.get("observed_via"),
+        "details_stopped": true,
+        "sampled_nonces": sampled,
+        "fraud": false,
+        "fault_classification": {
+            "attribution": "MEMBER-chargeable capacity outcome (charge X under the tier \
+                            policy), explicitly NOT fraud",
+            "chargeable_tier_failure": true,
+            "rules": [
+                "mining_system.md §8: 'A benchmark with no bundles meeting TIG's minimum \
+                 verification quality counts as a chargeable failure for this tier policy \
+                 even though it is not described as fraud'",
+                "mining_system.md §10 invariant 18: valid low-quality or non-qualifying work \
+                 is not mislabeled as fraud",
+                "tig_integration.md §7: 'If details.stopped is true, no proof is sent'",
+                "fixtures/queue-lifecycle/v1 lifecycle.json case stopped_benchmark_no_proof",
+            ],
+        },
+        "evidence": {
+            "proof_write_intents_created": proof_intents.len(),
+            "fraud_entries_for_benchmark": fraud_entries,
+            "frauds_observed_at": { "block_id": block_id, "height": height },
+        },
+    });
+    if !proof_intents.is_empty() {
+        bail!(
+            "classification violated: proof intents exist for stopped benchmark: {proof_intents:?}"
+        );
+    }
+    if fraud_entries != 0 {
+        bail!("classification check: get-benchmarks.frauds unexpectedly lists {benchmark_id}");
+    }
+    let path = gw.ledger.write_doc(
+        &format!("stopped-classification-{benchmark_id}.json"),
+        &classification,
+    )?;
+    println!(
+        "benchmark {benchmark_id} confirmed STOPPED at block {}; classification -> {}",
+        confirmed
+            .get("confirmed_at_block")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
+        path.display()
+    );
+    record_step(gw, "await-stopped", started, &classification)
+}
+
 fn cmd_status(gw: &Gateway) -> Result<()> {
     for (id, rec) in fold_intents(&gw.ledger.read_all("intents")?) {
         println!(
@@ -541,10 +690,12 @@ fn main() -> Result<()> {
         "submit-proof" => cmd_submit_proof(&gw, &a),
         "await-active" => cmd_await_active(&gw, &a),
         "retire" => cmd_retire(&gw, &a),
+        "stop" => cmd_stop(&gw, &a),
+        "await-stopped" => cmd_await_stopped(&gw, &a),
         "status" => cmd_status(&gw),
         other => bail!(
             "unknown subcommand {other} (precommit|await-assignment|commit|await-sampled|\
-             prove|submit-proof|await-active|retire|status)"
+             prove|submit-proof|await-active|retire|stop|await-stopped|status)"
         ),
     }
 }

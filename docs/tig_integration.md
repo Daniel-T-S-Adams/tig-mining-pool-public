@@ -533,6 +533,55 @@ These known discrepancies do not authorize accepting new mismatches. They are
 handled by the explicit v0 models and must have regression fixtures before
 writes are enabled.
 
+### 14.1 Method-report penalty configuration block (S5 determination)
+
+Phase S5 of the protocol spike (issue #14) determined, from the pinned commit
+`ad08d1ea001a73ff5aab3b556d7f59246fece14e`, which block's configuration
+governs the penalty applied when a method report against a benchmark later
+succeeds:
+
+- `ReportsConfig` carries `submission_fee`, `submission_period`,
+  `penalty_amount`, and `penalty_address`
+  (`tig-structs/src/config.rs` lines 122–129).
+- `submit_report` reads the **live latest-block configuration** via
+  `ctx.get_config()` (`tig-protocol/src/contracts/players.rs` lines 205–264;
+  config read at line 211) and persists into `ReportDetails` only the
+  submission `fee_paid` and the benchmark's `round`
+  (`tig-structs/src/core.rs` lines 493–502). It does **not** snapshot
+  `penalty_amount` or `penalty_address`.
+- `ArbitrationDetails` carries only the result enum
+  (`NONREPRODUCIBLE`/`REPRODUCIBLE`/`INCONCLUSIVE`) and `ArbitrationState`
+  only `block_confirmed` (`tig-structs/src/core.rs` lines 510–526). No
+  penalty value is persisted there either.
+- `penalty_amount`/`penalty_address` are referenced **nowhere else** in the
+  pinned tree (verified by exhaustive search of the pinned commit). The code
+  that resolves an arbitration and applies the penalty sits behind the
+  `Context` trait hooks `get_arbitration_details` and
+  `add_arbitration_to_mempool` (`tig-protocol/src/context.rs` lines 58–63),
+  whose implementation is not part of the pinned open-source tree.
+
+Determination: no pinned structure snapshots a penalty from the benchmark's
+own block or from the report-submission block, so neither of those blocks can
+govern the penalty through persisted state. Whatever applies the penalty must
+read a live `ProtocolConfig` at penalty-application time; the only
+config-access pattern in the pinned tree is `get_config()` — the latest-block
+configuration, as `submit_report` itself demonstrates. The governing
+configuration is therefore the one live when the arbitration outcome is
+applied (the arbitration/charge block), and a `reports.penalty_amount` change
+**can apply retroactively** to already-open benchmarks — confirming the
+residual-risk stance of `accounting.md` §11.5: collateral formulas based on
+the assignment block alone cannot guarantee coverage, so a pool risk buffer
+is required.
+
+Recorded ambiguity (not a guess): the pinned open source cannot distinguish
+the arbitration-confirmation block from a hypothetically distinct later
+charge block, because the applying code is server-side. Live confirmation
+that would settle it: observe one real report → arbitration on testnet
+spanning a `reports.penalty_amount` change, or written TIG operator
+confirmation. Until then the pool must reserve under the conservative
+reading: the penalty may be recalculated with any configuration up to charge
+time.
+
 ## 15. Upgrade procedure
 
 Changing any pin requires a reviewed integration upgrade:

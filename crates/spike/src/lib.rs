@@ -13,6 +13,7 @@
 pub mod active;
 pub mod member;
 pub mod pool;
+pub mod trust;
 
 use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
@@ -499,16 +500,13 @@ impl Gateway {
             );
         }
 
-        self.ledger.append(
-            "intents",
-            &json!({
-                "intent_id": intent_id, "write_kind": write_kind, "state": "PENDING",
-                "benchmark_id": benchmark_id, "payload_sha256": hash, "evidence": evidence,
-            }),
-        )?;
-        self.ledger.append(
-            "attempts",
-            &json!({ "intent_id": intent_id, "phase": "attempt", "endpoint": endpoint, "payload_sha256": hash }),
+        self.append_presend_records(
+            &intent_id,
+            write_kind,
+            endpoint,
+            benchmark_id,
+            &hash,
+            evidence,
         )?;
         let outcome = self.client.post_write(endpoint, body);
         let state = match outcome {
@@ -547,6 +545,174 @@ impl Gateway {
             sent: true,
             state: state.to_owned(),
         })
+    }
+
+    /// Exactly the durable records `submit_lifecycle_write` appends BEFORE
+    /// the network send: the PENDING intent, then the attempt record.
+    fn append_presend_records(
+        &self,
+        intent_id: &str,
+        write_kind: &str,
+        endpoint: &str,
+        benchmark_id: &str,
+        payload_sha256: &str,
+        evidence: &Value,
+    ) -> Result<()> {
+        self.ledger.append(
+            "intents",
+            &json!({
+                "intent_id": intent_id, "write_kind": write_kind, "state": "PENDING",
+                "benchmark_id": benchmark_id, "payload_sha256": payload_sha256, "evidence": evidence,
+            }),
+        )?;
+        self.ledger.append(
+            "attempts",
+            &json!({ "intent_id": intent_id, "phase": "attempt", "endpoint": endpoint, "payload_sha256": payload_sha256 }),
+        )
+    }
+
+    /// Crash-point hook for the S5 restart tests: perform exactly the durable
+    /// writes that precede the network send, then return WITHOUT sending —
+    /// the ledger state a process kill between the intent/attempt append and
+    /// the send leaves behind. Returns the intent id the identical payload
+    /// maps to.
+    pub fn simulate_crash_before_send(
+        &self,
+        write_kind: &str,
+        endpoint: &str,
+        benchmark_id: &str,
+        body: &Value,
+        evidence: &Value,
+    ) -> Result<String> {
+        let hash = payload_hash(body);
+        let intent_id = format!("intent_{}_{}", write_kind.to_ascii_lowercase(), &hash[..16]);
+        self.append_presend_records(
+            &intent_id,
+            write_kind,
+            endpoint,
+            benchmark_id,
+            &hash,
+            evidence,
+        )?;
+        Ok(intent_id)
+    }
+
+    /// Restart recovery for the crash window between intent persistence and a
+    /// recorded send response (`tig_integration.md` §10 step 7: reconcile a
+    /// write before retrying it). For each unresolved BENCHMARK/PROOF intent:
+    ///
+    /// - a recorded send response (success, error, or transport failure)
+    ///   means the send happened — leave the intent for `reconcile`, which
+    ///   adopts the write from confirmed state; never downgrade it here;
+    /// - no recorded response AND the benchmark visible server-side means the
+    ///   send landed with a lost response — leave it for `reconcile` too;
+    /// - no recorded response AND nothing server-side means nothing was
+    ///   applied: mark the intent FAILED so the serialized lane may resend
+    ///   the identical payload exactly once.
+    ///
+    /// Residual risk, documented for the spike report: on live TIG a landed
+    /// write could in principle lag visibility; the resend then fails as a
+    /// duplicate (4xx -> FAILED) and `reconcile` still adopts the single
+    /// confirmed entry, so the server applies the write at most once either
+    /// way.
+    pub fn recover_unsent_intents(&self) -> Result<Vec<String>> {
+        let block = self.client.latest_block()?;
+        let block_id = block
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("block missing id"))?;
+        let benches = self.client.benchmarks(block_id, &self.player_id)?;
+        let attempts = self.ledger.read_all("attempts")?;
+        let mut out = Vec::new();
+        for (intent_id, rec) in fold_intents(&self.ledger.read_all("intents")?) {
+            let state = rec.get("state").and_then(Value::as_str).unwrap_or("");
+            if !is_unresolved(state) {
+                continue;
+            }
+            let write_kind = rec.get("write_kind").and_then(Value::as_str).unwrap_or("");
+            let (section, id_key) = match write_kind {
+                "BENCHMARK" => ("benchmarks", "id"),
+                "PROOF" => ("proofs", "benchmark_id"),
+                _ => {
+                    out.push(format!(
+                        "{intent_id}: {write_kind} not covered by unsent-intent recovery \
+                         (precommits use the §10 lost-response lane search in reconcile)"
+                    ));
+                    continue;
+                }
+            };
+            let has_response = attempts.iter().any(|a| {
+                a.get("intent_id").and_then(Value::as_str) == Some(intent_id.as_str())
+                    && a.get("phase").and_then(Value::as_str) == Some("response")
+            });
+            if has_response {
+                out.push(format!(
+                    "{intent_id}: {state} with a recorded send response — left for reconcile"
+                ));
+                continue;
+            }
+            let Some(benchmark_id) = rec.get("benchmark_id").and_then(Value::as_str) else {
+                out.push(format!(
+                    "{intent_id}: {state} without benchmark_id — skipped"
+                ));
+                continue;
+            };
+            let visible = benches
+                .get(section)
+                .and_then(Value::as_array)
+                .is_some_and(|arr| {
+                    arr.iter()
+                        .any(|e| e.get(id_key).and_then(Value::as_str) == Some(benchmark_id))
+                });
+            if visible {
+                out.push(format!(
+                    "{intent_id}: no recorded response but {write_kind} for {benchmark_id} is \
+                     visible server-side — left for reconcile"
+                ));
+                continue;
+            }
+            self.ledger.append(
+                "intents",
+                &json!({
+                    "intent_id": intent_id, "write_kind": write_kind, "state": "FAILED",
+                    "benchmark_id": benchmark_id,
+                    "note": "restart recovery: intent persisted, no send response recorded, no \
+                             server-side entry — nothing was applied; the lane may resend the \
+                             identical payload once (tig_integration.md §10 step 7)",
+                }),
+            )?;
+            out.push(format!(
+                "{intent_id}: PENDING with no recorded send and no server-side entry -> FAILED \
+                 (identical resend permitted)"
+            ));
+        }
+        Ok(out)
+    }
+
+    /// Submit an explicit stopped benchmark (`tig_integration.md` §6.2):
+    /// `stopped` true, `merkle_root` and `solution_quality` null. Durable
+    /// proof-material acceptance is a prerequisite only for the NON-stopped
+    /// write, so no acceptance record is demanded here; the caller supplies
+    /// the stop decision evidence instead.
+    pub fn submit_benchmark_stopped(
+        &self,
+        benchmark_id: &str,
+        stop_evidence: &Value,
+    ) -> Result<WriteResult> {
+        let body = json!({
+            "benchmark_id": benchmark_id,
+            "stopped": true,
+            "merkle_root": Value::Null,
+            "solution_quality": Value::Null,
+        });
+        let evidence = json!({ "stopped": true, "stop_decision": stop_evidence });
+        self.submit_lifecycle_write(
+            "BENCHMARK",
+            "submit-benchmark",
+            benchmark_id,
+            &body,
+            &evidence,
+        )
     }
 
     /// Submit the benchmark commitment (`tig_integration.md` §6.2).

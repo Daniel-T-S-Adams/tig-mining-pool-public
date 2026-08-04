@@ -9,6 +9,7 @@
 //! one unresolved precommit intent).
 
 pub mod member;
+pub mod pool;
 
 use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};

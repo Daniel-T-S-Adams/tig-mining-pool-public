@@ -14,6 +14,10 @@ path = "src/bin/spike_gateway.rs"
 name = "spike-member"
 path = "src/bin/spike_member.rs"
 
+[[bin]]
+name = "spike-pool"
+path = "src/bin/spike_pool.rs"
+
 [dependencies]
 anyhow = "1"
 blake3 = "1"

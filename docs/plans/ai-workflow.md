@@ -45,12 +45,18 @@ guide documented in its reference repo:
 | Prompts | Versioned files in `.github/review/` | Reviewed like code |
 | Auth | **Owner's Claude subscription** via long-lived OAuth token (`claude setup-token` → repo secret `CLAUDE_CODE_OAUTH_TOKEN`); `ANTHROPIC_API_KEY` supported as fallback | Decided 2026-08-05: no separate API billing; accepted trade-off is that reviewer runs share the subscription's rate limits with interactive use |
 
-**Bootstrap exception (time-boxed):** until `ANTHROPIC_API_KEY` exists as a
-repo secret, reviewer jobs skip with a loud annotation and the gate passes
-with a warning; the gate is not yet a required status check. Issue #38 tracks
-the two enablement steps (human sets the secret; then the gate becomes a
-required check). This exception ends there — after that, a missing key fails
-the gate.
+**Bootstrap exception: ENDED 2026-08-05** (evidence: issue #38 and PR #43,
+whose own checks were the acceptance test). The `CLAUDE_CODE_OAUTH_TOKEN`
+secret is set, both reviewers run for real on every PR push, and
+`AI review: verdict gate` is a required status check on `main` (recorded in
+the #38 closing comment). Review is **fail-closed**: a missing credential
+produces a `skipped_no_key` verdict, which the gate treats as failure — the
+primary review layer can never silently not-happen.
+
+Provenance note: the reviewers' first genuine run reviewed the PR ending this
+exception and returned `changes_required` — the draft wording claimed
+fail-closed behavior the workflow didn't yet have. The fail-closed gate and
+this paragraph are the result of resolving those findings.
 
 Also W1: PR template with the definition-of-done; `CLAUDE.md` gains the AI
 review rules.

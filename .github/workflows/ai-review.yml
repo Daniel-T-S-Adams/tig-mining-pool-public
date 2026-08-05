@@ -1,7 +1,8 @@
 name: AI Review
 
 # Two specialized AI reviewers + a machine-readable verdict gate.
-# Design decisions and the bootstrap exception: docs/plans/ai-workflow.md (W1).
+# Design decisions: docs/plans/ai-workflow.md (W1). Review is fail-closed:
+# a missing credential fails the verdict gate rather than skipping review.
 # Reviewers are read-only over the checkout and post one PR comment each;
 # the gate consumes SHA-bound JSON verdict artifacts, never comment prose.
 
@@ -49,14 +50,17 @@ jobs:
       # repository owner's Claude subscription via a long-lived OAuth token
       # (`claude setup-token` -> secret CLAUDE_CODE_OAUTH_TOKEN). An
       # ANTHROPIC_API_KEY secret is supported as a fallback if ever preferred.
-      - name: Bootstrap check (docs/plans/ai-workflow.md W1 exception)
+      # A missing credential is recorded as a skipped verdict, which FAILS the
+      # verdict gate (fail-closed): review is the primary review layer here
+      # and must never silently not-happen.
+      - name: Reviewer credential check
         id: key
         env:
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
           if [ -z "$CLAUDE_CODE_OAUTH_TOKEN" ] && [ -z "$ANTHROPIC_API_KEY" ]; then
-            echo "::warning title=AI review skipped::Neither CLAUDE_CODE_OAUTH_TOKEN nor ANTHROPIC_API_KEY secret is set (issue #38). Reviewer '${{ matrix.reviewer }}' did not run."
+            echo "::error title=AI review credential missing::Neither CLAUDE_CODE_OAUTH_TOKEN nor ANTHROPIC_API_KEY secret is set. Reviewer '${{ matrix.reviewer }}' cannot run; the verdict gate will fail."
             printf '{"reviewer":"%s","head_sha":"%s","verdict":"skipped_no_key","findings":[]}\n' \
               "${{ matrix.reviewer }}" "$HEAD_SHA" > "verdict-${{ matrix.reviewer }}.json"
             echo "present=false" >> "$GITHUB_OUTPUT"
@@ -204,11 +208,6 @@ jobs:
           if missing:
               print(f"FAIL: missing verdicts from {sorted(missing)}")
               sys.exit(1)
-          if all(v["verdict"] == "skipped_no_key" for v in verdicts.values()):
-              print("::warning title=AI review bootstrap::All reviewers skipped "
-                    "(no ANTHROPIC_API_KEY). Gate passes under the W1 bootstrap "
-                    "exception (docs/plans/ai-workflow.md); see issue #38.")
-              sys.exit(0)
           failed = False
           for name, v in sorted(verdicts.items()):
               if v.get("head_sha") != head_sha:
@@ -216,6 +215,11 @@ jobs:
                   failed = True
               elif v["verdict"] == "approve":
                   print(f"OK   [{name}]: approve")
+              elif v["verdict"] == "skipped_no_key":
+                  print(f"FAIL [{name}]: reviewer did not run — credential missing "
+                        "(set CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY). "
+                        "Review is fail-closed; see docs/plans/ai-workflow.md W1.")
+                  failed = True
               else:
                   print(f"FAIL [{name}]: {v['verdict']}")
                   for fi in v.get("findings", []):

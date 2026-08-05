@@ -43,6 +43,7 @@ guide documented in its reference repo:
 | Permissions | `contents: read` + PR-comment write only; no fork PRs; reviewers read, never write code | Review jobs are untrusted-input processors |
 | Consistency rule | any `must_fix` finding ⇒ `changes_required`; violations = invalid verdict = gate failure | No self-contradictory verdicts |
 | Prompts | Versioned files in `.github/review/` | Reviewed like code |
+| Auth | **Owner's Claude subscription** via long-lived OAuth token (`claude setup-token` → repo secret `CLAUDE_CODE_OAUTH_TOKEN`); `ANTHROPIC_API_KEY` supported as fallback | Decided 2026-08-05: no separate API billing; accepted trade-off is that reviewer runs share the subscription's rate limits with interactive use |
 
 **Bootstrap exception (time-boxed):** until `ANTHROPIC_API_KEY` exists as a
 repo secret, reviewer jobs skip with a loud annotation and the gate passes

@@ -45,13 +45,18 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
 
+      # Auth decision (docs/plans/ai-workflow.md W1): reviewers run on the
+      # repository owner's Claude subscription via a long-lived OAuth token
+      # (`claude setup-token` -> secret CLAUDE_CODE_OAUTH_TOKEN). An
+      # ANTHROPIC_API_KEY secret is supported as a fallback if ever preferred.
       - name: Bootstrap check (docs/plans/ai-workflow.md W1 exception)
         id: key
         env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
-          if [ -z "$ANTHROPIC_API_KEY" ]; then
-            echo "::warning title=AI review skipped::ANTHROPIC_API_KEY secret is not set (issue #38). Reviewer '${{ matrix.reviewer }}' did not run."
+          if [ -z "$CLAUDE_CODE_OAUTH_TOKEN" ] && [ -z "$ANTHROPIC_API_KEY" ]; then
+            echo "::warning title=AI review skipped::Neither CLAUDE_CODE_OAUTH_TOKEN nor ANTHROPIC_API_KEY secret is set (issue #38). Reviewer '${{ matrix.reviewer }}' did not run."
             printf '{"reviewer":"%s","head_sha":"%s","verdict":"skipped_no_key","findings":[]}\n' \
               "${{ matrix.reviewer }}" "$HEAD_SHA" > "verdict-${{ matrix.reviewer }}.json"
             echo "present=false" >> "$GITHUB_OUTPUT"
@@ -77,10 +82,14 @@ jobs:
       - name: Run reviewer
         if: steps.key.outputs.present == 'true'
         env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           PR_DIFF: /tmp/pr.diff
           PR_TITLE: ${{ github.event.pull_request.title }}
         run: |
+          # An empty env var can confuse CLI auth selection — drop unset ones.
+          [ -z "$CLAUDE_CODE_OAUTH_TOKEN" ] && unset CLAUDE_CODE_OAUTH_TOKEN
+          [ -z "$ANTHROPIC_API_KEY" ] && unset ANTHROPIC_API_KEY
           {
             cat "${{ matrix.prompt }}"
             echo

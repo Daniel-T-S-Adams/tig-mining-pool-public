@@ -42,6 +42,12 @@ follow the same PR workflow as code.
 6. If a change alters protocol meaning (mining rules, member wire contract,
    accounting semantics, TIG integration), update the owning design doc in the
    same PR.
+7. **AI review**: every PR gets two AI reviewers (general-correctness +
+   domain-invariants; see `docs/plans/ai-workflow.md`). They comment and emit
+   machine verdicts — they never approve, merge, or edit code. Re-review runs
+   on every push. Resolve `must_fix` findings or explicitly reject them with
+   a reason in the PR body; never bypass the verdict gate by editing the
+   review workflow or prompts in the same PR the gate is failing on.
 
 ## Security and secrets
 

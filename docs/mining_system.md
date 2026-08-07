@@ -605,8 +605,75 @@ Our expected qualifiers appear in both numerator and denominator because they
 would also increase the network total.
 
 Choose the compatible eligible challenge with the lowest projected raw
-balancing factor. If multiple challenges tie, resolve the tie randomly using a
-recorded, block-derived random value so the decision is reproducible.
+balancing factor. If multiple challenges tie, resolve the tie with the
+recorded, block-derived random draw defined below so the decision is
+reproducible.
+
+The draw is a pure function of the decision's anchor snapshot, so an auditor
+can re-derive it from the persisted decision record alone. Derive a versioned
+seed from the snapshot's immutable block identity, then one draw rank for
+every compute-compatible eligible challenge:
+
+```text
+challenge_tie_seed = BLAKE3(utf8(
+    "tig-pool-challenge-tie-v1" || "\n" || network || "\n" || block_id))
+
+draw_rank[c] = BLAKE3(challenge_tie_seed || utf8("\n" || challenge_id))
+```
+
+- `network` is the pool's operating network name, exactly `testnet` or
+  `mainnet`.
+- `block_id` is the id of the decision's anchor snapshot block — the block
+  returned by the snapshot's opening `get-block` call. One decision uses one
+  block-consistent snapshot (invariant 10), and the decision must use the
+  newest complete persisted snapshot available when its decision transaction
+  begins. Because anchored reads require TIG's latest block
+  (`tig_integration.md` §8), the anchor is always the newest block the pool
+  had observed when the snapshot was opened.
+- `challenge_id` is the verbatim challenge id string from the snapshot. All
+  three inputs are newline-free ASCII strings, so the newline-joined UTF-8
+  encoding is byte-exact and unambiguous.
+- `challenge_tie_seed` enters the second hash as its raw 32 bytes.
+
+Compare draw ranks as 32-byte unsigned big-endian integers (equivalently,
+lexicographic byte order). Among the tied challenges, the smallest draw rank
+wins. If two tied challenges produce equal ranks, the smaller `challenge_id`
+in byte order wins.
+
+The seed deliberately contains no per-decision input. Every decision anchored
+to the same block uses the same draw, matching the per-block draws of
+section 7.1, and the pool gains no per-decision re-roll.
+
+The controller derives the seed and the complete rank map before calling the
+decision engine and supplies the ranks as explicit input; the engine never
+derives randomness (`architecture.md` §3, §5.1 step 4). Store with the
+decision record: the domain string, network, anchor `block_id`, the supplied
+rank map, and — when a tie occurred — the tied candidate set and the selected
+winner.
+
+Worked example and test vector, using the `fixtures/tig/v1` anchor block
+(`network = testnet`, `block_id = block_100080`) with its active challenges
+`c001` and `c003` tied on projected raw factor:
+
+```text
+challenge_tie_seed
+  = BLAKE3(utf8("tig-pool-challenge-tie-v1\ntestnet\nblock_100080"))
+  = 2fa3fc89f50afd1b38d2209af931ae2e1e3d49ab555292f0cb5aa07a6d017c32
+
+draw_rank[c001]
+  = BLAKE3(challenge_tie_seed_bytes || utf8("\nc001"))
+  = 5d0f453f4d0c62aa01a37dcdad7ab31caeb7f14f05c32e321d1125ca7d115eb2
+
+draw_rank[c003]
+  = BLAKE3(challenge_tie_seed_bytes || utf8("\nc003"))
+  = f16ab636834eae6322acd3d00286a23830bcc8a0f24cc23d1c2e06bce784b41c
+
+draw_rank[c001] < draw_rank[c003]  ->  select c001
+```
+
+`crates/pool-domain/tests/challenge_tie_vector.rs` proves this vector.
+Rationale, the manipulation analysis, and rejected alternatives are recorded
+in ADR 0005.
 
 ### 6.4 Algorithm choice
 
@@ -986,6 +1053,8 @@ Implementation must preserve these invariants:
     pending capacity.
 24. Tier removal or repurchase never clears an outstanding benchmark,
     reservation, fine, or method-verification exposure.
+25. Challenge-factor tie resolution is block-derived per section 6.3, stored,
+    and reproducible from the persisted decision record.
 
 ## 11. Decisions intentionally left open
 

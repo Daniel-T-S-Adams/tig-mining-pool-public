@@ -67,19 +67,20 @@ records an explicit convention in the case (never a silent invention) and lists
 it here. If the design docs later settle these differently, corrections go in a
 `v2` directory (files here are immutable once merged).
 
-1. **Challenge-tie randomness mapping (§6.3).** The spec requires resolving
-   factor ties "randomly using a recorded, block-derived random value so the
-   decision is reproducible", and `architecture.md` §3 forbids the engine from
-   generating randomness — but neither doc defines how the recorded value is
-   derived from block context or how it maps to a winner among the tied
-   challenges (no analogue of the §7.1 `tie_seed` schema exists for challenge
-   selection). Fixture convention: the input supplies a per-candidate integer
-   draw rank (`supplied_randomness.challenge_tie_draw_ranks`) and the tied
-   candidate with the **smallest rank** wins. An implementation whose supplied
-   randomness has a different shape can map these fixtures by ranking tied
-   candidates; the derivation of the ranks from block context remains an open
-   design question and must be settled (ADR or design-doc update) before the
-   recorded decision inputs of §6 can be audited end-to-end.
+1. **Challenge-tie randomness mapping (§6.3) — resolved.** Settled by
+   `docs/adr/0005-challenge-tie-derivation.md` and the normative derivation
+   now in `mining_system.md` §6.3: the controller derives
+   `challenge_tie_seed = BLAKE3("tig-pool-challenge-tie-v1" \n network \n
+   block_id)` from the decision's anchor snapshot block and a BLAKE3 draw
+   rank per candidate challenge; the tied candidate with the smallest rank
+   (32-byte big-endian comparison) wins, with a byte-order-smallest
+   `challenge_id` fallback on collision. This matches the fixture convention
+   exactly (per-candidate rank supplied as input, smallest wins), so the v1
+   case data here is unchanged and remains valid — the supplied integer
+   ranks stand in for derived 32-byte ranks by order. v2 cases should carry
+   concretely derived seed and rank values (recorded on issue #31). The
+   §6.3 worked example is proven by
+   `crates/pool-domain/tests/challenge_tie_vector.rs`.
 2. **Direction of `algorithm_id` ties (§6.4 step 4, §6.5).** "Resolve … 
    deterministically by `algorithm_id`" does not state an ordering direction.
    Fixture convention: the lexicographically **smallest** `algorithm_id` wins.

@@ -11,6 +11,7 @@
 //! never two concurrent writes for one benchmark).
 
 pub mod active;
+pub mod authed;
 pub mod member;
 pub mod pool;
 pub mod trust;

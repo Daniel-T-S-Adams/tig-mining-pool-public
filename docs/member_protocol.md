@@ -2,7 +2,7 @@
 
 Status: settled contract for the testnet protocol spike  
 Protocol version: `0.1.0`  
-Last updated: 2026-07-31
+Last updated: 2026-08-07
 
 This document defines the boundary between a member agent and the pool. It is
 specific enough for the two sides to be implemented independently: it defines
@@ -218,6 +218,28 @@ create a 15-minute `WORKER_RECOVERY` ticket bound to the existing `worker_id`.
 Consuming it attaches a new key to that worker and revokes every old
 credential. This preserves access to the worker's existing assignments without
 changing ownership.
+
+Consuming the ticket proves possession of the new key with an unpadded
+base64url Ed25519 signature over this UTF-8 string with no final newline —
+recovery has its own signing domain and never shares the enrollment or
+rotation namespace:
+
+```text
+TIG-POOL-RECOVERY-V1
+<recovery_request_id>
+<SHA-256 of the UTF-8 recovery ticket as 64 lowercase hex characters>
+<new_ed25519_public_key>
+```
+
+`recovery_request_id` is a new UUID and the idempotency identity of one
+recovery attempt: repeating the identical request returns the recorded
+result; different content for the same ID is a conflict. The ticket is
+bound to its exact `worker_id` and rejected for any other worker. A worker
+revoked as a security action cannot be recovered by this path; only an
+explicit, audited pool decision reinstates it, after which ordinary
+recovery applies. The HTTP route and schema for recovery, and the account
+login that authorizes ticket creation, remain outside this protocol
+version.
 
 The member or an operator may revoke one credential or the whole worker.
 Revocation takes effect on the next request and prevents new offers,
@@ -810,9 +832,10 @@ statistics.
 ## 17. Decisions left to later documents
 
 This protocol deliberately does not choose the member website login mechanism,
-account recovery proof, deposit custody details, numerical `J[k]`/`X`/global-
-headroom values, relational schema, artifact-store product, deployment
-topology, or production retention capacity.
+the account-recovery HTTP route and schema (the recovery proof itself is
+specified in section 3.3), deposit custody details, numerical
+`J[k]`/`X`/global-headroom values, relational schema, artifact-store product,
+deployment topology, or production retention capacity.
 Those choices may implement this contract but may not weaken its ownership,
 idempotency, durable-acceptance, or failure-attribution rules.
 

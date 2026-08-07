@@ -56,6 +56,10 @@ pub enum ErrorCode {
     PublicationCorrupt,
     SlotOccupied,
     SlotUnknown,
+    /// Another package is already durably accepted for this assignment
+    /// (member_protocol §11: only one package can become durably accepted
+    /// for an assignment; §16.8).
+    AssignmentAlreadyAccepted,
     /// Test hook: simulated crash at an injected point.
     SimulatedCrash,
     Storage,
@@ -206,6 +210,18 @@ fn field_u64(v: &Value, key: &str) -> PResult<u64> {
 
 pub struct Pool {
     root: PathBuf,
+    /// SPIKE-ONLY serialization of the acceptance saga (issue #32): the
+    /// single-acceptance check and the durable-acceptance commit must be one
+    /// critical section, or two concurrent finalizes of different packages
+    /// for the same assignment could both pass the check and both commit —
+    /// two accepted artifacts and a double slot release (member_protocol
+    /// §11/§16.8/§16.10). The production guarantee is NOT a lock held across
+    /// verification and publication (a transaction spanning bulk artifact
+    /// work is forbidden, architecture §13 invariant 7): the Artifact Worker
+    /// publishes first, and the Controller then enforces the §6 "one
+    /// accepted package per assignment" unique constraint inside its short
+    /// acceptance transaction.
+    accept: std::sync::Mutex<()>,
 }
 
 /// One committed contiguous range from the durable ledger.
@@ -252,7 +268,10 @@ impl Pool {
         for sub in ["quarantine", "accepted", "state"] {
             fs::create_dir_all(root.join(sub)).map_err(storage)?;
         }
-        Ok(Pool { root })
+        Ok(Pool {
+            root,
+            accept: std::sync::Mutex::new(()),
+        })
     }
 
     pub fn root(&self) -> &Path {
@@ -270,7 +289,30 @@ impl Pool {
         for key in ["assignment_id", "benchmark_id", "slot_id", "network"] {
             validate_id(key, field_str(a, key)?)?;
         }
+        // Issued-identity fields (issue #32): validated when present so the
+        // authed path can bind the §2 ownership chain into the receipt.
+        for key in ["member_id", "worker_id"] {
+            if a.get(key).is_some() {
+                validate_id(key, field_str(a, key)?)?;
+            }
+        }
         let generation = field_u64(a, "slot_generation")?;
+        // One digest per assignment_id: an assignment context, once
+        // registered, can never be re-registered under a different digest
+        // (member_protocol §14: never a different track/binary/benchmark
+        // under the same assignment; §16.5).
+        let assignment_id = field_str(a, "assignment_id")?;
+        let index_path = self.state_path(&format!("assignments-by-id/{assignment_id}.json"));
+        match read_doc(&index_path)? {
+            Some(index) if field_str(&index, "assignment_digest")? != digest => {
+                return Err(err(
+                    ErrorCode::DeclarationConflict,
+                    format!("assignment {assignment_id} already registered with another digest"),
+                ));
+            }
+            Some(_) => {}
+            None => write_doc_atomic(&index_path, &json!({ "assignment_digest": digest }))?,
+        }
         let path = self.state_path(&format!("assignments/{digest}.json"));
         if let Some(existing) = read_doc(&path)? {
             if existing != *a {
@@ -293,7 +335,14 @@ impl Pool {
         match read_doc(&slot_path)? {
             Some(existing) if existing != slot_doc => {
                 let existing_gen = field_u64(&existing, "generation")?;
-                if existing_gen >= generation {
+                // A slot reserved by `offer_slot` for this same assignment
+                // and generation may proceed to UPLOADING (issue #32: the
+                // authed path reserves before registering the assignment).
+                let same_reservation = existing.get("state").and_then(Value::as_str)
+                    == Some("RESERVED")
+                    && existing_gen == generation
+                    && existing.get("assignment_id") == slot_doc.get("assignment_id");
+                if !same_reservation && existing_gen >= generation {
                     return Err(err(
                         ErrorCode::SlotOccupied,
                         format!("slot {slot_id} already at generation {existing_gen}"),
@@ -304,6 +353,14 @@ impl Pool {
             Some(_) => Ok(()),
             None => write_doc_atomic(&slot_path, &slot_doc),
         }
+    }
+
+    /// The registered assignment document for a digest, if any (read-only;
+    /// used by the authed path to bind a declaration's digest to its issued
+    /// `assignment_id`).
+    pub fn assignment_by_digest(&self, digest: &str) -> PResult<Option<Value>> {
+        validate_id("assignment_digest", digest)?;
+        read_doc(&self.state_path(&format!("assignments/{digest}.json")))
     }
 
     // -- upload session ----------------------------------------------------
@@ -366,7 +423,7 @@ impl Pool {
         })
     }
 
-    fn declaration(&self, upload_id: &str) -> PResult<Value> {
+    pub(crate) fn declaration(&self, upload_id: &str) -> PResult<Value> {
         read_doc(&self.state_path(&format!("uploads/{upload_id}/declaration.json")))?
             .ok_or_else(|| err(ErrorCode::UnknownUpload, format!("no upload {upload_id}")))
     }
@@ -580,6 +637,12 @@ impl Pool {
         package_id: &str,
         crash: Option<CrashPoint>,
     ) -> PResult<FinalizeOutcome> {
+        // One finalize at a time: the single-acceptance check below and the
+        // acceptance commit at the end form one critical section.
+        let _accepting = self
+            .accept
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         validate_id("package_id", package_id)?;
         let acceptance_path = self.state_path(&format!("acceptance/{package_id}.json"));
         if let Some(doc) = read_doc(&acceptance_path)? {
@@ -615,6 +678,21 @@ impl Pool {
         let digest = field_str(&declaration, "assignment_digest")?;
         let assignment = read_doc(&self.state_path(&format!("assignments/{digest}.json")))?
             .ok_or_else(|| err(ErrorCode::UnknownAssignment, format!("digest {digest}")))?;
+
+        // 0. Only one package can become durably accepted for an assignment
+        //    (member_protocol §11, invariant §16.8; architecture §6 "one
+        //    accepted package per assignment"). A retry of the accepted
+        //    package returned its receipt above; any other package for the
+        //    same assignment is terminally refused before the saga runs.
+        let this_assignment = field_str(&assignment, "assignment_id")?;
+        if let Some(accepted) = self.accepted_package_for_assignment(this_assignment)?
+            && accepted != package_id
+        {
+            return Err(err(
+                ErrorCode::AssignmentAlreadyAccepted,
+                format!("assignment {this_assignment} already durably accepted package"),
+            ));
+        }
 
         // 1. The durable chunk ledger must cover the declaration exactly.
         let ranges = self.read_ranges(&upload_id)?;
@@ -722,7 +800,7 @@ impl Pool {
             "lifecycle_state": "ACCEPTED",
             "accepted_at": accepted_at,
         });
-        let receipt = json!({
+        let mut receipt = json!({
             "receipt_id": derived_uuid(&format!("spike-pool:receipt:{package_id}")),
             "package_id": package_id,
             "upload_id": upload_id,
@@ -735,6 +813,14 @@ impl Pool {
             "slot_id": slot_id,
             "slot_generation": slot_generation,
         });
+        // Issued-identity binding (issue #32, member_protocol §2): when the
+        // registered assignment carries pool-issued member/worker identities,
+        // the immutable receipt records the full ownership chain.
+        for key in ["member_id", "worker_id"] {
+            if let Some(v) = assignment.get(key) {
+                receipt[key] = v.clone();
+            }
+        }
         let acceptance = json!({
             "artifact": artifact,
             "receipt": receipt,
@@ -811,6 +897,33 @@ impl Pool {
     }
 
     // -- slot fold and re-offer ---------------------------------------------
+
+    /// The package already durably accepted for an assignment, if any — a
+    /// fold over the durable acceptance records, like `release_count`
+    /// (member_protocol §11: only one package can become durably accepted
+    /// for an assignment).
+    pub fn accepted_package_for_assignment(&self, assignment_id: &str) -> PResult<Option<String>> {
+        validate_id("assignment_id", assignment_id)?;
+        let dir = self.state_path("acceptance");
+        let entries = match fs::read_dir(&dir) {
+            Ok(e) => e,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(storage(e)),
+        };
+        for entry in entries {
+            let entry = entry.map_err(storage)?;
+            let Some(doc) = read_doc(&entry.path())? else {
+                continue;
+            };
+            let receipt = doc.get("receipt").cloned().unwrap_or(Value::Null);
+            if receipt.get("assignment_id").and_then(Value::as_str) == Some(assignment_id)
+                && let Some(package_id) = receipt.get("package_id").and_then(Value::as_str)
+            {
+                return Ok(Some(package_id.to_owned()));
+            }
+        }
+        Ok(None)
+    }
 
     /// Number of durable-acceptance records releasing (slot, generation) —
     /// the "released exactly once" evidence.

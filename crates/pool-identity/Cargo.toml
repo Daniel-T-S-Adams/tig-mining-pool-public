@@ -1,0 +1,31 @@
+[package]
+name = "pool-identity"
+description = "Pool-issued member/worker identity: enrollment, signed-request authentication, rotation, revocation, recovery, and slot/assignment issuance (docs/member_protocol.md §2–§3)"
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+version = "0.1.0"
+
+[dependencies]
+base64 = "0.22"
+blake3 = "1"
+ed25519-dalek = "2"
+getrandom = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+
+[features]
+# Compiles the SPIKE/TEST-ONLY qualification stand-in
+# (`IdentityService::mark_slot_qualified`). Enabled only by tests and the
+# disposable spike bridge; never by a production consumer.
+spike = []
+
+[dev-dependencies]
+jsonschema = "0.26"
+# Self-reference so this crate's own integration tests compile with the
+# spike stand-in available (cargo feature unification).
+pool-identity = { path = ".", features = ["spike"] }
+
+[lints]
+workspace = true

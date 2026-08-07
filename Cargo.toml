@@ -1,6 +1,11 @@
 [workspace]
 resolver = "3"
-members = ["crates/fake-tig", "crates/pool-domain", "crates/spike"]
+members = [
+    "crates/fake-tig",
+    "crates/pool-domain",
+    "crates/pool-identity",
+    "crates/spike",
+]
 
 [workspace.package]
 edition = "2024"

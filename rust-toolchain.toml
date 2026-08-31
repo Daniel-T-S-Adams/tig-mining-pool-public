@@ -1,5 +1,15 @@
 [toolchain]
 # Pinned per docs/architecture.md §1: reproducible builds. Bump deliberately in
 # a reviewed PR, never implicitly.
-channel = "1.90.0"
+#
+# Bumped 1.90.0 -> 1.98.0 in the slice-1 foundations PR.
+#
+# The *floor* is 1.94: SQLx 0.9, which `docs/architecture.md` §1 pins,
+# declares that rust-version, and the workspace records it as the MSRV in
+# `Cargo.toml`. The pin itself is the current stable release at the time of
+# the bump rather than the floor, so contributors build on a supported
+# compiler; the two numbers answer different questions and are deliberately
+# not the same. Lowering the pin is safe down to the MSRV; raising the MSRV
+# needs a dependency that demands it.
+channel = "1.98.0"
 components = ["rustfmt", "clippy"]

@@ -169,11 +169,10 @@ pub fn load_accepted_package(pool: &Pool, package_id: &str) -> Result<AcceptedPa
         );
     }
     let qualities: Vec<i32> = qualities_data
-        .chunks_exact(4)
-        .map(|c| {
-            let arr: [u8; 4] = c.try_into().unwrap_or([0; 4]);
-            i32::from_le_bytes(arr)
-        })
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|arr| i32::from_le_bytes(*arr))
         .collect();
 
     // Output records: one per nonce, ascending coverage of [0, num_nonces).

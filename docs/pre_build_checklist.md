@@ -499,10 +499,12 @@ before multiple product slices are developed in parallel.
   — PR #1 (`.github/workflows/pr-checks.yml`); AI review added in PR #41
 - [ ] Define migration, fixture, and generated-code conventions.
   — fixture conventions exist (per-set READMEs, `fixtures/<set>/v1`, expected
-  values recorded independently). Migration policy is specified in
-  `architecture.md` §7.1 but has no directory or tooling yet, and no
-  generated-code convention exists. Both land in slice 1
-  ([`plans/slice-1-gateway.md`](plans/slice-1-gateway.md) §3).
+  values recorded independently). Migration conventions landed with slice 1's
+  foundations PR: forward-only numbered SQL files in the single ordered
+  `migrations/` directory, applied only by `pool-admin migrate` under the
+  SQLx version/checksum lock, with no service auto-migrating
+  (`architecture.md` §6, §7.1). **Outstanding: the generated-code
+  convention**, which no slice has needed yet.
 - [x] Define environment configuration without committing secrets.
   — `config/tig_integration.json` pinned and non-secret; untracked
   `secrets/`; policy in `CLAUDE.md` and `architecture.md` §9

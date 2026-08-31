@@ -2,14 +2,17 @@
 resolver = "3"
 members = [
     "crates/fake-tig",
+    "crates/pool-admin",
+    "crates/pool-config",
     "crates/pool-domain",
     "crates/pool-identity",
+    "crates/pool-telemetry",
     "crates/spike",
 ]
 
 [workspace.package]
 edition = "2024"
-rust-version = "1.90"
+rust-version = "1.94"
 publish = false
 
 [workspace.lints.rust]

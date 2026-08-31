@@ -712,7 +712,29 @@ external:       fake TIG server for deterministic tests or pinned TIG testnet
 ```
 
 Services bind to loopback by default. The fake TIG server never shares a
-configuration profile or credential with live testnet. Local filesystem crash
+configuration profile or credential with live testnet.
+
+One recorded exception: the CI PostgreSQL service container is published on
+all runner interfaces with trust authentication. Separating what is forced
+from what is chosen, since a deviation recorded as unavoidable stops being
+re-examined:
+
+- **Forced.** GitHub Actions `services.<id>.ports` cannot express a
+  loopback-bound mapping (`127.0.0.1:5432:5432`), so the port is exposed on
+  the runner regardless.
+- **Chosen.** Trust authentication is not forced. A value generated in a
+  *step* cannot reach a service container's environment, because services
+  start before any step runs — but a job-scoped expression such as
+  `${{ github.run_id }}` can. Those values are not secret, so on an
+  already-exposed port they add little over trust, and the alternative that
+  would help — a real generated password — cannot be produced before the
+  service starts. The credential the job actually protects is the set of
+  pool role passwords, which are generated at step time and never committed.
+
+Acceptable only on ephemeral, single-tenant, network-isolated GitHub-hosted
+runners. A self-hosted runner would need the database started as a step with
+a loopback-bound mapping and a generated password, the way
+`scripts/dev-db.sh` does it. Local filesystem crash
 tests kill processes between publication and database commits to verify saga
 recovery.
 

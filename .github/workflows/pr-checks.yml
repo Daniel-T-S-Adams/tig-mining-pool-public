@@ -16,6 +16,43 @@ jobs:
   check:
     name: fmt + clippy + test
     runs-on: ubuntu-latest
+
+    # The migration tests (crates/pool-admin/tests/migrate.rs) need a real
+    # PostgreSQL 18. They skip when POOL_TEST_SUPERUSER_URL is unset so a
+    # developer without a local database can still run `make check`;
+    # POOL_REQUIRE_DB_TESTS=1 below turns that skip into a failure here, so
+    # the coverage cannot disappear from CI unnoticed.
+    services:
+      postgres:
+        image: postgres:18.4-trixie@sha256:3a82e1f56c8f0f5616a11103ac3d47e632c3938698946a7ad26da0df1334744a
+        env:
+          # Trust auth means there is no password to invent, and therefore no
+          # credential literal committed to this repository, which CLAUDE.md
+          # forbids without exception. The role passwords the A4 scan needs
+          # are generated at job time instead.
+          #
+          # Exposure, stated accurately: `ports: 5432:5432` publishes on ALL
+          # interfaces of the runner, not loopback — Actions cannot express a
+          # loopback-bound service mapping. Trust auth is a choice rather than
+          # a constraint: a step-generated password cannot reach a service
+          # container (services start first), and a job-scoped expression is
+          # not secret, so it would add little on an already-exposed port.
+          # Acceptable only on ephemeral, single-tenant GitHub-hosted runners.
+          # architecture.md §11.1 records the full reasoning and the settled
+          # loopback default this deviates from.
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    env:
+      POOL_TEST_SUPERUSER_URL: postgres://postgres@127.0.0.1:5432/postgres
+      POOL_REQUIRE_DB_TESTS: "1"
+
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -33,3 +70,24 @@ jobs:
           key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
 
       - run: make check
+
+      # Criterion A4's real half. `make check` only runs the scanner's
+      # positive control; this runs the actual binary against the service
+      # database with output captured, dumps every value the database holds,
+      # and scans both against the role passwords generated here. Without
+      # this step a change that logged or persisted a credential would pass
+      # every automated gate.
+      # Proves the provisioning quoting convention rather than asserting it:
+      # a password containing a quote or a backslash must round-trip
+      # verbatim, or a role's password silently stops matching the file the
+      # A4 scan reads its needle from.
+      - name: Provisioning quoting selftest
+        env:
+          POOL_A4_SUPERUSER_URL: postgres://postgres@127.0.0.1:5432/postgres
+        run: ./scripts/provisioning-selftest.sh
+
+      - name: A4 credential-boundary scan
+        env:
+          POOL_A4_SUPERUSER_URL: postgres://postgres@127.0.0.1:5432/postgres
+          POOL_A4_DB: pool_ci
+        run: ./scripts/a4-scan.sh

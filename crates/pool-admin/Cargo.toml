@@ -1,0 +1,29 @@
+[package]
+name = "pool-admin"
+description = "Operator CLI. The migrate subcommand is the one-shot database migration job (docs/architecture.md §4, §7.1)"
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+version = "0.1.0"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+pool-config = { path = "../pool-config" }
+pool-telemetry = { path = "../pool-telemetry" }
+sqlx = { version = "0.9", default-features = false, features = [
+    "macros",
+    "migrate",
+    "postgres",
+    "runtime-tokio",
+    "tls-rustls-ring",
+] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tracing = "0.1"
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+# Only what the tests add. pool-config, sqlx and tokio are already normal
+# dependencies and are available to test targets without redeclaring them.
+serde_json = "1"

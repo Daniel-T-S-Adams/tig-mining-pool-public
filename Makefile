@@ -1,9 +1,9 @@
 # One command defines a valid change (CLAUDE.md "Mandatory workflow").
 # Every target propagates failure; masking a required check is forbidden.
 
-.PHONY: check fmt-check fmt lint test feature-gate smoke
+.PHONY: check fmt-check fmt lint test feature-gate secret-scan image-pin smoke db-up db-test db-scan provisioning-selftest
 
-check: fmt-check lint test feature-gate
+check: fmt-check lint test feature-gate secret-scan image-pin
 
 fmt-check:
 	cargo fmt --all --check
@@ -23,7 +23,46 @@ test:
 feature-gate:
 	./scripts/feature-gate.sh
 
+# Criterion A4, part one: the leak scanner must be able to find a planted
+# secret before a clean result means anything. Self-contained, so it runs on
+# a fresh checkout with no secrets/ directory. Scanning a real run is
+# `make db-scan`, which needs a database.
+secret-scan:
+	./scripts/secret-scan.sh --selftest
+
+# architecture.md §1 pins images by version and digest. The postgres pin
+# lives in three places; this proves they have not drifted apart, so the A4
+# evidence run cannot describe a server CI never used.
+image-pin:
+	./scripts/image-pin-check.sh
+
 # Canonical fake-TIG smoke scenario: precommit -> confirmed -> benchmark
 # -> sampled nonces -> proof -> ACTIVE, plus failure injection.
 smoke:
 	cargo test -p fake-tig --test smoke
+
+# Local PostgreSQL 18 plus least-privilege role provisioning.
+db-up:
+	./scripts/dev-db.sh
+
+# The database-backed half of the slice-1 checks. In CI these run inside
+# `make check` because the job provides POOL_TEST_SUPERUSER_URL, and the
+# workflow runs the A4 scan as its own step; locally the cargo tests skip
+# unless pointed at a database, which this target does.
+db-test: db-up provisioning-selftest db-scan
+	POOL_TEST_SUPERUSER_URL="postgres://postgres@127.0.0.1:5433/postgres" \
+	POOL_REQUIRE_DB_TESTS=1 \
+	cargo test -p pool-admin
+
+# Proves the psql \set quoting convention provisioning depends on: a
+# password containing a quote or a backslash must round-trip verbatim, or the
+# role's password stops matching the file the A4 scan reads its needle from.
+provisioning-selftest: db-up
+	./scripts/provisioning-selftest.sh
+
+# Criterion A4, part two: run the real binary, capture everything it emits,
+# dump every value the database holds, and prove no secret is in either.
+# The selftest above proves the scanner can detect; this proves there is
+# nothing to detect.
+db-scan: db-up
+	./scripts/a4-scan.sh

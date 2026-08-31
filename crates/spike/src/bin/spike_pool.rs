@@ -149,11 +149,9 @@ fn run(args: RunArgs) -> Result<()> {
         chunks += 1;
     }
     let upload_ms = t_upload.elapsed().as_millis();
-    let throughput = if upload_ms > 0 {
-        (package.len() as u128 * 1000) / upload_ms
-    } else {
-        0
-    };
+    let throughput = (package.len() as u128 * 1000)
+        .checked_div(upload_ms)
+        .unwrap_or(0);
 
     // Ordered acceptance saga.
     let outcome = pool

@@ -1,0 +1,24 @@
+# Local development configuration for `pool-admin`.
+#
+# Non-secret by construction (docs/architecture.md §9): this file names the
+# path of a password file, never a password. `scripts/dev-db.sh` generates
+# the referenced file into the untracked `secrets/` directory.
+#
+# Usage:
+#   ./scripts/dev-db.sh
+#   cargo run -p pool-admin -- --config config/pool-admin.dev.toml migrate
+
+network = "testnet"
+
+[database]
+host = "127.0.0.1"
+port = 5433
+name = "pool_dev"
+user = "pool_migration"
+password_file = "secrets/db-migration-password"
+statement_timeout_ms = 30000
+
+[telemetry]
+format = "json"
+level = "info"
+deployment = "local-dev"

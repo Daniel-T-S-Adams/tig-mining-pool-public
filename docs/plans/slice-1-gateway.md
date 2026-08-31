@@ -101,8 +101,29 @@ Explicitly out of scope for slice 1 even though adjacent:
 
 Each criterion is independently testable. "Fixture" means an existing set
 under `fixtures/`; "fake-tig" means `crates/fake-tig`; "live" means pinned
-TIG testnet with the identity recorded in
-[`protocol-spike.md`](protocol-spike.md) §4.
+TIG testnet with the identity below.
+
+### Testnet identity
+
+Slice 1 uses **`0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef`** (address is
+public and safe to commit; the API key lives only in the untracked
+`secrets/tig-testnet-api-key`, mode 0600).
+
+Verified 2026-08-31 at block `9c909007e207e2af9aac028108bb060f`:
+`available_fee_balance = 10 TIG`, `total_fees_paid = 0`, and the API key
+authenticates — a request with a deliberately wrong key returns `401 Invalid
+API key` while the same request with this key is rejected on its contents
+instead, which only happens after authentication succeeds.
+
+This is **not** the spike's identity. The spike ran as
+`0xbeefbeefbeefbeefbeefbeefbeefbeefbeefbeef`
+([`protocol-spike.md`](protocol-spike.md) §4), whose API key was destroyed
+during slice-1 development; that account still exists and is funded, but is
+no longer used. `protocol_spike_report.md` and `protocol-spike.md` keep the
+old address because they record runs that genuinely used it — rewriting them
+would falsify the evidence. `tig_integration.md` §13 check 9 makes the
+gateway verify that the confirmed player ID matches its configured identity,
+so the address above is what slice-1 configuration must name.
 
 ### A. Configuration and fail-closed startup
 

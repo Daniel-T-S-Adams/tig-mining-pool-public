@@ -821,3 +821,143 @@ async fn a_dry_run_refuses_a_partially_applied_migration() {
         "the failure must name the cause, got: {combined}"
     );
 }
+
+#[tokio::test]
+async fn concurrent_migrations_do_not_both_claim_the_work() {
+    // `migrate.complete` is the auditable result of an owned mutation
+    // (`architecture.md` §6, §13 invariant 6). Two invocations racing — a
+    // retried deploy step, or two runners — must not both report having
+    // applied the schema: exactly one did.
+    //
+    // Opportunistic by nature: it only exercises the bug when the two
+    // processes actually interleave, which measured at roughly 1 run in 5
+    // against the unfixed code. It never fails spuriously, but it is not the
+    // guard — `migrate_serialises_on_its_operation_lock` below tests the
+    // mechanism deterministically.
+    let Some(db) = TempDb::create("concurrent").await else {
+        return;
+    };
+    let scratch = SecretScratch::new("concurrent-cfg");
+    let Some(config_path) = migration_role_config(&db, &scratch) else {
+        assert_ne!(
+            std::env::var("POOL_REQUIRE_DB_TESTS").as_deref(),
+            Ok("1"),
+            "no pool_migration credential available, but POOL_REQUIRE_DB_TESTS=1"
+        );
+        return;
+    };
+
+    // Started as close together as possible, against a database with
+    // nothing applied.
+    let spawn = || {
+        let path = config_path.clone();
+        std::thread::spawn(move || {
+            std::process::Command::new(env!("CARGO_BIN_EXE_pool-admin"))
+                .arg("--config")
+                .arg(&path)
+                .arg("migrate")
+                .output()
+                .expect("binary runs")
+        })
+    };
+    let a = spawn();
+    let b = spawn();
+    let (a, b) = (a.join().unwrap(), b.join().unwrap());
+
+    for (label, out) in [("a", &a), ("b", &b)] {
+        assert!(
+            out.status.success(),
+            "invocation {label} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    // Sum the applied_now each process reported.
+    let applied_now = |out: &std::process::Output| -> i64 {
+        let combined = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        combined
+            .lines()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .find(|v| v.get("event").and_then(|e| e.as_str()) == Some("migrate.complete"))
+            .and_then(|v| v.get("applied_now").and_then(|n| n.as_i64()))
+            .unwrap_or_else(|| panic!("no migrate.complete event in output: {combined}"))
+    };
+
+    let total_claimed = applied_now(&a) + applied_now(&b);
+    let actually_applied = MIGRATOR.iter().count() as i64;
+    assert_eq!(
+        total_claimed, actually_applied,
+        "the two invocations together claimed {total_claimed} migrations but only \
+         {actually_applied} exist; one of them reported the other's work"
+    );
+}
+
+/// Must match `MIGRATE_LOCK_KEY` in `crates/pool-admin/src/main.rs`.
+///
+/// Drift is caught rather than silent: with a different key the migrate
+/// process would not block below and the test fails.
+const MIGRATE_LOCK_KEY: i64 = 0x706f_6f6c_6d69_6772;
+
+#[tokio::test]
+async fn migrate_serialises_on_its_operation_lock() {
+    // The deterministic half of the concurrency guarantee. Rather than hope
+    // two processes interleave, hold the operation lock and prove a migrate
+    // invocation waits for it — which is what makes the before/after
+    // snapshots bracket only this process's work.
+    let Some(db) = TempDb::create("lockwait").await else {
+        return;
+    };
+    let scratch = SecretScratch::new("lockwait-cfg");
+    let Some(config_path) = migration_role_config(&db, &scratch) else {
+        assert_ne!(
+            std::env::var("POOL_REQUIRE_DB_TESTS").as_deref(),
+            Ok("1"),
+            "no pool_migration credential available, but POOL_REQUIRE_DB_TESTS=1"
+        );
+        return;
+    };
+
+    // Hold the lock on a connection the test owns.
+    let mut holder = PgConnection::connect_with(&db.as_role("pool_migration"))
+        .await
+        .unwrap();
+    sqlx::query("SELECT pg_advisory_lock($1)")
+        .bind(MIGRATE_LOCK_KEY)
+        .execute(&mut holder)
+        .await
+        .unwrap();
+
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_pool-admin"))
+        .arg("--config")
+        .arg(&config_path)
+        .arg("migrate")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("binary starts");
+
+    // It must still be waiting: the lock is held.
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "migrate did not wait for the operation lock"
+    );
+
+    // Release, and it should complete.
+    sqlx::query("SELECT pg_advisory_unlock($1)")
+        .bind(MIGRATE_LOCK_KEY)
+        .execute(&mut holder)
+        .await
+        .unwrap();
+
+    let out = child.wait_with_output().expect("migrate finishes");
+    assert!(
+        out.status.success(),
+        "migrate failed after the lock was released: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}

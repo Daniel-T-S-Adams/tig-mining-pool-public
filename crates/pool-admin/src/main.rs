@@ -28,6 +28,15 @@ static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("../../migrations");
 /// migration ledger has not been created yet.
 const UNDEFINED_TABLE: &str = "42P01";
 
+/// Advisory lock serialising the whole migrate operation.
+///
+/// Distinct from the lock SQLx takes inside `run`: that one serialises the
+/// applying, this one serialises read-plan-apply-confirm as a unit, so the
+/// before and after snapshots bracket exactly this process's work. Without
+/// it the plan is read outside any lock and a losing concurrent invocation
+/// reports the winner's migrations as its own.
+const MIGRATE_LOCK_KEY: i64 = 0x706f_6f6c_6d69_6772;
+
 #[derive(Parser)]
 #[command(name = "pool-admin", about = "TIG mining pool operator CLI")]
 struct Cli {
@@ -108,11 +117,24 @@ async fn migrate(config: &Config, dry_run: bool) -> Result<(), String> {
         .database_url()
         .map_err(|e| format!("cannot build database URL: {e}"))?;
 
+    // Two connections: one holds the operation lock for the duration, the
+    // other does the work.
     let pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(1)
+        .max_connections(2)
         .connect(&url)
         .await
         .map_err(|e| format!("cannot connect to database: {e}"))?;
+
+    // Session-scoped, so it is released even if this process dies mid-run.
+    let mut lock_conn = pool
+        .acquire()
+        .await
+        .map_err(|e| format!("cannot acquire a connection: {e}"))?;
+    sqlx::query("SELECT pg_advisory_lock($1)")
+        .bind(MIGRATE_LOCK_KEY)
+        .execute(&mut *lock_conn)
+        .await
+        .map_err(|e| format!("cannot take the migrate lock: {e}"))?;
 
     // Only "the ledger table does not exist yet" means nothing is applied.
     // Treating every error that way would let a permission failure or a lost
@@ -188,6 +210,7 @@ async fn migrate(config: &Config, dry_run: bool) -> Result<(), String> {
 
     if dry_run {
         tracing::info!(event = "migrate.dry_run_complete", applied_now = 0);
+        drop(lock_conn);
         return Ok(());
     }
 
@@ -201,13 +224,13 @@ async fn migrate(config: &Config, dry_run: bool) -> Result<(), String> {
         .await
         .map_err(|e| format!("migration failed: {e}"))?;
 
-    // Report what THIS process applied, not what it planned to. The plan was
-    // computed by an unlocked read before `run` took the advisory lock, so
-    // with two concurrent invocations — a retried deploy step, or two
-    // runners — both would otherwise log the same count while only one
-    // applied anything. `architecture.md` §6 makes this an owned mutation
-    // and §13 invariant 6 requires an auditable result, which means the
-    // number has to be a fact rather than an intention.
+    // Report what THIS process applied. Both snapshots are taken inside the
+    // operation lock, so no other invocation can apply anything between
+    // them: the difference is this process's work and nobody else's.
+    // `architecture.md` §6 makes this an owned mutation and §13 invariant 6
+    // requires an auditable result, so the number has to be a fact rather
+    // than an intention — and, since the lock brackets it, a fact about the
+    // right process.
     let after: Vec<i64> =
         sqlx::query_scalar("SELECT version FROM _sqlx_migrations ORDER BY version")
             .fetch_all(&pool)
@@ -224,5 +247,7 @@ async fn migrate(config: &Config, dry_run: bool) -> Result<(), String> {
         planned = pending.len(),
         total_applied = after.len(),
     );
+
+    drop(lock_conn);
     Ok(())
 }

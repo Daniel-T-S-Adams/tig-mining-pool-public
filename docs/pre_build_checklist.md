@@ -294,44 +294,73 @@ Output: a versioned fixture set and a written list of expected results. Fixtures
 may be captured TIG responses, generated cases, or both, but must not contain
 credentials.
 
-- [ ] Capture or construct a complete block-consistent TIG snapshot fixture.
-- [ ] Create challenge-selection cases, including zero counts and random ties.
-- [ ] Create algorithm-selection and track-performance cases.
-- [ ] Create hyperparameter-source cases, including quality ties and missing
+- [x] Capture or construct a complete block-consistent TIG snapshot fixture.
+  — PR #16 (`fixtures/tig/v1`); coverage audited in PR #23, corrected in
+  PR #22. Live-verified reshoot tracked in issue #31.
+- [x] Create challenge-selection cases, including zero counts and random ties.
+  — PR #19 (`challenge-selection.json`): zero counts, all-zero tie, and
+  supplied-draw tie resolution
+- [x] Create algorithm-selection and track-performance cases.
+  — PR #19 (`algorithm-selection.json`): adoption, bans, missing binaries,
+  track-best rate, and id tiebreaks
+- [x] Create hyperparameter-source cases, including quality ties and missing
   sources.
-- [ ] Create CPU and GPU bundle-sizing cases.
-- [ ] Create projected-qualifier cases with multiple confirmed in-flight
+  — PR #19 (`hyperparameter-source.json`)
+- [x] Create CPU and GPU bundle-sizing cases.
+  — PR #19 (`bundle-sizing.json`): GPU minimum plus the CPU
+  core/nonce-multiple rounding cases
+- [x] Create projected-qualifier cases with multiple confirmed in-flight
   benchmarks.
-- [ ] Create a complete small benchmark artifact with a known quality vector,
+  — PR #19 (`projected-qualifiers.json`)
+- [x] Create a complete small benchmark artifact with a known quality vector,
   Merkle root, sampled nonces, proofs, and expected verification result.
-- [ ] Create corrupt and incomplete artifact cases.
-- [ ] Create structurally valid but solution-invalid and method-
+  — PR #20 (`benchmark-artifact/v1` golden case; all five recorded in
+  `expected.json`)
+- [x] Create corrupt and incomplete artifact cases.
+  — PR #20: bad checksum, truncated upload, missing manifest entries, wrong
+  declared size, missing/duplicate nonce, leaf-hash and Merkle-root mismatch,
+  identity mismatch
+- [x] Create structurally valid but solution-invalid and method-
   non-reproducible package cases for local screening and fault attribution.
-- [ ] Create collateral cases covering different per-track bundle counts,
+  — PR #20 (`solution-invalid`, `method-non-reproducible`)
+- [x] Create collateral cases covering different per-track bundle counts,
   simultaneous reservations, insufficient balance, and a live penalty change.
-- [ ] Create tier cases covering paid join/rejoin, `k`-unverified enforcement,
+  — PR #21 (`collateral.json`)
+- [x] Create tier cases covering paid join/rejoin, `k`-unverified enforcement,
   outstanding exposure across re-entry, dormancy, round `U > V`, per-failure
   `X`, and the `f > k` removal boundary.
-- [ ] Create availability-queue cases covering FIFO ties, more than one member
+  — PR #21 (`tier.json`)
+- [x] Create availability-queue cases covering FIFO ties, more than one member
   and slot, stale/cancelled offers, ready-check replay/expiry, tier removal,
   newly opened global capacity, and a fresh atomic limit failure at promotion.
-- [ ] Create lifecycle cases for duplicate requests, delayed confirmation,
+  — PR #17 (`availability-queue.json`)
+- [x] Create lifecycle cases for duplicate requests, delayed confirmation,
   timeout, stopped, expired, active, fraudulent, and restart recovery.
-- [ ] Create qualifier-attribution cases, including an equal-quality group that
+  — PR #17 (`lifecycle.json`)
+- [x] Create qualifier-attribution cases, including an equal-quality group that
   crosses the qualifier boundary.
-- [ ] Create payout cases covering several members, zero qualifiers, fee
+  — PR #18 (`qualifier-attribution.json`: `equal_quality_boundary_draw`)
+- [x] Create payout cases covering several members, zero qualifiers, fee
   subtraction, rounding, dust, delayed TIG settlement, and automatic round
   transfers.
-- [ ] Record the expected output for every fixture independently of the future
+  — PR #18 (`payouts.json`)
+- [x] Record the expected output for every fixture independently of the future
   implementation.
+  — every set carries expected values and a README recording derivation and
+  any refuted/pending annotation
 
 Section completion criteria:
 
-- [ ] The decision engine, protocol state machine, proof builder, qualifier
+- [x] The decision engine, protocol state machine, proof builder, qualifier
   attribution, and accounting can each be tested without depending on live TIG
   state.
-- [ ] The expected values are reviewed before generated implementation tests
+  — `fixtures/` plus `crates/fake-tig` (PR #16, `make smoke`); the spike's
+  deterministic suites ran entirely offline against them (PR #30)
+- [x] The expected values are reviewed before generated implementation tests
   are accepted as evidence.
+  — owner sign-off recorded 2026-08-23:
+  [PR #47 comment](https://github.com/Daniel-T-S-Adams/tig-mining-pool/pull/47#issuecomment-5385619569).
+  Fixture residuals stay recorded in each set's README and in issue #31.
 
 ## 7. Complete one end-to-end protocol spike
 
@@ -456,16 +485,35 @@ Section completion criteria:
 These tasks can be performed alongside the protocol spike, but must be complete
 before multiple product slices are developed in parallel.
 
-- [ ] Initialize and document the repository structure.
-- [ ] Add a root README describing scope, local setup, and document authority.
+- [x] Initialize and document the repository structure.
+  — PR #1: pinned toolchain, Cargo workspace, layout documented in `README.md`
+- [x] Add a root README describing scope, local setup, and document authority.
+  — PR #1 (`README.md`)
 - [ ] Choose and record the project license.
-- [ ] Add formatting, linting, type checking, and unit-test commands.
-- [ ] Add CI that runs those commands from a clean checkout.
+  — **open; human decision.** No `LICENSE` file and no `license` field in any
+  manifest. Required before any public repository or public membership.
+- [x] Add formatting, linting, type checking, and unit-test commands.
+  — PR #1 (`make check`: `cargo fmt --check`, `clippy -D warnings`,
+  `cargo test --workspace`), extended with the feature gate in PR #44
+- [x] Add CI that runs those commands from a clean checkout.
+  — PR #1 (`.github/workflows/pr-checks.yml`); AI review added in PR #41
 - [ ] Define migration, fixture, and generated-code conventions.
-- [ ] Define environment configuration without committing secrets.
-- [ ] Add contribution rules for changing settled mining behavior.
-- [ ] Add a short implementation plan with independently testable vertical
+  — fixture conventions exist (per-set READMEs, `fixtures/<set>/v1`, expected
+  values recorded independently). Migration policy is specified in
+  `architecture.md` §7.1 but has no directory or tooling yet, and no
+  generated-code convention exists. Both land in slice 1
+  ([`plans/slice-1-gateway.md`](plans/slice-1-gateway.md) §3).
+- [x] Define environment configuration without committing secrets.
+  — `config/tig_integration.json` pinned and non-secret; untracked
+  `secrets/`; policy in `CLAUDE.md` and `architecture.md` §9
+- [x] Add contribution rules for changing settled mining behavior.
+  — `CLAUDE.md` mandatory workflow (owning-doc update in the same PR, ADR for
+  durable decisions, AI review, human-only merge)
+- [x] Add a short implementation plan with independently testable vertical
   slices and acceptance criteria.
+  — [`plans/slice-1-gateway.md`](plans/slice-1-gateway.md) §4 for slice 1;
+  §10 below owns the slice order, and each later slice gets its own plan
+  before it starts
 
 ## 9. Gates before public funds or public membership
 
@@ -521,17 +569,30 @@ scaffolding in advance.
 
 - [x] Sections 1-4 are complete for the spike path.
 - [x] The security baseline in section 5.1 is complete.
-- [ ] The proof and lifecycle fixtures required by the spike exist.
-- [ ] Testnet credentials, compute, and temporary artifact storage are ready.
+- [x] The proof and lifecycle fixtures required by the spike exist.
+  — section 6
+- [x] Testnet credentials, compute, and temporary artifact storage are ready.
+  — PR #25 (funded testnet identity, key at `secrets/tig-testnet-api-key`);
+  pinned runtime container and local artifact directories exercised in
+  PRs #27–#29
 
 ### Ready for full product implementation
 
-- [ ] The end-to-end protocol spike succeeds and is repeatable.
-- [ ] The spike report contains measured capacity data rather than estimates
+- [x] The end-to-end protocol spike succeeds and is repeatable.
+  — two live runs, the second from a fresh data directory
+  ([spike report §3–§4](protocol_spike_report.md))
+- [x] The spike report contains measured capacity data rather than estimates
   alone.
-- [ ] Spike findings have been incorporated into the source-of-truth documents.
-- [ ] Repository checks run successfully from a clean checkout.
-- [ ] The first vertical implementation slice has written acceptance criteria.
+  — [spike report §5–§6](protocol_spike_report.md). One measurement gap
+  remains: GPU member overhead was never exercised (CPU/arm64 only), tracked
+  in issue #35; it does not change the section 7 verdict.
+- [x] Spike findings have been incorporated into the source-of-truth documents.
+  — findings→diff table in [spike report §7](protocol_spike_report.md);
+  surviving open questions are issues #31, #33 and #35
+- [x] Repository checks run successfully from a clean checkout.
+  — `.github/workflows/pr-checks.yml` on every PR and push to `main`
+- [x] The first vertical implementation slice has written acceptance criteria.
+  — [`plans/slice-1-gateway.md`](plans/slice-1-gateway.md) §4
 
 ### Ready for public launch
 

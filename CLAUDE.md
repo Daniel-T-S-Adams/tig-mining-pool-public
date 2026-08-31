@@ -9,12 +9,20 @@ workflow bus, S3/filesystem artifact store.
 
 ## Project phase
 
-**Pre-build.** The design documents are settled; implementation is beginning.
-The repository skeleton exists: a pinned Rust toolchain, a Cargo workspace
-(`crates/pool-domain`), `make check` (fmt, clippy `-D warnings`, tests), and CI
-that runs it on every PR. Next milestones are the deterministic test fixtures
-and the protocol spike (`docs/pre_build_checklist.md` §6–7). Doc-only changes
-follow the same PR workflow as code.
+**Pre-build complete; first production slice starting.** The design documents
+are settled, the deterministic fixture sets exist
+(`docs/pre_build_checklist.md` §6), and the end-to-end protocol spike ran
+twice on TIG testnet with a viable verdict
+(`docs/protocol_spike_report.md`). The repository skeleton exists: a pinned
+Rust toolchain, a Cargo workspace, `make check` (fmt, clippy `-D warnings`,
+tests, feature gate), and CI that runs it on every PR.
+
+The active milestone is **slice 1 — TIG gateway and restart-safe protocol
+state machine** (`docs/pre_build_checklist.md` §10 step 1), whose acceptance
+criteria and PR sequencing are in `docs/plans/slice-1-gateway.md`. The
+product advances in vertical slices; each carries its own minimum schema,
+migration, tests, observability, and documentation. Doc-only changes follow
+the same PR workflow as code.
 
 ## Source of truth
 

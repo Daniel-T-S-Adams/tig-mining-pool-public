@@ -5,9 +5,12 @@ run benchmarks on their own machines via a member agent; the pool owns TIG
 credentials, orchestrates precommit/benchmark/proof submission, and settles
 rewards through an append-only accounting ledger.
 
-**Status: pre-build.** The design is settled and documented; implementation is
-starting with deterministic test fixtures and an end-to-end protocol spike
-(see `docs/pre_build_checklist.md`).
+**Status: pre-build complete.** The design is settled, the deterministic
+fixture sets exist, and the end-to-end protocol spike ran twice on TIG testnet
+(`docs/protocol_spike_report.md`). The first production vertical slice — TIG
+gateway and restart-safe protocol state machine — is specified in
+`docs/plans/slice-1-gateway.md`; `docs/pre_build_checklist.md` owns the
+remaining gates and the slice order.
 
 ## Document authority
 
@@ -46,6 +49,9 @@ schemas/             versioned member-protocol JSON schemas
 config/              pinned TIG integration contract
 fixtures/            versioned deterministic test fixtures (see fixtures/tig/v1/README.md)
 crates/pool-domain   shared domain types (grows as behavior is implemented)
+crates/pool-identity member identity issuance and verification
 crates/fake-tig      deterministic local stand-in for the TIG API (`make smoke`)
+crates/spike         disposable protocol-spike binaries (retained until its
+                     acceptance tests are ported — docs/plans/slice-1-gateway.md §7)
 .github/workflows/   PR checks (fmt, clippy, test from a clean checkout)
 ```

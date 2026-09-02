@@ -449,25 +449,67 @@ endpoint documentation says they may be invoked only once every few seconds.
 No numerical quota or remaining-limit headers were published or returned
 during this review.
 
-The spike uses these conservative client limits:
+The pool uses these conservative client limits, originating with the spike.
+The whole-call backstop and the per-reader shares are later pool policy, not
+spike observation:
 
 ```text
 get-block poll interval: 15 seconds
-GET global limiter: 2 requests/second, burst 2
-maximum concurrent TIG GETs: 2
+GET limiter (pool-wide, per IP): 2 requests/second, burst 2
+maximum concurrent TIG GETs: 2 pool-wide, counted while a request or its
+                             body is in flight
+per-reader share of the above: see ADR-0006
 POST lane: serialized, minimum 5 seconds between initial writes
 write retry interval after reconciliation: 60 seconds
 connect timeout: 5 seconds
-GET total timeout: 30 seconds
+GET total timeout: 30 seconds, per attempt
+GET whole-call backstop: 300 seconds, covering every retry and wait
 POST total timeout: 60 seconds
 ```
+
+Five of these need saying precisely, because each was originally ambiguous
+enough to be implemented wrongly:
+
+- The GET budget is a **pool-wide per-IP ceiling**, not a per-process
+  allowance: TIG rate-limits per IP, and the controller and gateway are
+  separate processes behind one egress address. Each reader is configured
+  with an explicit share and the shares must sum to no more than the
+  ceiling; ADR-0006 records the allocation and why an even split was chosen
+  for v0. Two clients inside one process share that process's share.
+- The concurrency ceiling counts requests whose **body is still
+  streaming**, not merely those awaiting response headers, and a caller
+  waiting on a token or a `Retry-After` occupies no slot. A ceiling on
+  waiting rather than on transfer would let two stalled reads block the
+  `get-block` poll that §9 and §10 depend on.
+- Response caching — the `Cache-Control` rule below and §9's per-block
+  caching of each endpoint response by its complete request key — lands with
+  snapshot assembly (slice-1 plan criterion C3). The read client shipped
+  before it does not yet cache.
+- These limits currently ship as compiled constants in `crates/tig-client`,
+  not read from `config/tig_integration.json` the way §8's guardrails are.
+  Slice-1 criterion E5 requires them as configuration; the wiring lands with
+  the snapshot PR, alongside the caching above.
+- The 30-second GET timeout bounds **one attempt**. The whole-call backstop
+  exists only so a read cannot hang indefinitely; it is deliberately loose
+  enough that the retry policy below stays reachable, and it is not derived
+  from block timing — §8 treats observed block intervals as evidence, not
+  constants. A caller needing a read to complete within a block imposes that
+  bound itself from live configuration.
 
 These are client policy, not claims about server capacity. The spike records
 observed headers, latency and throttling and may propose reviewed changes.
 
 Retry rules:
 
-- honor `Retry-After` when present;
+- honor `Retry-After` when present. The call that receives it waits the
+  full instructed time, failing if that does not fit its own whole-call
+  budget rather than retrying early. The pause it imposes on *other* readers
+  sharing the limiter is capped at the backoff ceiling above: that state is
+  process-global and written from a server response, so an unbounded one
+  would let a single `Retry-After: 86400` — or a far-future HTTP-date under
+  clock skew — halt every read in the process. A reader released early meets
+  the throttle again and pauses again, so the bound costs one request per
+  reader per interval and cannot compound;
 - retry read-only calls on network failure, 408, 429 and 5xx using full-jitter
   exponential backoff capped at 60 seconds;
 - do not retry schema failures, authentication failures, or other 4xx errors

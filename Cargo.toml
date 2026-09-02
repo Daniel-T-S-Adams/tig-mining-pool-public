@@ -8,6 +8,7 @@ members = [
     "crates/pool-identity",
     "crates/pool-telemetry",
     "crates/spike",
+    "crates/tig-client",
 ]
 
 [workspace.package]

@@ -2325,6 +2325,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "tig-client"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "httpdate",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tig-client",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "tinystr"
 version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"

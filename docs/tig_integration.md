@@ -483,11 +483,20 @@ enough to be implemented wrongly:
   `get-block` poll that §9 and §10 depend on.
 - Response caching splits. §9's per-block caching by complete request key
   landed with snapshot assembly (criterion C3). The `Cache-Control` rule
-  below has not, and lands with snapshot persistence.
-- These limits currently ship as compiled constants in `crates/tig-client`,
-  not read from `config/tig_integration.json` the way §8's guardrails are.
-  Slice-1 criterion E5 requires them as configuration; the wiring lands with
-  snapshot persistence, alongside the `Cache-Control` cache above.
+  below is **not yet implemented**; it is tracked as the remaining half of
+  §11's caching obligation. Stated against the obligation rather than
+  against a planned PR, which is how this note went stale once already.
+- These limits are read from `config/tig_integration.json` under
+  `read_limits`, the way §8's guardrails are (slice-1 criterion E5). The
+  pool-wide ceiling, each reader's share and the poll interval are all
+  configuration, and there is no compiled fallback: a missing or incomplete
+  `read_limits` refuses to load rather than substituting a default, since a
+  default ceiling would be a protocol constant in the binary (§12) reached
+  exactly when configuration was absent. The reader shares are summed
+  against the ceiling when the policy loads, so a config that over-allocates
+  the per-IP budget cannot produce a usable policy at all. The POST-lane
+  values above are not yet read from configuration because no component
+  writes yet; they become configuration with the TIG gateway.
 - The 30-second GET timeout bounds **one attempt**. The whole-call backstop
   exists only so a read cannot hang indefinitely; it is deliberately loose
   enough that the retry policy below stays reachable, and it is not derived

@@ -34,11 +34,12 @@ async fn fake_tig() -> String {
 fn source(base: &str) -> TigSnapshotSource {
     // The ceiling rather than a reader share, so the test is not pacing
     // itself against one process's slice of the budget.
+    let policy = tig_client::testing::shipped_policy_for_test().unwrap();
     let limits = ReadLimits {
         max_backoff: Duration::from_millis(50),
-        ..tig_client::testing::pool_ceiling_for_test()
+        ..tig_client::testing::pool_ceiling_for_test(&policy)
     };
-    let client = TigReadClient::new_unrestricted_for_test(base, limits).unwrap();
+    let client = TigReadClient::new_unrestricted_for_test(base, &policy, limits).unwrap();
     TigSnapshotSource::new(client, PLAYER)
 }
 

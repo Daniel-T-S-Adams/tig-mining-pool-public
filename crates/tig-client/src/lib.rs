@@ -19,20 +19,23 @@
 //! and `manifest.json`. Verified: with the feature on, a workspace build
 //! re-serialises `1.50` verbatim instead of normalising it to `1.5`.
 //!
-//! Two §11 obligations are deliberately NOT here. §9's per-block caching of
-//! each endpoint response by its complete request key landed with snapshot
-//! assembly, in `pool-snapshot`. The `Cache-Control` response cache has NOT,
-//! and nor has criterion E5's wiring of these limits to
-//! `config/tig_integration.json`: both belong to the snapshot-persistence PR
-//! that follows. Named rather than left as "with the snapshot PR", since
-//! that PR has now been and gone. This crate performs reads only —
+//! §11's limits are configuration, not compiled constants: [`ReadPolicy`]
+//! loads them from `config/tig_integration.json` and there is no default to
+//! fall back to (criterion E5).
+//!
+//! One §11 obligation is still outstanding. §9's per-block caching of each
+//! endpoint response by its complete request key landed with snapshot
+//! assembly, in `pool-snapshot`; the `Cache-Control` response cache has not.
+//! Recorded against the obligation rather than against whichever PR is next,
+//! because naming a PR is how this note went stale twice.
+//! This crate performs reads only —
 //! protocol writes belong to the TIG gateway, which is the sole holder of
 //! the API key (`architecture.md` §2.2, invariant 2), and nothing here
 //! accepts or stores one.
 
 mod limits;
 
-pub use limits::{ReadLimits, TigReader};
+pub use limits::{PolicyError, ReadLimits, ReadPolicy, TigReader};
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
@@ -307,10 +310,20 @@ pub struct TigReadClient {
     http: reqwest::Client,
     limiter: Arc<Limiter>,
     limits: ReadLimits,
+    /// §11's backoff ceiling, carried from the policy rather than read back
+    /// off `limits`. The host-wide `Retry-After` pause is written from a
+    /// server response and must be bounded by policy; `limits.max_backoff`
+    /// is caller-supplied and outside the entitlement check, so bounding the
+    /// pause by it would let one client widen a process-global value.
+    pinned_max_backoff: Duration,
 }
 
 impl TigReadClient {
-    pub fn new(base_url: impl Into<String>, limits: ReadLimits) -> Result<Self, String> {
+    pub fn new(
+        base_url: impl Into<String>,
+        policy: &ReadPolicy,
+        limits: ReadLimits,
+    ) -> Result<Self, String> {
         // The rate fields must be a share a reader is entitled to. Without
         // this, a struct literal spelling out the full ceiling bypasses
         // every other guard — removing `Default`, keeping `pool_ceiling`
@@ -326,26 +339,30 @@ impl TigReadClient {
         // exercised. Tests that need the full ceiling use
         // `new_unrestricted_for_test` instead, which is an explicit door
         // rather than a disabled guard.
-        if !limits.is_entitled_share() {
+        if !policy.is_entitled_share(&limits) {
             return Err(format!(
                 "these limits ({} req/s, burst {}, {} concurrent) are not a reader's share of \
-                 the pinned per-IP budget; build them with ReadLimits::for_reader or \
-                 ReadLimits::for_block_poll (ADR-0006)",
+                 the pinned per-IP budget; build them with ReadPolicy::for_reader or \
+                 ReadPolicy::for_block_poll (ADR-0006)",
                 limits.requests_per_second, limits.burst, limits.max_concurrent
             ));
         }
 
-        Self::build(base_url, limits)
+        Self::build(base_url, policy, limits)
     }
 
-    fn build(base_url: impl Into<String>, limits: ReadLimits) -> Result<Self, String> {
+    fn build(
+        base_url: impl Into<String>,
+        policy: &ReadPolicy,
+        limits: ReadLimits,
+    ) -> Result<Self, String> {
         // Clamp every pinned duration once, here, rather than at each site
         // that consumes one. These fields are caller-supplied and
         // `is_entitled_share` constrains none of them, so without this a
         // client could sleep past §11's backoff cap, hold a connection past
         // its connect timeout, or run an attempt past the pinned per-attempt
         // budget. A client may be stricter than policy; never looser.
-        let limits = limits.clamped_to_policy();
+        let limits = policy.clamp(limits);
         let base_url = base_url.into().trim_end_matches('/').to_string();
         let http = reqwest::Client::builder()
             .connect_timeout(limits.connect_timeout)
@@ -362,6 +379,7 @@ impl TigReadClient {
             base_url,
             http,
             limits,
+            pinned_max_backoff: policy.pinned_max_backoff(),
         })
     }
 
@@ -375,9 +393,10 @@ impl TigReadClient {
     #[cfg(feature = "testing")]
     pub fn new_unrestricted_for_test(
         base_url: impl Into<String>,
+        policy: &ReadPolicy,
         limits: ReadLimits,
     ) -> Result<Self, String> {
-        Self::build(base_url, limits)
+        Self::build(base_url, policy, limits)
     }
 
     /// The limits this client actually ended up with, after policy
@@ -535,7 +554,7 @@ impl TigReadClient {
                 // host-wide pause depend on which one happened to see the
                 // 429.
                 self.limiter
-                    .pause_for(delay.min(ReadLimits::pinned_max_backoff()))
+                    .pause_for(delay.min(self.pinned_max_backoff))
                     .await;
             }
 
@@ -687,12 +706,13 @@ pub mod testing {
     /// regardless of the clamp.
     pub fn effective_max_backoff_for_test(
         base_url: &str,
+        policy: &crate::ReadPolicy,
         limits: crate::ReadLimits,
     ) -> Result<Duration, String> {
         // Returns a Result rather than expecting: the workspace forbids
         // `expect` outside test files, and a helper in `src/` is not one.
         Ok(
-            crate::TigReadClient::new_unrestricted_for_test(base_url, limits)?
+            crate::TigReadClient::new_unrestricted_for_test(base_url, policy, limits)?
                 .limits
                 .max_backoff,
         )
@@ -703,17 +723,27 @@ pub mod testing {
     /// Asserted as a value because the real one is 60 seconds — too long to
     /// wait out in a test, and a timing assertion at that scale would be
     /// measuring the test's own patience rather than the bound.
-    pub fn host_pause_bound_for_test() -> Duration {
-        crate::ReadLimits::pinned_max_backoff()
+    pub fn host_pause_bound_for_test(policy: &crate::ReadPolicy) -> Duration {
+        policy.pinned_max_backoff()
     }
 
     /// The pinned per-IP ceiling.
     ///
     /// Exposed for tests only: production readers take a share via
-    /// `ReadLimits::for_reader`, and a public constructor returning the
-    /// whole allowance would undo ADR-0006's requirement that a reader name
+    /// `ReadPolicy::for_reader`, and a public accessor returning the whole
+    /// allowance would undo ADR-0006's requirement that a reader name
     /// itself.
-    pub fn pool_ceiling_for_test() -> crate::ReadLimits {
-        crate::ReadLimits::pool_ceiling()
+    pub fn pool_ceiling_for_test(policy: &crate::ReadPolicy) -> crate::ReadLimits {
+        policy.ceiling()
+    }
+
+    /// The policy as actually shipped in `config/tig_integration.json`.
+    ///
+    /// Tests run against the real file rather than a hand-written fixture,
+    /// so the pinned §11 values are covered as configured. A fixture would
+    /// let the shipped config drift to something no test ever loads — which
+    /// is the whole failure mode criterion E5 exists to close.
+    pub fn shipped_policy_for_test() -> Result<crate::ReadPolicy, crate::PolicyError> {
+        crate::ReadPolicy::from_config_json(include_str!("../../../config/tig_integration.json"))
     }
 }

@@ -13,7 +13,28 @@ use axum::Router;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::get;
-use tig_client::{ReadError, ReadLimits, TigReadClient, TigReader};
+use tig_client::{ReadError, ReadLimits, ReadPolicy, TigReadClient, TigReader};
+
+/// The §11 policy exactly as shipped in `config/tig_integration.json`.
+///
+/// Loaded rather than hand-written, so these tests cover the pinned values
+/// as configured. A fixture here would let the shipped config drift to
+/// numbers no test ever loads, which is what criterion E5 exists to close.
+fn policy() -> ReadPolicy {
+    tig_client::testing::shipped_policy_for_test().expect("the shipped config must parse")
+}
+
+fn client(base: impl Into<String>, limits: ReadLimits) -> Result<TigReadClient, String> {
+    TigReadClient::new(base, &policy(), limits)
+}
+
+fn unrestricted(base: impl Into<String>, limits: ReadLimits) -> Result<TigReadClient, String> {
+    TigReadClient::new_unrestricted_for_test(base, &policy(), limits)
+}
+
+fn effective_max_backoff(base: &str, limits: ReadLimits) -> Result<Duration, String> {
+    tig_client::testing::effective_max_backoff_for_test(base, &policy(), limits)
+}
 
 /// A server that fails a controllable number of times before succeeding.
 #[derive(Clone, Default)]
@@ -79,7 +100,7 @@ fn fast_limits() -> ReadLimits {
         // observes the pinned 2/s rather than one process's half of it.
         // Reached through `testing` because production code must not be
         // able to claim the whole allowance (ADR-0006).
-        ..tig_client::testing::pool_ceiling_for_test()
+        ..tig_client::testing::pool_ceiling_for_test(&policy())
     }
 }
 
@@ -94,10 +115,10 @@ fn the_reader_shares_stay_within_the_pinned_ceiling() {
     let shares: Vec<ReadLimits> = TigReader::ALL
         .iter()
         .copied()
-        .map(ReadLimits::for_reader)
+        .map(|r| policy().for_reader(r))
         .collect();
     assert!(
-        ReadLimits::shares_within_ceiling(&shares),
+        policy().shares_within_ceiling(&shares),
         "the per-reader shares exceed the pinned per-IP budget"
     );
 }
@@ -106,7 +127,7 @@ fn the_reader_shares_stay_within_the_pinned_ceiling() {
 fn the_block_poll_cannot_stall_past_its_own_interval() {
     // §11 polls get-block every 15s and §10 makes a missed height
     // unrecoverable, so this path must fail and retry rather than stall.
-    let poll = ReadLimits::for_block_poll(TigReader::Controller);
+    let poll = policy().for_block_poll(TigReader::Controller);
     assert!(
         poll.call_deadline <= Duration::from_secs(15),
         "the poll deadline must not exceed the poll interval"
@@ -130,7 +151,7 @@ async fn retries_a_server_error_then_succeeds() {
     };
     let calls = flaky.calls.clone();
     let base = serve(flaky).await;
-    let client = TigReadClient::new_unrestricted_for_test(base, fast_limits()).unwrap();
+    let client = unrestricted(base, fast_limits()).unwrap();
 
     let value = client.get_json("probe").await.expect("should recover");
     assert_eq!(value["ok"], serde_json::json!(true));
@@ -150,7 +171,7 @@ async fn gives_up_after_max_attempts_and_reports_it_as_transient() {
         max_attempts: 3,
         ..fast_limits()
     };
-    let client = TigReadClient::new_unrestricted_for_test(base, limits).unwrap();
+    let client = unrestricted(base, limits).unwrap();
 
     let err = client.get_json("probe").await.expect_err("must give up");
     assert!(
@@ -176,7 +197,7 @@ async fn does_not_retry_a_client_error() {
     };
     let calls = flaky.calls.clone();
     let base = serve(flaky).await;
-    let client = TigReadClient::new_unrestricted_for_test(base, fast_limits()).unwrap();
+    let client = unrestricted(base, fast_limits()).unwrap();
 
     let err = client.get_json("probe").await.expect_err("must not retry");
     match err {
@@ -195,7 +216,7 @@ async fn retries_429_because_it_is_a_rate_limit_not_a_rejection() {
     };
     let calls = flaky.calls.clone();
     let base = serve(flaky).await;
-    let client = TigReadClient::new_unrestricted_for_test(base, fast_limits()).unwrap();
+    let client = unrestricted(base, fast_limits()).unwrap();
 
     client.get_json("probe").await.expect("429 is retryable");
     assert_eq!(calls.load(Ordering::SeqCst), 2);
@@ -219,7 +240,7 @@ async fn honours_retry_after_over_its_own_backoff() {
         max_backoff: Duration::from_secs(5),
         ..fast_limits()
     };
-    let client = TigReadClient::new_unrestricted_for_test(base, roomy).unwrap();
+    let client = unrestricted(base, roomy).unwrap();
 
     let started = Instant::now();
     client.get_json("probe").await.expect("recovers");
@@ -235,7 +256,7 @@ async fn a_non_json_body_is_a_schema_error_not_a_retry() {
     // §1's fail-closed rule: an unexpected shape stops the caller rather
     // than being retried into the same answer.
     let base = serve(Flaky::default()).await;
-    let client = TigReadClient::new_unrestricted_for_test(base, fast_limits()).unwrap();
+    let client = unrestricted(base, fast_limits()).unwrap();
 
     let err = client.get_json("notjson").await.expect_err("not JSON");
     match err {
@@ -254,7 +275,7 @@ async fn the_rate_limiter_paces_requests_across_the_process() {
     // cannot complete in under ~2s: the burst covers two, the rest arrive at
     // the sustained rate.
     let base = serve(Flaky::default()).await;
-    let client = TigReadClient::new_unrestricted_for_test(base, fast_limits()).unwrap();
+    let client = unrestricted(base, fast_limits()).unwrap();
 
     let started = Instant::now();
     for _ in 0..6 {
@@ -303,7 +324,7 @@ async fn retries_a_408_and_a_connection_failure() {
     };
     let calls = flaky.calls.clone();
     let base = serve(flaky).await;
-    let client = TigReadClient::new_unrestricted_for_test(base, fast_limits()).unwrap();
+    let client = unrestricted(base, fast_limits()).unwrap();
     client.get_json("probe").await.expect("408 is retryable");
     assert_eq!(calls.load(Ordering::SeqCst), 2);
 
@@ -313,7 +334,7 @@ async fn retries_a_408_and_a_connection_failure() {
         max_attempts: 3,
         ..fast_limits()
     };
-    let dead = TigReadClient::new_unrestricted_for_test("http://127.0.0.1:1", limits).unwrap();
+    let dead = unrestricted("http://127.0.0.1:1", limits).unwrap();
     let err = dead
         .get_json("probe")
         .await
@@ -334,8 +355,8 @@ async fn two_clients_on_one_host_share_the_rate_limit() {
     // snapshot ingestor and the active-benchmark cache filler, say — must
     // not each get a full allowance and together double the pinned rate.
     let base = serve(Flaky::default()).await;
-    let a = TigReadClient::new_unrestricted_for_test(base.clone(), fast_limits()).unwrap();
-    let b = TigReadClient::new_unrestricted_for_test(base, fast_limits()).unwrap();
+    let a = unrestricted(base.clone(), fast_limits()).unwrap();
+    let b = unrestricted(base, fast_limits()).unwrap();
 
     let started = Instant::now();
     for _ in 0..3 {
@@ -368,7 +389,7 @@ async fn honours_an_http_date_retry_after() {
         max_backoff: Duration::from_secs(10),
         ..fast_limits()
     };
-    let client = TigReadClient::new_unrestricted_for_test(base, roomy).unwrap();
+    let client = unrestricted(base, roomy).unwrap();
 
     let started = Instant::now();
     client.get_json("probe").await.expect("recovers");
@@ -396,7 +417,7 @@ async fn a_call_cannot_outlive_its_deadline() {
         max_attempts: 10,
         ..fast_limits()
     };
-    let client = TigReadClient::new_unrestricted_for_test(base, limits).unwrap();
+    let client = unrestricted(base, limits).unwrap();
 
     let started = Instant::now();
     let err = client.get_json("probe").await.expect_err("must stop");
@@ -445,8 +466,7 @@ async fn a_truncated_body_is_retried_rather_than_failing_once() {
         let _ = axum::serve(listener, app).await;
     });
 
-    let client =
-        TigReadClient::new_unrestricted_for_test(format!("http://{addr}"), fast_limits()).unwrap();
+    let client = unrestricted(format!("http://{addr}"), fast_limits()).unwrap();
     let value = client
         .get_json("probe")
         .await
@@ -465,7 +485,7 @@ async fn clients_disagreeing_on_rate_limits_are_refused() {
     // strictly would otherwise run silently at the first one's rate while
     // still reporting its own limits.
     let base = serve(Flaky::default()).await;
-    let _first = TigReadClient::new_unrestricted_for_test(base.clone(), fast_limits()).unwrap();
+    let _first = unrestricted(base.clone(), fast_limits()).unwrap();
 
     let stricter = ReadLimits {
         requests_per_second: 1,
@@ -475,7 +495,7 @@ async fn clients_disagreeing_on_rate_limits_are_refused() {
     // before ever reaching the divergence check, and divergence is what this
     // case is about. (Two entitled shares cannot diverge — they are equal —
     // so the conflict is only reachable this way.)
-    let err = TigReadClient::new_unrestricted_for_test(base, stricter)
+    let err = unrestricted(base, stricter)
         .expect_err("a divergent rate policy must not be silently ignored");
     assert!(
         err.contains("different rate limits"),
@@ -505,8 +525,7 @@ async fn large_integers_survive_the_read_boundary() {
         let _ = axum::serve(listener, app).await;
     });
 
-    let client =
-        TigReadClient::new_unrestricted_for_test(format!("http://{addr}"), fast_limits()).unwrap();
+    let client = unrestricted(format!("http://{addr}"), fast_limits()).unwrap();
     let value = client.get_json("probe").await.unwrap();
     assert_eq!(
         value["fuel"].to_string(),
@@ -540,10 +559,9 @@ async fn a_hanging_server_cannot_outlast_the_call_deadline() {
     let limits = ReadLimits {
         call_deadline: Duration::from_secs(2),
         attempt_timeout: Duration::from_secs(30),
-        ..tig_client::testing::pool_ceiling_for_test()
+        ..tig_client::testing::pool_ceiling_for_test(&policy())
     };
-    let client =
-        TigReadClient::new_unrestricted_for_test(format!("http://{addr}"), limits).unwrap();
+    let client = unrestricted(format!("http://{addr}"), limits).unwrap();
 
     let started = Instant::now();
     let err = client.get_json("probe").await.expect_err("must not hang");
@@ -563,8 +581,8 @@ async fn one_host_spelled_two_ways_shares_a_single_allowance() {
     let base = serve(Flaky::default()).await;
     let upper = base.replace("http://", "HTTP://");
 
-    let a = TigReadClient::new_unrestricted_for_test(base, fast_limits()).unwrap();
-    let b = TigReadClient::new_unrestricted_for_test(upper, fast_limits()).unwrap();
+    let a = unrestricted(base, fast_limits()).unwrap();
+    let b = unrestricted(upper, fast_limits()).unwrap();
 
     let started = Instant::now();
     for _ in 0..3 {
@@ -632,10 +650,9 @@ async fn a_trickling_body_cannot_outlast_the_call_deadline() {
     let limits = ReadLimits {
         call_deadline: Duration::from_secs(2),
         attempt_timeout: Duration::from_secs(30),
-        ..tig_client::testing::pool_ceiling_for_test()
+        ..tig_client::testing::pool_ceiling_for_test(&policy())
     };
-    let client =
-        TigReadClient::new_unrestricted_for_test(format!("http://{addr}"), limits).unwrap();
+    let client = unrestricted(format!("http://{addr}"), limits).unwrap();
 
     let started = Instant::now();
     let err = client
@@ -663,9 +680,9 @@ async fn a_caller_queued_behind_the_token_bucket_still_meets_its_deadline() {
         burst: 1,
         max_concurrent: 1,
         call_deadline: Duration::from_secs(30),
-        ..tig_client::testing::pool_ceiling_for_test()
+        ..tig_client::testing::pool_ceiling_for_test(&policy())
     };
-    let hog = TigReadClient::new_unrestricted_for_test(base.clone(), slow).unwrap();
+    let hog = unrestricted(base.clone(), slow).unwrap();
 
     // Drain the burst so the next caller has to wait for a token.
     for _ in 0..3 {
@@ -676,7 +693,7 @@ async fn a_caller_queued_behind_the_token_bucket_still_meets_its_deadline() {
         call_deadline: Duration::from_millis(200),
         ..slow
     };
-    let client = TigReadClient::new_unrestricted_for_test(base, impatient).unwrap();
+    let client = unrestricted(base, impatient).unwrap();
 
     let started = Instant::now();
     let result = client.get_json("probe").await;
@@ -723,9 +740,9 @@ async fn a_client_queued_behind_the_in_flight_slot_still_meets_its_deadline() {
         max_concurrent: 1,
         call_deadline: Duration::from_secs(20),
         attempt_timeout: Duration::from_secs(20),
-        ..tig_client::testing::pool_ceiling_for_test()
+        ..tig_client::testing::pool_ceiling_for_test(&policy())
     };
-    let hog = TigReadClient::new_unrestricted_for_test(base.clone(), one_slot).unwrap();
+    let hog = unrestricted(base.clone(), one_slot).unwrap();
     tokio::spawn(async move {
         let _ = hog.get_json("probe").await;
     });
@@ -736,7 +753,7 @@ async fn a_client_queued_behind_the_in_flight_slot_still_meets_its_deadline() {
         call_deadline: Duration::from_millis(300),
         ..one_slot
     };
-    let client = TigReadClient::new_unrestricted_for_test(base, impatient).unwrap();
+    let client = unrestricted(base, impatient).unwrap();
 
     let started = Instant::now();
     let err = client
@@ -770,8 +787,8 @@ async fn a_retry_after_pauses_every_reader_on_the_host() {
         max_backoff: Duration::from_secs(5),
         ..fast_limits()
     };
-    let throttled = TigReadClient::new_unrestricted_for_test(base.clone(), roomy).unwrap();
-    let other = TigReadClient::new_unrestricted_for_test(base, roomy).unwrap();
+    let throttled = unrestricted(base.clone(), roomy).unwrap();
+    let other = unrestricted(base, roomy).unwrap();
 
     // The first call receives the 429 and its Retry-After.
     let started = Instant::now();
@@ -798,9 +815,9 @@ async fn new_refuses_limits_that_are_not_a_readers_share() {
     let base = serve(Flaky::default()).await;
 
     // A share is accepted.
-    TigReadClient::new(base.clone(), ReadLimits::for_reader(TigReader::Controller))
+    client(base.clone(), policy().for_reader(TigReader::Controller))
         .expect("a reader's share must be accepted");
-    TigReadClient::new(base.clone(), ReadLimits::for_block_poll(TigReader::Gateway))
+    client(base.clone(), policy().for_block_poll(TigReader::Gateway))
         .expect("a block-poll share must be accepted");
 
     // The whole ceiling, spelled out field by field, is not.
@@ -808,10 +825,9 @@ async fn new_refuses_limits_that_are_not_a_readers_share() {
         requests_per_second: 2,
         burst: 2,
         max_concurrent: 2,
-        ..ReadLimits::for_reader(TigReader::Controller)
+        ..policy().for_reader(TigReader::Controller)
     };
-    let err = TigReadClient::new(base, hand_built)
-        .expect_err("a hand-built full ceiling must be refused");
+    let err = client(base, hand_built).expect_err("a hand-built full ceiling must be refused");
     assert!(
         err.contains("not a reader's share"),
         "the error should explain the entitlement rule, got: {err}"
@@ -829,7 +845,7 @@ async fn a_retry_after_on_a_success_does_not_pause_the_host() {
         ..Default::default()
     };
     let base = serve(flaky).await;
-    let client = TigReadClient::new_unrestricted_for_test(base, fast_limits()).unwrap();
+    let client = unrestricted(base, fast_limits()).unwrap();
 
     let started = Instant::now();
     client.get_json("probe").await.expect("succeeds");
@@ -862,7 +878,7 @@ async fn a_long_retry_after_fails_the_call_rather_than_stalling_it() {
         call_deadline: Duration::from_secs(2),
         ..fast_limits()
     };
-    let client = TigReadClient::new_unrestricted_for_test(base, limits).unwrap();
+    let client = unrestricted(base, limits).unwrap();
 
     let started = Instant::now();
     let err = client
@@ -892,12 +908,12 @@ async fn a_never_retryable_status_does_not_pause_the_host() {
         ..Default::default()
     };
     let base = serve(flaky).await;
-    let client = TigReadClient::new_unrestricted_for_test(base.clone(), fast_limits()).unwrap();
+    let client = unrestricted(base.clone(), fast_limits()).unwrap();
 
     // The 404 returns immediately and must leave no pause behind it.
     let _ = client.get_json("probe").await.expect_err("404 is rejected");
 
-    let after = TigReadClient::new_unrestricted_for_test(base, fast_limits()).unwrap();
+    let after = unrestricted(base, fast_limits()).unwrap();
     let started = Instant::now();
     let _ = after.get_json("probe").await;
     assert!(
@@ -916,7 +932,7 @@ async fn a_huge_retry_after_does_not_halt_other_readers_indefinitely() {
     // ceiling, not at the day the server asked for. Sixty seconds is too
     // long to wait out, and a timing assertion at that scale would measure
     // the test's patience rather than the cap.
-    let bound = tig_client::testing::host_pause_bound_for_test();
+    let bound = tig_client::testing::host_pause_bound_for_test(&policy());
     assert!(
         bound <= Duration::from_secs(60),
         "the host pause bound is {bound:?}, past §11's pinned ceiling"
@@ -940,13 +956,13 @@ async fn a_huge_retry_after_does_not_halt_other_readers_indefinitely() {
         call_deadline: Duration::from_secs(1),
         ..fast_limits()
     };
-    let receiver = TigReadClient::new_unrestricted_for_test(base.clone(), limits).unwrap();
+    let receiver = unrestricted(base.clone(), limits).unwrap();
     let _ = receiver
         .get_json("probe")
         .await
         .expect_err("cannot fit a day");
 
-    let other = TigReadClient::new_unrestricted_for_test(base, limits).unwrap();
+    let other = unrestricted(base, limits).unwrap();
     let started = Instant::now();
     let err = other
         .get_json("probe")
@@ -975,7 +991,7 @@ async fn a_client_cannot_widen_the_backoff_ceiling_beyond_policy() {
         max_backoff: Duration::from_secs(86_400),
         ..fast_limits()
     };
-    let effective = tig_client::testing::effective_max_backoff_for_test(&base, greedy).unwrap();
+    let effective = effective_max_backoff(&base, greedy).unwrap();
     assert!(
         effective <= Duration::from_secs(60),
         "a client widened the backoff ceiling to {effective:?}, past §11's pinned 60s"
@@ -989,7 +1005,7 @@ async fn a_client_cannot_widen_the_backoff_ceiling_beyond_policy() {
         max_backoff: Duration::from_secs(86_400),
         ..fast_limits()
     };
-    let client = TigReadClient::new_unrestricted_for_test(&base, all_greedy).unwrap();
+    let client = unrestricted(&base, all_greedy).unwrap();
     let effective = client.limits_for_test();
     assert!(effective.connect_timeout <= Duration::from_secs(5));
     assert!(effective.attempt_timeout <= Duration::from_secs(30));
@@ -1002,8 +1018,136 @@ async fn a_client_cannot_widen_the_backoff_ceiling_beyond_policy() {
         ..fast_limits()
     };
     assert_eq!(
-        tig_client::testing::effective_max_backoff_for_test(&base, strict).unwrap(),
+        effective_max_backoff(&base, strict).unwrap(),
         Duration::from_millis(10),
         "a client must be allowed to be stricter than the pinned ceiling"
     );
+}
+
+// --- criterion E5: the limits are configuration, not compiled constants ---
+
+/// The shipped config with one path replaced, for the negative cases.
+fn shipped_json() -> serde_json::Value {
+    serde_json::from_str(include_str!("../../../config/tig_integration.json"))
+        .expect("the shipped config must parse")
+}
+
+#[test]
+fn the_shipped_config_carries_every_pinned_limit() {
+    // §11's pinned numbers, read back through the loader rather than
+    // asserted against compiled copies of themselves. If a value moves in
+    // the config, this is where it has to be re-reviewed.
+    let policy = policy();
+    let ceiling = tig_client::testing::pool_ceiling_for_test(&policy);
+    assert_eq!(ceiling.requests_per_second, 2);
+    assert_eq!(ceiling.burst, 2);
+    assert_eq!(ceiling.max_concurrent, 2);
+    assert_eq!(ceiling.connect_timeout, Duration::from_secs(5));
+    assert_eq!(ceiling.attempt_timeout, Duration::from_secs(30));
+    assert_eq!(ceiling.call_deadline, Duration::from_secs(300));
+    assert_eq!(ceiling.max_backoff, Duration::from_secs(60));
+    assert_eq!(policy.block_poll_interval(), Duration::from_secs(15));
+}
+
+#[test]
+fn a_config_without_read_limits_is_refused() {
+    // No compiled fallback: §12 forbids a protocol value living in the
+    // binary, and a default ceiling would be reached exactly when
+    // configuration was missing — the moment least able to notice.
+    let mut json = shipped_json();
+    json.as_object_mut().unwrap().remove("read_limits");
+    let err = ReadPolicy::from_config_json(&json.to_string())
+        .expect_err("a config without read_limits must not load");
+    assert!(
+        format!("{err}").contains("read_limits"),
+        "the error should name what is missing, got: {err}"
+    );
+}
+
+#[test]
+fn a_reader_without_a_configured_share_is_refused() {
+    // ADR-0006: a reader that silently received a full allowance would
+    // double the pool's rate against a per-IP limit, and §10 makes
+    // sustained throttling of the get-block poll permanently unrecoverable
+    // for per-block attribution. Each reader is checked on its own, so a
+    // loader that only looked at the first one still fails here.
+    for reader in TigReader::ALL.iter().copied() {
+        let mut json = shipped_json();
+        json["read_limits"]["reader_shares"]
+            .as_object_mut()
+            .unwrap()
+            .remove(reader.as_str());
+        let err = format!(
+            "{}",
+            ReadPolicy::from_config_json(&json.to_string())
+                .expect_err("a reader without a configured share must not load")
+        );
+        assert!(
+            err.contains(reader.as_str()),
+            "the error should name the unconfigured reader, got: {err}"
+        );
+    }
+}
+
+#[test]
+fn shares_that_exceed_the_ceiling_are_refused_at_load() {
+    // §11: "the shares must sum to no more than the ceiling". Refused when
+    // the policy is built, so an over-allocating config cannot produce a
+    // usable policy at all rather than being caught at some later call.
+    let mut json = shipped_json();
+    json["read_limits"]["reader_shares"]["controller"]["requests_per_second"] =
+        serde_json::json!(2);
+    let err = ReadPolicy::from_config_json(&json.to_string())
+        .expect_err("over-allocated shares must not load");
+    assert!(
+        format!("{err}").contains("exceed the pool-wide ceiling"),
+        "got: {err}"
+    );
+}
+
+#[test]
+fn an_absent_pinned_limit_is_refused_rather_than_defaulted() {
+    // Every ceiling field is required. A dropped one would otherwise be
+    // filled by serde's default and the policy would load carrying a value
+    // nobody chose — for `max_backoff_seconds`, a zero backoff.
+    let mut json = shipped_json();
+    json["read_limits"]["pool_ceiling"]
+        .as_object_mut()
+        .unwrap()
+        .remove("max_backoff_seconds");
+    let err = ReadPolicy::from_config_json(&json.to_string())
+        .expect_err("an absent pinned limit must not load");
+    assert!(
+        format!("{err}").contains("pool_ceiling"),
+        "the error should name the section, got: {err}"
+    );
+}
+
+#[test]
+fn a_misspelt_limit_is_refused_rather_than_ignored() {
+    // `deny_unknown_fields`. Without it a typo would parse as an unknown key
+    // and be dropped in silence, leaving the intended value unset — the
+    // config would then say one thing and the client do another. Asserted
+    // separately from the absent-field case above, which the required-field
+    // check catches on its own and would pass with `deny_unknown_fields`
+    // removed entirely.
+    let mut json = shipped_json();
+    json["read_limits"]["pool_ceiling"]["max_backoff_secs"] = serde_json::json!(60);
+    let err = ReadPolicy::from_config_json(&json.to_string())
+        .expect_err("an unrecognised pinned limit must not load");
+    assert!(
+        format!("{err}").contains("pool_ceiling"),
+        "the error should name the section, got: {err}"
+    );
+}
+
+#[test]
+fn the_client_still_refuses_limits_that_are_not_a_configured_share() {
+    // The entitlement guard now reads its allowance from configuration; it
+    // must still refuse the whole ceiling handed in as a struct literal.
+    let policy = policy();
+    let ceiling = tig_client::testing::pool_ceiling_for_test(&policy);
+    let err = client("http://127.0.0.1:1", ceiling)
+        .expect_err("the full ceiling is not a reader's share");
+    assert!(err.contains("ADR-0006"), "got: {err}");
 }

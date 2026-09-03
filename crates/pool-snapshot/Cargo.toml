@@ -1,0 +1,23 @@
+[package]
+name = "pool-snapshot"
+description = "Block-consistent TIG snapshot assembly (docs/tig_integration.md §9)"
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+version = "0.1.0"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tig-client = { path = "../tig-client" }
+tracing = "0.1"
+
+[dev-dependencies]
+fake-tig = { path = "../fake-tig" }
+tig-client = { path = "../tig-client", features = ["testing"] }
+axum = "0.8"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true

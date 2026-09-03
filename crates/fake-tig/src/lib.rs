@@ -586,6 +586,25 @@ async fn get_benchmarks(
     check_read_injection(&world, "get-benchmarks")?;
     let w = lock(&world);
     require_latest_block(&w, &params)?;
+    // Required and matched, so the stand-in stops masking an unscoped call.
+    // tig_integration.md §5 pins this read as player-scoped, and it is the
+    // sole authority for every §7 confirmation; a handler that ignored
+    // player_id let a caller omit it and still pass every test.
+    let player_id = params
+        .get("player_id")
+        .ok_or_else(|| ApiError::bad_request("missing player_id"))?;
+    let fixture_player = w
+        .fixture
+        .player
+        .get("player")
+        .and_then(|p| p.get("id"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if !player_id.eq_ignore_ascii_case(fixture_player) {
+        return Err(ApiError::bad_request(
+            "player_id does not match this fixture's player",
+        ));
+    }
     Ok(Json(w.benchmarks_json()))
 }
 

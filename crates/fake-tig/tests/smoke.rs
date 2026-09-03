@@ -148,7 +148,7 @@ async fn happy_path_precommit_to_active() {
     let (_, benches) = call(
         &app,
         "GET",
-        &format!("/get-benchmarks?block_id={block_id}&player_id=x"),
+        &format!("/get-benchmarks?block_id={block_id}&player_id=0xp00l00000000000000000000000000000000000"),
         None,
         None,
     )
@@ -166,7 +166,7 @@ async fn happy_path_precommit_to_active() {
     let (_, benches) = call(
         &app,
         "GET",
-        &format!("/get-benchmarks?block_id={block_id}&player_id=x"),
+        &format!("/get-benchmarks?block_id={block_id}&player_id=0xp00l00000000000000000000000000000000000"),
         None,
         None,
     )
@@ -198,7 +198,7 @@ async fn happy_path_precommit_to_active() {
     let (_, benches) = call(
         &app,
         "GET",
-        &format!("/get-benchmarks?block_id={block_id}&player_id=x"),
+        &format!("/get-benchmarks?block_id={block_id}&player_id=0xp00l00000000000000000000000000000000000"),
         None,
         None,
     )
@@ -301,7 +301,7 @@ async fn ambiguous_write_applies_but_fails_response() {
     let (_, benches) = call(
         &app,
         "GET",
-        &format!("/get-benchmarks?block_id={block_id}&player_id=x"),
+        &format!("/get-benchmarks?block_id={block_id}&player_id=0xp00l00000000000000000000000000000000000"),
         None,
         None,
     )
@@ -348,7 +348,7 @@ async fn rate_limit_and_reject_injection() {
         let (_, benches) = call(
             &app,
             "GET",
-            &format!("/get-benchmarks?block_id={block_id}&player_id=x"),
+            &format!("/get-benchmarks?block_id={block_id}&player_id=0xp00l00000000000000000000000000000000000"),
             None,
             None,
         )

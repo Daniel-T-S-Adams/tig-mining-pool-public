@@ -19,10 +19,13 @@
 //! and `manifest.json`. Verified: with the feature on, a workspace build
 //! re-serialises `1.50` verbatim instead of normalising it to `1.5`.
 //!
-//! Two §11 obligations are deliberately NOT here: the `Cache-Control`
-//! response cache, and §9's per-block caching of each endpoint response by
-//! its complete request key. Both belong with snapshot assembly (slice-1
-//! criterion C3) and land with it; they are deferred, not dropped. This crate performs reads only —
+//! Two §11 obligations are deliberately NOT here. §9's per-block caching of
+//! each endpoint response by its complete request key landed with snapshot
+//! assembly, in `pool-snapshot`. The `Cache-Control` response cache has NOT,
+//! and nor has criterion E5's wiring of these limits to
+//! `config/tig_integration.json`: both belong to the snapshot-persistence PR
+//! that follows. Named rather than left as "with the snapshot PR", since
+//! that PR has now been and gone. This crate performs reads only —
 //! protocol writes belong to the TIG gateway, which is the sole holder of
 //! the API key (`architecture.md` §2.2, invariant 2), and nothing here
 //! accepts or stores one.

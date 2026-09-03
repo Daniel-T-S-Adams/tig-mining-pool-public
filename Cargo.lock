@@ -1502,6 +1502,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "pool-snapshot"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "fake-tig",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tig-client",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "pool-telemetry"
 version = "0.1.0"
 dependencies = [

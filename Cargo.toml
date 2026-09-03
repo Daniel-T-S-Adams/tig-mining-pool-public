@@ -6,6 +6,7 @@ members = [
     "crates/pool-config",
     "crates/pool-domain",
     "crates/pool-identity",
+    "crates/pool-snapshot",
     "crates/pool-telemetry",
     "crates/spike",
     "crates/tig-client",

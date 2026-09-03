@@ -481,14 +481,13 @@ enough to be implemented wrongly:
   waiting on a token or a `Retry-After` occupies no slot. A ceiling on
   waiting rather than on transfer would let two stalled reads block the
   `get-block` poll that §9 and §10 depend on.
-- Response caching — the `Cache-Control` rule below and §9's per-block
-  caching of each endpoint response by its complete request key — lands with
-  snapshot assembly (slice-1 plan criterion C3). The read client shipped
-  before it does not yet cache.
+- Response caching splits. §9's per-block caching by complete request key
+  landed with snapshot assembly (criterion C3). The `Cache-Control` rule
+  below has not, and lands with snapshot persistence.
 - These limits currently ship as compiled constants in `crates/tig-client`,
   not read from `config/tig_integration.json` the way §8's guardrails are.
   Slice-1 criterion E5 requires them as configuration; the wiring lands with
-  the snapshot PR, alongside the caching above.
+  snapshot persistence, alongside the `Cache-Control` cache above.
 - The 30-second GET timeout bounds **one attempt**. The whole-call backstop
   exists only so a read cannot hang indefinitely; it is deliberately loose
   enough that the retry policy below stays reachable, and it is not derived

@@ -332,15 +332,32 @@ async fn an_edited_applied_migration_is_refused() {
 
     MIGRATOR.run(&pool).await.unwrap();
 
-    let first = MIGRATOR.iter().next().unwrap();
-    let tampered = Migrator::with_migrations(vec![Migration::new(
-        first.version,
-        Cow::Owned(first.description.to_string()),
-        MigrationType::Simple,
-        // Same version, different SQL: a different checksum.
-        AssertSqlSafe("SELECT 1;".to_string()).into_sql_str(),
-        false,
-    )]);
+    // Every migration, with only the first one's SQL changed. Passing just
+    // the tampered migration would leave every later version applied but
+    // absent from the list, and sqlx reports that first — a real error, but
+    // "missing", not "modified", so the assertion below would be answered by
+    // the wrong failure and stop testing forward-only the moment a second
+    // migration existed.
+    let tampered = Migrator::with_migrations(
+        MIGRATOR
+            .iter()
+            .enumerate()
+            .map(|(i, m)| {
+                Migration::new(
+                    m.version,
+                    Cow::Owned(m.description.to_string()),
+                    MigrationType::Simple,
+                    if i == 0 {
+                        // Same version, different SQL: a different checksum.
+                        AssertSqlSafe("SELECT 1;".to_string()).into_sql_str()
+                    } else {
+                        m.sql.clone()
+                    },
+                    false,
+                )
+            })
+            .collect::<Vec<_>>(),
+    );
 
     let err = tampered
         .run(&pool)

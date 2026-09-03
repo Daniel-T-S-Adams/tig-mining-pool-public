@@ -11,9 +11,12 @@
 //! above all, which cannot be provoked against live testnet on demand.
 
 mod cache;
+mod postgres_store;
+pub mod store;
 mod tig_source;
 
 pub use cache::BlockCache;
+pub use postgres_store::PostgresSnapshotStore;
 pub use tig_source::TigSnapshotSource;
 
 use std::collections::BTreeMap;

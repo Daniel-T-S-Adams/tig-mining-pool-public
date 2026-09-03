@@ -7,13 +7,23 @@ publish.workspace = true
 version = "0.1.0"
 
 [dependencies]
+pool-domain = { path = "../pool-domain" }
 serde = { version = "1", features = ["derive"] }
+sha2 = "0.10"
 serde_json = "1"
+sqlx = { version = "0.9", default-features = false, features = [
+    "postgres",
+    "runtime-tokio",
+    "tls-rustls-ring",
+] }
 thiserror = "2"
 tig-client = { path = "../tig-client" }
 tracing = "0.1"
 
 [dev-dependencies]
+# `migrate` only here: the library never runs a migration (architecture.md
+# §6), but the store's tests need the real migration to build their schema.
+sqlx = { version = "0.9", features = ["migrate"] }
 fake-tig = { path = "../fake-tig" }
 tig-client = { path = "../tig-client", features = ["testing"] }
 axum = "0.8"

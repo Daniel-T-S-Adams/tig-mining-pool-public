@@ -1,9 +1,9 @@
 # One command defines a valid change (CLAUDE.md "Mandatory workflow").
 # Every target propagates failure; masking a required check is forbidden.
 
-.PHONY: check fmt-check fmt lint test feature-gate secret-scan image-pin smoke db-up db-test db-scan provisioning-selftest
+.PHONY: check fmt-check fmt lint test feature-gate secret-scan image-pin no-observed-constants smoke db-up db-test db-scan provisioning-selftest
 
-check: fmt-check lint test feature-gate secret-scan image-pin
+check: fmt-check lint test feature-gate secret-scan image-pin no-observed-constants
 
 fmt-check:
 	cargo fmt --all --check
@@ -66,3 +66,10 @@ provisioning-selftest: db-up
 # nothing to detect.
 db-scan: db-up
 	./scripts/a4-scan.sh
+
+# Slice-1 criterion C4: no observed TIG constant compiled into slice-1
+# source. Runs its own positive control first — a check that cannot detect
+# anything reports "clean" for the same reason a clean tree does.
+no-observed-constants:
+	./scripts/no-observed-constants.sh --selftest
+	./scripts/no-observed-constants.sh

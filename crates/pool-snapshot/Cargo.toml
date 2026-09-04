@@ -21,6 +21,7 @@ tig-client = { path = "../tig-client" }
 tracing = "0.1"
 
 [dev-dependencies]
+pool-test-support = { path = "../pool-test-support" }
 # `migrate` only here: the library never runs a migration (architecture.md
 # §6), but the store's tests need the real migration to build their schema.
 sqlx = { version = "0.9", features = ["migrate"] }

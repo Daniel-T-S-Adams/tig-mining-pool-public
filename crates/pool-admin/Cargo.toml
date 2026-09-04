@@ -24,6 +24,7 @@ tracing = "0.1"
 workspace = true
 
 [dev-dependencies]
+pool-test-support = { path = "../pool-test-support" }
 # Only what the tests add. pool-config, sqlx and tokio are already normal
 # dependencies and are available to test targets without redeclaring them.
 serde_json = "1"

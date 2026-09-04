@@ -1463,6 +1463,7 @@ dependencies = [
  "clap",
  "pool-config",
  "pool-telemetry",
+ "pool-test-support",
  "serde_json",
  "sqlx",
  "tokio",
@@ -1508,6 +1509,7 @@ dependencies = [
  "axum",
  "fake-tig",
  "pool-domain",
+ "pool-test-support",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -1529,10 +1531,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "pool-test-support"
+version = "0.1.0"
+dependencies = [
+ "sqlx",
+ "tokio",
+]
+
+[[package]]
 name = "pool-workflow"
 version = "0.1.0"
 dependencies = [
  "pool-domain",
+ "pool-test-support",
  "sqlx",
  "thiserror",
  "tokio",

@@ -8,6 +8,7 @@ members = [
     "crates/pool-identity",
     "crates/pool-snapshot",
     "crates/pool-telemetry",
+    "crates/pool-test-support",
     "crates/pool-workflow",
     "crates/spike",
     "crates/tig-client",

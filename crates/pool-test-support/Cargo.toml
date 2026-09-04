@@ -1,0 +1,20 @@
+[package]
+name = "pool-test-support"
+description = "Throwaway provisioned databases for tests. Test-only; never a dependency of a shipped binary."
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+version = "0.1.0"
+
+[dependencies]
+sqlx = { version = "0.9", default-features = false, features = [
+    "macros",
+    "migrate",
+    "postgres",
+    "runtime-tokio",
+    "tls-rustls-ring",
+] }
+tokio = { version = "1", features = ["rt"] }
+
+[lints]
+workspace = true

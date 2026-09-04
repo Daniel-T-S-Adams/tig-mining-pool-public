@@ -13,205 +13,9 @@
 
 use std::borrow::Cow;
 
+use pool_test_support::{MIGRATOR, TempDb, exec, superuser_password_from_secrets};
 use sqlx::migrate::{Migration, MigrationType, Migrator};
-use sqlx::postgres::PgConnectOptions;
 use sqlx::{AssertSqlSafe, Connection, PgConnection, Row, SqlSafeStr};
-
-static MIGRATOR: Migrator = sqlx::migrate!("../../migrations");
-
-/// The provisioning SQL real environments run, compiled in so the tests
-/// cannot drift from it. Passwords live in a separate file precisely so
-/// this one is plain SQL and can be executed here.
-const PROVISION_ROLES_SQL: &str = include_str!("../../../scripts/provision-db-roles.sql");
-
-// These tests never set or use a role password. Roles are cluster-wide, so
-// an `ALTER ROLE ... PASSWORD` here would reach out of the throwaway
-// database and overwrite the credentials `scripts/dev-db.sh` provisioned
-// into `secrets/`, breaking the developer's cluster — which is exactly what
-// an earlier version of this file did. Instead the tests connect as the
-// superuser and adopt the role with the `role` startup option, which
-// exercises the same privilege checks without touching any credential.
-
-/// Run dynamically built SQL. sqlx 0.9 requires `'static` query strings, so
-/// generated statements go through `AssertSqlSafe`. Every caller here builds
-/// its SQL from test-local constants and role names, never from input.
-async fn exec(conn: &mut PgConnection, sql: String) -> Result<(), sqlx::Error> {
-    sqlx::raw_sql(AssertSqlSafe(sql))
-        .execute(&mut *conn)
-        .await
-        .map(|_| ())
-}
-
-/// The superuser password, read from the untracked dev secret at use time.
-///
-/// `POOL_TEST_SUPERUSER_URL` deliberately carries no password: putting one in
-/// the environment is one of the exposures `architecture.md` §9 names
-/// ("ordinary environment dumps"), and it would then also reach every child
-/// process of the test runner. Absent (as under CI trust auth) means no
-/// password is needed.
-fn superuser_password_from_secrets() -> Option<String> {
-    std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../secrets/db-superuser-password"),
-    )
-    .ok()
-    .map(|p| p.trim_end_matches(['\n', '\r']).to_string())
-    .filter(|p| !p.is_empty())
-}
-
-fn superuser_url() -> Option<String> {
-    match std::env::var("POOL_TEST_SUPERUSER_URL") {
-        Ok(url) if !url.trim().is_empty() => Some(url),
-        _ => {
-            if std::env::var("POOL_REQUIRE_DB_TESTS").as_deref() == Ok("1") {
-                panic!(
-                    "POOL_TEST_SUPERUSER_URL is unset but POOL_REQUIRE_DB_TESTS=1: database tests \
-                     must not be skipped here"
-                );
-            }
-            eprintln!("skipping: POOL_TEST_SUPERUSER_URL unset (run ./scripts/dev-db.sh)");
-            None
-        }
-    }
-}
-
-/// A throwaway database, dropped when the guard falls out of scope.
-struct TempDb {
-    name: String,
-    superuser_url: String,
-}
-
-impl TempDb {
-    async fn create(label: &str) -> Option<Self> {
-        let superuser_url = superuser_url()?;
-        // Database names go into unquoted identifiers, so fold anything a
-        // caller's label might contain (a hyphen, say) down to `_`.
-        let label: String = label
-            .chars()
-            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
-            .collect();
-        let name = format!("pool_test_{}_{label}", std::process::id());
-
-        let mut admin_opts = superuser_url.parse::<PgConnectOptions>().unwrap();
-        if let Some(password) = superuser_password_from_secrets() {
-            admin_opts = admin_opts.password(&password);
-        }
-        let mut admin = PgConnection::connect_with(&admin_opts).await.unwrap();
-
-        // Roles are cluster-wide while these tests run in parallel, so two
-        // of them altering the same role races in pg_authid ("tuple
-        // concurrently updated"). A session advisory lock serialises the
-        // provisioning window; it is released when this connection closes,
-        // so a panicking test cannot wedge the others.
-        sqlx::query("SELECT pg_advisory_lock($1)")
-            .bind(0x7069_6f6f_6c5f_726fi64)
-            .execute(&mut admin)
-            .await
-            .unwrap();
-
-        exec(&mut admin, format!("DROP DATABASE IF EXISTS {name};"))
-            .await
-            .unwrap();
-        exec(&mut admin, format!("CREATE DATABASE {name};"))
-            .await
-            .unwrap();
-
-        let db = Self {
-            name,
-            superuser_url,
-        };
-
-        let mut conn = PgConnection::connect_with(&db.as_superuser())
-            .await
-            .unwrap();
-
-        // Execute the REAL provisioning artifact against this database, not
-        // a copy of it. If a future edit granted a service role DDL in that
-        // file, the grant assertions below catch it; an inline
-        // reimplementation here would stay green while every provisioned
-        // environment drifted. Its role creation is cluster-wide and
-        // additive — an existing role keeps its provisioned password — and
-        // its `public` schema grants are per-database, which is why this
-        // runs on the throwaway database rather than on `postgres`.
-        exec(&mut conn, PROVISION_ROLES_SQL.to_string())
-            .await
-            .unwrap();
-
-        // Only the per-database grants the artifact deliberately leaves to
-        // the environment.
-        exec(
-            &mut conn,
-            format!(
-                "GRANT CREATE, CONNECT ON DATABASE {} TO pool_migration;
-                 GRANT CONNECT ON DATABASE {} TO pool_controller, pool_gateway, pool_api, \
-                 pool_artifact_worker, pool_readonly;",
-                db.name, db.name
-            ),
-        )
-        .await
-        .unwrap();
-
-        // Released only after role creation has finished, since that is the
-        // part that races.
-        sqlx::query("SELECT pg_advisory_unlock($1)")
-            .bind(0x7069_6f6f_6c5f_726fi64)
-            .execute(&mut admin)
-            .await
-            .unwrap();
-
-        Some(db)
-    }
-
-    /// Connect to the throwaway database as the superuser, but adopt `role`
-    /// for the session. Privilege checks then apply as they would to that
-    /// role logging in directly, with no password involved.
-    fn as_role(&self, role: &str) -> PgConnectOptions {
-        self.as_superuser().options([("role", role)])
-    }
-
-    fn as_superuser(&self) -> PgConnectOptions {
-        let mut opts = self
-            .superuser_url
-            .parse::<PgConnectOptions>()
-            .unwrap()
-            .database(&self.name);
-        if let Some(password) = superuser_password_from_secrets() {
-            opts = opts.password(&password);
-        }
-        opts
-    }
-}
-
-impl Drop for TempDb {
-    fn drop(&mut self) {
-        let url = self.superuser_url.clone();
-        let name = self.name.clone();
-        // Best effort: a leaked test database is noise, not a failure.
-        let _ = std::thread::spawn(move || {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap();
-            rt.block_on(async {
-                let mut opts = match url.parse::<PgConnectOptions>() {
-                    Ok(o) => o,
-                    Err(_) => return,
-                };
-                if let Some(password) = superuser_password_from_secrets() {
-                    opts = opts.password(&password);
-                }
-                if let Ok(mut conn) = PgConnection::connect_with(&opts).await {
-                    let _ = exec(
-                        &mut conn,
-                        format!("DROP DATABASE IF EXISTS {name} WITH (FORCE);"),
-                    )
-                    .await;
-                }
-            });
-        })
-        .join();
-    }
-}
 
 #[tokio::test]
 async fn migrations_apply_to_an_empty_database() {
@@ -468,7 +272,7 @@ deployment = "test"
 "#,
         host = superuser.get_host(),
         port = superuser.get_port(),
-        name = db.name,
+        name = db.name(),
         user = "pool_migration",
         password_file = password_file.display(),
     );
@@ -653,7 +457,7 @@ deployment = "test"
 "#,
             host = superuser.get_host(),
             port = superuser.get_port(),
-            name = db.name,
+            name = db.name(),
             user = "pool_migration",
             password_file = password_file.display(),
         ),

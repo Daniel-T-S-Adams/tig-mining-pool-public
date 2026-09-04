@@ -5,181 +5,18 @@
 //! developer without a database still gets a meaningful `make check`. CI
 //! sets the URL and `POOL_REQUIRE_DB_TESTS=1` turns a skip into a failure.
 //!
-//! The throwaway-database harness is a trimmed copy of the one in
-//! `pool-admin/tests/migrate.rs` and `pool-snapshot/tests/store.rs`. Three
-//! copies is one too many; the next crate that needs it should extract a
-//! shared test-support crate rather than copy it again.
+//! The throwaway-database harness is `pool-test-support`.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::sync::Arc;
 
 use pool_domain::Network;
+use pool_test_support::TempDb;
 use pool_workflow::{
     IntentError, IntentState, NewIntent, PostgresIntentRepository, TigWriteIntentRepository,
     WriteKind,
 };
-use sqlx::migrate::Migrator;
-use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
-use sqlx::{AssertSqlSafe, Connection, PgConnection, PgPool, Row};
-
-static MIGRATOR: Migrator = sqlx::migrate!("../../migrations");
-
-const PROVISION_ROLES_SQL: &str = include_str!("../../../scripts/provision-db-roles.sql");
-
-/// Serialises the cluster-wide role creation these tests share.
-const PROVISION_LOCK: i64 = 0x7069_6f6f_6c5f_726f;
-
-async fn exec(conn: &mut PgConnection, sql: String) -> Result<(), sqlx::Error> {
-    sqlx::raw_sql(AssertSqlSafe(sql))
-        .execute(&mut *conn)
-        .await
-        .map(|_| ())
-}
-
-fn superuser_password_from_secrets() -> Option<String> {
-    std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../secrets/db-superuser-password"),
-    )
-    .ok()
-    .map(|p| p.trim_end_matches(['\n', '\r']).to_string())
-    .filter(|p| !p.is_empty())
-}
-
-fn superuser_url() -> Option<String> {
-    match std::env::var("POOL_TEST_SUPERUSER_URL") {
-        Ok(url) if !url.trim().is_empty() => Some(url),
-        _ => {
-            if std::env::var("POOL_REQUIRE_DB_TESTS").as_deref() == Ok("1") {
-                panic!(
-                    "POOL_TEST_SUPERUSER_URL is unset but POOL_REQUIRE_DB_TESTS=1: database tests \
-                     must not be skipped here"
-                );
-            }
-            eprintln!("skipping: POOL_TEST_SUPERUSER_URL unset (run ./scripts/dev-db.sh)");
-            None
-        }
-    }
-}
-
-struct TempDb {
-    name: String,
-    superuser_url: String,
-}
-
-impl TempDb {
-    async fn migrated(label: &str) -> Option<Self> {
-        let superuser_url = superuser_url()?;
-        let label: String = label
-            .chars()
-            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
-            .collect();
-        let name = format!("pool_intent_{}_{label}", std::process::id());
-
-        let mut admin_opts = superuser_url.parse::<PgConnectOptions>().unwrap();
-        if let Some(password) = superuser_password_from_secrets() {
-            admin_opts = admin_opts.password(&password);
-        }
-        let mut admin = PgConnection::connect_with(&admin_opts).await.unwrap();
-
-        sqlx::query("SELECT pg_advisory_lock($1)")
-            .bind(PROVISION_LOCK)
-            .execute(&mut admin)
-            .await
-            .unwrap();
-
-        exec(&mut admin, format!("DROP DATABASE IF EXISTS {name};"))
-            .await
-            .unwrap();
-        exec(&mut admin, format!("CREATE DATABASE {name};"))
-            .await
-            .unwrap();
-
-        let db = Self {
-            name,
-            superuser_url,
-        };
-        let mut conn = PgConnection::connect_with(&db.as_superuser())
-            .await
-            .unwrap();
-
-        exec(&mut conn, PROVISION_ROLES_SQL.to_string())
-            .await
-            .unwrap();
-        exec(
-            &mut conn,
-            format!(
-                "GRANT CONNECT ON DATABASE {} TO pool_controller, pool_gateway, pool_readonly;",
-                db.name
-            ),
-        )
-        .await
-        .unwrap();
-
-        sqlx::query("SELECT pg_advisory_unlock($1)")
-            .bind(PROVISION_LOCK)
-            .execute(&mut admin)
-            .await
-            .unwrap();
-
-        MIGRATOR.run(&mut conn).await.unwrap();
-        Some(db)
-    }
-
-    fn as_superuser(&self) -> PgConnectOptions {
-        let mut opts = self
-            .superuser_url
-            .parse::<PgConnectOptions>()
-            .unwrap()
-            .database(&self.name);
-        if let Some(password) = superuser_password_from_secrets() {
-            opts = opts.password(&password);
-        }
-        opts
-    }
-
-    fn as_role(&self, role: &str) -> PgConnectOptions {
-        self.as_superuser().options([("role", role)])
-    }
-
-    async fn pool_as(&self, role: &str) -> PgPool {
-        PgPoolOptions::new()
-            .max_connections(16)
-            .connect_with(self.as_role(role))
-            .await
-            .unwrap()
-    }
-}
-
-impl Drop for TempDb {
-    fn drop(&mut self) {
-        let url = self.superuser_url.clone();
-        let name = self.name.clone();
-        let _ = std::thread::spawn(move || {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap();
-            rt.block_on(async {
-                let mut opts = match url.parse::<PgConnectOptions>() {
-                    Ok(o) => o,
-                    Err(_) => return,
-                };
-                if let Some(password) = superuser_password_from_secrets() {
-                    opts = opts.password(&password);
-                }
-                if let Ok(mut conn) = PgConnection::connect_with(&opts).await {
-                    let _ = exec(
-                        &mut conn,
-                        format!("DROP DATABASE IF EXISTS {name} WITH (FORCE);"),
-                    )
-                    .await;
-                }
-            });
-        })
-        .join();
-    }
-}
+use sqlx::{AssertSqlSafe, Row};
 
 fn precommit(workflow: &str, generation: i32, digest: u8) -> NewIntent {
     NewIntent {

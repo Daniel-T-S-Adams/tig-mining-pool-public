@@ -55,7 +55,7 @@ fn pins() -> Pins {
         // against whatever a deployment configures, and these pins are
         // self-consistent. The real slice-1 testnet identity is recorded in
         // docs/plans/slice-1-gateway.md.
-        pool_player_id: "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef".to_string(),
+        pool_player_id: "0x1111111111111111111111111111111111111111".to_string(),
     }
 }
 

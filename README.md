@@ -52,8 +52,8 @@ works on a fresh checkout. CI always provides one and sets
 > `db-*-password` files are local dev passwords that `scripts/dev-db.sh`
 > regenerates on demand. Others — notably `tig-testnet-api-key` — are
 > **provisioned credentials that cannot be regenerated from this
-> repository**; restoring one means re-running the issuance procedure in
-> `docs/plans/protocol-spike.md` §4 with the account key. To reset only the
+> repository**; restoring one means repeating the current operator procedure
+> in `docs/tig_integration.md` §4 with the testnet wallet. To reset only the
 > database side, remove `secrets/db-*` and leave everything else alone.
 
 ## Contributing

@@ -10,4 +10,4 @@ status is authoritative for implementation; the mining rules remain in
 - [ADR 0004: Isolate TIG credentials and hostile artifact work](0004-process-boundaries.md)
 - [ADR 0005: Block-derived challenge-tie draw](0005-challenge-tie-derivation.md)
 - [ADR 0006: Allocating the TIG read budget across reader processes](0006-tig-read-budget-allocation.md)
-
+- [ADR 0007: Dedicated browser wallet for testnet API-key provisioning](0007-testnet-browser-wallet.md)

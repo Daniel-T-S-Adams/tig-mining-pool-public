@@ -1,7 +1,7 @@
 # TIG mining pool: minimal system architecture
 
 Status: accepted architecture for the protocol spike and v0  
-Last updated: 2026-07-31
+Last updated: 2026-09-04
 
 This document defines how the settled mining rules in
 [mining_system.md](mining_system.md), the TIG integration in
@@ -125,10 +125,20 @@ The arrows distinguish three kinds of flow:
 
 ### 2.2 TIG credential and signing boundary
 
-The TIG account signing key is used offline to provision or rotate the TIG API
-key and is not present in any v0 runtime process. The TIG API key is loaded only
-by `tig-gateway`. It never enters the Pool API, controller, Artifact Worker,
-member agent, database, artifact objects, logs, traces, or assignment messages.
+The TIG account signing key is used only for manual API-key provisioning or
+rotation and is not present in any v0 runtime process. On testnet, the dedicated
+operator-controlled browser wallet may sign TIG's ownership proof through the
+official operator UI, following `tig_integration.md` section 4. The browser and
+wallet extension remain part of the operator workstation, not the pool runtime.
+This testnet-only exception carries no production authority. A production or
+mainnet signing key remains offline or hardware-/managed-key protected and
+requires the separate custody decision described in `security.md` section 3.3.
+The bounds and rationale are recorded in
+[ADR 0007](adr/0007-testnet-browser-wallet.md).
+
+The TIG API key is loaded only by `tig-gateway`. It never enters the Pool API,
+controller, Artifact Worker, member agent, database, artifact objects, logs,
+traces, or assignment messages.
 
 In production the gateway receives the API key through a secret-manager-backed
 file or equivalent workload secret mount. The file is readable only by the
@@ -615,7 +625,7 @@ secret-manager-backed files:
 | Secret/capability | Available to |
 |---|---|
 | Member Ed25519 private key | Member Agent only |
-| TIG account signing key | Offline provisioning only |
+| TIG account signing key | Manual provisioning only: dedicated operator browser wallet on testnet; offline or hardware-/managed-key protected in production |
 | TIG API key | TIG Gateway only |
 | API database credential | Pool API only, API role |
 | Controller database credential | Controller only, controller role |

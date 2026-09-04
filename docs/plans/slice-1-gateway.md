@@ -3,7 +3,7 @@ title: "Slice 1: TIG gateway and restart-safe protocol state machine"
 status: active
 created: 2026-08-15
 source: docs/pre_build_checklist.md §8 (last item) and §10 step 1
-last_verified: 2026-08-15
+last_verified: 2026-09-04
 ---
 
 # Slice 1 plan: TIG gateway and restart-safe protocol state machine
@@ -105,15 +105,24 @@ TIG testnet with the identity below.
 
 ### Testnet identity
 
-Slice 1 uses **`0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef`** (address is
+Slice 1 uses **`0x2935a721068da756b28cba896efdb64e8909dfae`** (address is
 public and safe to commit; the API key lives only in the untracked
 `secrets/tig-testnet-api-key`, mode 0600).
 
-Verified 2026-08-31 at block `9c909007e207e2af9aac028108bb060f`:
-`available_fee_balance = 10 TIG`, `total_fees_paid = 0`, and the API key
-authenticates — a request with a deliberately wrong key returns `401 Invalid
-API key` while the same request with this key is rejected on its contents
-instead, which only happens after authentication succeeds.
+Verified by public read on 2026-09-04 at block
+`bf753a70b25dea1b626ca3d4e67e668f`:
+`available_fee_balance = 10 TIG` and `total_fees_paid = 0`. The operator
+obtained its API key through the official TIG testnet browser flow and
+installed it at the path above; the slice's live gateway run remains the
+credential-authentication acceptance evidence.
+
+The previous slice-1 candidate identity,
+`0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef`, was verified and funded but
+replaced before the slice's live run. Its old key is no longer loaded by this
+repository; server-side revocation is not inferred from replacing a local
+file. The pool operator owns confirmation of old-key invalidation and any
+needed TIG coordination in
+[issue #61](https://github.com/Daniel-T-S-Adams/tig-mining-pool/issues/61).
 
 This is **not** the spike's identity. The spike ran as
 `0xbeefbeefbeefbeefbeefbeefbeefbeefbeefbeef`

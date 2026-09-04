@@ -50,6 +50,12 @@ The mainnet URL is recorded for future configuration but must not be used as a
 fallback. Enabling mainnet requires an explicit reviewed configuration change;
 failure to contact testnet must never redirect a request to mainnet.
 
+`https://test.tig.foundation` is a manual, operator-facing credential-issuance
+UI, not a pool runtime endpoint. It is deliberately outside the machine-readable
+runtime pins and no pool process contacts it. On every use, the operator must
+verify the official origin and check its prompt and result against the pinned
+`POST /request-api-key` contract in section 4; a mismatch fails closed.
+
 ### 2.2 Source and schema
 
 ```text
@@ -143,6 +149,29 @@ lowercase TIG address and a signature over exactly:
 ```text
 I am signing this message to prove that I control address <address>
 ```
+
+For testnet, the official browser flow is the simplest way to perform that
+exchange (observed 2026-09-04):
+
+1. Open **only** `https://test.tig.foundation`, connect the dedicated testnet
+   wallet, and continue to the verification page.
+2. Select **Obtain API-Key**. Before approving MetaMask's signature request,
+   verify that the selected address is the intended lowercase pool address and
+   that the displayed message is exactly the text above. A transaction, gas
+   request, token approval, or different message is not this flow and must be
+   rejected.
+3. The site submits the address and signature to the testnet
+   `/request-api-key` endpoint and keeps the returned key in the authenticated
+   browser session. While that session is active,
+   `https://test.tig.foundation/api/auth/get-api-key` returns the key for the
+   operator to copy into the gateway's untracked secret file.
+4. Copy only the `api_key` value, clear the clipboard after installing it, and
+   log out of the site. Never copy the wallet recovery phrase, private key,
+   MetaMask password, or signed proof into the repository or an agent session.
+
+The website is an operator convenience, not a second protocol or pool runtime
+dependency. If its URL, prompt, or response changes, stop and validate it
+against the canonical `POST /request-api-key` contract above before proceeding.
 
 The production signing key is not required during ordinary benchmark
 submission after an API key has been issued. The API key is available only to

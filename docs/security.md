@@ -1,7 +1,7 @@
 # TIG mining pool: security baseline
 
 Status: settled spike baseline and v0 tier controls; numerical limits pending  
-Last updated: 2026-07-31
+Last updated: 2026-09-04
 
 This document defines the minimum security contract for the protocol spike and
 the controls that the v0 implementation must preserve. It implements the trust
@@ -101,31 +101,29 @@ separate cases in [member_attack_model.md](member_attack_model.md).
 
 ### 3.1 Testnet provisioning
 
-The spike uses a dedicated testnet TIG identity with no production authority or
-mainnet funds. Its account private key is created and retained as an encrypted
-Web3 keystore outside the repository and workspace on the operator's machine.
-Its passphrase is stored separately in the operator's password manager.
+Testnet uses a dedicated TIG identity with no production authority or mainnet
+funds. For the current slice this is an operator-controlled MetaMask wallet;
+that testnet hot wallet is not an acceptable production-custody design. The
+operator follows the testnet issuance procedure owned by
+[`tig_integration.md` section 4](tig_integration.md#4-api-transport-and-authentication).
+Its recovery phrase, private key and password remain exclusively in the wallet
+and the operator's recovery custody. They and the signed proof never enter the
+repository, workspace, runtime hosts, CI, logs, environment variables or agent
+sessions.
 
-Provisioning is manual:
+Local development stores the key at `secrets/tig-testnet-api-key` with mode
+`0600`; a deployed gateway receives it as a mode-`0400`, read-only secret file
+or equivalent orchestrator secret. The gateway reads it at startup, does not
+return it from diagnostics, and refuses to start if the file is absent,
+group/world-readable, or malformed. Testnet and mainnet use different
+identities, secret names, deployment roles, and configuration profiles.
 
-1. an offline provisioning command loads the encrypted testnet keystore and
-   signs TIG's exact API-key proof message;
-2. only the address and resulting signature are moved to the online request;
-3. the returned testnet API key is written directly into the deployment secret
-   store; and
-4. the account private key is closed and is never copied to an application
-   host, container, CI system, or environment variable.
-
-The API key is exposed only as a mode-`0400`, read-only secret file or equivalent
-orchestrator secret mounted in `tig-gateway`. The gateway reads it at startup,
-does not return it from diagnostics, and refuses to start if the file is absent,
-group/world-readable, or malformed. Testnet and mainnet use different identities,
-secret names, deployment roles, and configuration profiles.
-
-Issuing, rotating, or revoking an API key is an audited operator procedure. The
-spike must test the upstream behavior of issuing a replacement key before
-documenting revocation as effective; until then, suspected exposure disables
-the gateway and requires TIG operator coordination as well as replacement.
+Issuing, rotating, or revoking an API key is an audited operator procedure.
+Replacement issuance has been exercised, but whether it invalidates an older
+key remains unverified; the pool operator owns that confirmation and any needed
+revocation in [issue #61](https://github.com/Daniel-T-S-Adams/tig-mining-pool/issues/61).
+Until invalidation is confirmed, suspected exposure disables the gateway and
+requires TIG operator coordination as well as replacement.
 
 ### 3.2 Runtime boundary
 
@@ -144,13 +142,13 @@ and operator dashboards never receive the key. Network policy permits TIG write
 egress from the gateway identity only. A successful TIG HTTP response remains
 an attempt, not confirmed state.
 
-### 3.3 Production prohibition during the spike
+### 3.3 Production and mainnet prohibition before custody design
 
-The spike configuration has `mainnet_enabled = false` and accepts only the
+All current configurations have `mainnet_enabled = false` and accept only the
 pinned testnet base URL and testnet player identity. No production signing key,
-API key, payout key, or member funds may be introduced. Production keys later
-require a separate custody decision, hardware- or managed-key protection,
-multi-person recovery, and a tested rotation/runbook.
+API key, payout key, or member funds may be introduced before a separate
+production-custody decision. Production keys require hardware- or managed-key
+protection, multi-person recovery, and a tested rotation/runbook.
 
 ### 3.4 Public-funds signing boundary
 
@@ -523,9 +521,12 @@ produce the fail-closed states and alerts specified in the architecture.
 
 1. A testnet process never receives a production credential or mainnet-enabled
    configuration.
-2. The TIG signing key is offline; only the TIG Gateway receives the testnet API
-   key, and only a separately deployed Funds Gateway can receive a production
-   custody signer.
+2. The TIG signing key never enters a pool runtime, repository, CI system, log,
+   or agent session. Only the manual testnet provisioning exception in
+   `architecture.md` section 2.2 may use an operator browser wallet; production
+   signing remains offline or hardware-/managed-key protected. Only the TIG
+   Gateway receives the testnet API key, and only a separately deployed Funds
+   Gateway can receive a production custody signer.
 3. A worker credential authorizes exactly one stored worker and its descendant
    resources.
 4. Authentication precedes parsing or storage reservation.

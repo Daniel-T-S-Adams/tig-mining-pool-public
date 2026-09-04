@@ -23,16 +23,16 @@
 //! loads them from `config/tig_integration.json` and there is no default to
 //! fall back to (criterion E5).
 //!
-//! One §11 obligation is still outstanding. §9's per-block caching of each
-//! endpoint response by its complete request key landed with snapshot
-//! assembly, in `pool-snapshot`; the `Cache-Control` response cache has not.
-//! Recorded against the obligation rather than against whichever PR is next,
-//! because naming a PR is how this note went stale twice.
+//! §11's two caching halves both exist now. §9's per-block caching of each
+//! endpoint response by its complete request key is snapshot assembly's, in
+//! `pool-snapshot`; the `Cache-Control` response cache is [`mod@cache`],
+//! here.
 //! This crate performs reads only —
 //! protocol writes belong to the TIG gateway, which is the sole holder of
 //! the API key (`architecture.md` §2.2, invariant 2), and nothing here
 //! accepts or stores one.
 
+mod cache;
 mod limits;
 
 pub use limits::{PolicyError, ReadLimits, ReadPolicy, TigReader};
@@ -304,12 +304,29 @@ fn jitter_below(cap: Duration, attempt: u32) -> Duration {
 /// (`tig_integration.md` §4: "Read endpoints used by the pool are public"),
 /// so a client that cannot authenticate is a client that cannot
 /// accidentally write.
+/// Entries kept per client.
+///
+/// Bounded because a per-URL cache with no ceiling grows with every distinct
+/// block-anchored request, and those are distinct for every block —
+/// `architecture.md` §3's objection to "an unbounded copy of TIG responses"
+/// applies to memory as much as to the database.
+const CACHE_CAPACITY: usize = 64;
+
+/// A rate-limited reader for the TIG API.
 #[derive(Debug, Clone)]
 pub struct TigReadClient {
     base_url: String,
     http: reqwest::Client,
     limiter: Arc<Limiter>,
     limits: ReadLimits,
+    /// §11's `Cache-Control` cache. Per client rather than per host: a
+    /// process-wide one would let one reader's share of the budget be spent
+    /// warming another's, and ADR-0006 allocates the budget per reader.
+    ///
+    /// Shared across clones, because a cloned client is the same reader with
+    /// the same allowance — giving it a fresh cache would quietly double the
+    /// requests that allowance pays for.
+    cache: Arc<cache::ResponseCache>,
     /// §11's backoff ceiling, carried from the policy rather than read back
     /// off `limits`. The host-wide `Retry-After` pause is written from a
     /// server response and must be bounded by policy; `limits.max_backoff`
@@ -379,6 +396,7 @@ impl TigReadClient {
             base_url,
             http,
             limits,
+            cache: Arc::new(cache::ResponseCache::new(CACHE_CAPACITY)),
             pinned_max_backoff: policy.pinned_max_backoff(),
         })
     }
@@ -425,6 +443,22 @@ impl TigReadClient {
             .next()
             .unwrap_or(path_and_query)
             .to_string();
+
+        // §11's `Cache-Control` cache. Two permissions are needed: the
+        // request must be in §11's cacheable class, and the server must
+        // allow it. The scope check comes first and is decided from the
+        // request, so `get-block` — which names no block and is the thing
+        // §9 step 6 compares — can never be served from here.
+        let cacheable_request = cache::request_is_cacheable(path_and_query);
+
+        // Consulted before anything else: a hit takes no rate-limit token
+        // and no in-flight slot, because no request is made.
+        if cacheable_request && let Some(body) = self.cache.get(&url, Instant::now()) {
+            return serde_json::from_str(&body).map_err(|e| ReadError::Schema {
+                endpoint: endpoint.clone(),
+                reason: format!("not valid JSON: {e}"),
+            });
+        }
 
         let started = Instant::now();
         // Every wait in this loop is bounded by what remains of the call
@@ -560,9 +594,25 @@ impl TigReadClient {
 
             let step = match outcome {
                 Ok(r) if r.status().is_success() => {
+                    // Read before the body is consumed; `r.text()` takes the
+                    // response by value.
+                    let caching = cache::caching_from_header(
+                        r.headers()
+                            .get(reqwest::header::CACHE_CONTROL)
+                            .and_then(|v| v.to_str().ok()),
+                    );
                     match tokio::time::timeout(remaining(started.elapsed()), r.text()).await {
                         Err(_) => Step::Expired,
-                        Ok(Ok(body)) => Step::Done(body),
+                        Ok(Ok(body)) => {
+                            // §11: only a successful response is stored, and
+                            // only for as long as the server allowed. Errors
+                            // and incomplete snapshots are never cached as
+                            // successful data.
+                            if cacheable_request {
+                                self.cache.put(&url, &body, caching, Instant::now());
+                            }
+                            Step::Done(body)
+                        }
                         // A body failing mid-transfer is a network failure, and
                         // §11 retries those. Returning here made it a
                         // single-attempt failure that still reported itself as

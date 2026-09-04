@@ -111,6 +111,12 @@ impl SnapshotSource for TigSnapshotSource {
         // Never cached: it is the thing being checked for change. Serving a
         // cached block would make the closing read agree with the opening
         // one by construction, turning §9 step 6 into a tautology.
+        //
+        // Enforced in `tig-client`, not merely relied on here: its
+        // `Cache-Control` cache allow-lists block-addressed requests, and
+        // this one names no block. A comment in this file cannot stop a
+        // cache in another crate — which is exactly how the first version of
+        // that cache falsified this paragraph without touching it.
         self.client
             .get_json("get-block?include_data=true")
             .await

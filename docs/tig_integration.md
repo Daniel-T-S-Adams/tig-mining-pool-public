@@ -481,11 +481,18 @@ enough to be implemented wrongly:
   waiting on a token or a `Retry-After` occupies no slot. A ceiling on
   waiting rather than on transfer would let two stalled reads block the
   `get-block` poll that §9 and §10 depend on.
-- Response caching splits. §9's per-block caching by complete request key
-  landed with snapshot assembly (criterion C3). The `Cache-Control` rule
-  below is **not yet implemented**; it is tracked as the remaining half of
-  §11's caching obligation. Stated against the obligation rather than
-  against a planned PR, which is how this note went stale once already.
+- Response caching splits, and both halves now exist. §9's per-block caching
+  by complete request key is snapshot assembly's (criterion C3) and keeps one
+  snapshot from mixing blocks. The `Cache-Control` rule below is the
+  transport half, in `crates/tig-client`, and keeps the pool from re-asking
+  for something TIG said would not change yet. Two permissions are required,
+  not one: the request must be within the scope that closing paragraph
+  defines, **and** the server must allow it — a response with no
+  `Cache-Control`, or one carrying a directive the client does not
+  understand, is not stored at all. The scope is an endpoint allow-list, not
+  a test for a block anchor: `get-benchmarks` and `get-player-data` carry one
+  and are still latest-state reads, and `get-block` names none and is the
+  value §9 step 6 compares.
 - These limits are read from `config/tig_integration.json` under
   `read_limits`, the way §8's guardrails are (slice-1 criterion E5). The
   pool-wide ceiling, each reader's share and the poll interval are all
@@ -529,9 +536,20 @@ Retry rules:
 - stop all write retries when the workflow is confirmed, terminal, locally
   expired, or schema-incompatible.
 
-The live `Cache-Control` header is respected. Block-addressed responses and
-immutable confirmed benchmark facts are cached as described above; errors and
-incomplete snapshots are not cached as successful data.
+The live `Cache-Control` header is respected, within a scope the client
+allow-lists by endpoint rather than deny-lists. Only `GET /get-challenges`,
+`GET /get-algorithms` and `GET /get-opow`, each naming a `block_id`, are
+cacheable: those are configuration and state as of the named block, which is
+what makes §9's anchored reads block-consistent at all. Nothing else is
+cacheable whatever the server permits.
+
+Carrying a block anchor is not sufficient. `GET /get-benchmarks` is the
+latest 120-block window and §7's sole authority for lifecycle confirmation,
+so a stale copy makes §10's lost-precommit search find no candidate and
+licenses the resubmission §10 forbids; `GET /get-player-data` carries the
+live fee balance §12 lists; `GET /get-tracks-data` is a rolling window; and
+`GET /get-block` names no block at all and is the value §9 step 6 compares.
+Errors and incomplete snapshots are not cached as successful data.
 
 ## 12. Live values that must not be hard-coded
 

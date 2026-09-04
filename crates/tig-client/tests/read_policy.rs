@@ -1151,3 +1151,181 @@ fn the_client_still_refuses_limits_that_are_not_a_configured_share() {
         .expect_err("the full ceiling is not a reader's share");
     assert!(err.contains("ADR-0006"), "got: {err}");
 }
+
+// --- §11's Cache-Control response cache ---
+
+/// A server that counts requests to one route and answers with a chosen
+/// `Cache-Control`.
+async fn counting_server(
+    route: &'static str,
+    cache_control: Option<&'static str>,
+) -> (String, Arc<AtomicU32>) {
+    let calls = Arc::new(AtomicU32::new(0));
+    let seen = calls.clone();
+    let app = Router::new().route(
+        route,
+        get(move || {
+            let calls = calls.clone();
+            async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                let mut headers = HeaderMap::new();
+                if let Some(value) = cache_control {
+                    headers.insert("cache-control", value.parse().unwrap());
+                }
+                (StatusCode::OK, headers, r#"{"ok":true}"#.to_string())
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    (format!("http://{addr}"), seen)
+}
+
+/// A block-addressed read: §11 permits caching this one.
+const ANCHORED: &str = "get-challenges?block_id=b1";
+
+#[tokio::test]
+async fn the_latest_block_is_never_served_from_cache() {
+    // The one that matters. §9 issues this identical URL for a snapshot's
+    // opening and closing read, so a cached body would make step 6's
+    // comparison a tautology and let a snapshot spanning a block boundary
+    // be accepted as block-consistent — and it would freeze the §11 poll,
+    // skipping the heights §10 records as an unrecoverable gap.
+    //
+    // The server offers a long lifetime; scope refuses it regardless.
+    let (base, calls) = counting_server("/get-block", Some("max-age=600")).await;
+    let client = client(base, policy().for_reader(TigReader::Controller)).unwrap();
+
+    client
+        .get_json("get-block?include_data=true")
+        .await
+        .unwrap();
+    client
+        .get_json("get-block?include_data=true")
+        .await
+        .unwrap();
+    client
+        .get_json("get-block?include_data=true")
+        .await
+        .unwrap();
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        3,
+        "every get-block must reach the server"
+    );
+}
+
+#[tokio::test]
+async fn a_cacheable_response_is_not_requested_again() {
+    // §11: "The live Cache-Control header is respected." The point is not
+    // the copy, it is the request that never happens — asserted with a
+    // server-side counter rather than by timing.
+    let (base, calls) = counting_server("/get-challenges", Some("max-age=60")).await;
+    let client = client(base, policy().for_reader(TigReader::Controller)).unwrap();
+
+    let first = client.get_json(ANCHORED).await.unwrap();
+    let second = client.get_json(ANCHORED).await.unwrap();
+    assert_eq!(first, second);
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "the second read must be served from cache"
+    );
+}
+
+#[tokio::test]
+async fn a_response_without_cache_control_is_never_cached() {
+    // No header means no permission, even for a request §11 would allow.
+    // Inventing a lifetime for a live protocol value is how §12's rule
+    // against compiled constants gets broken by the back door.
+    let (base, calls) = counting_server("/get-challenges", None).await;
+    let client = client(base, policy().for_reader(TigReader::Controller)).unwrap();
+
+    client.get_json(ANCHORED).await.unwrap();
+    client.get_json(ANCHORED).await.unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn no_store_and_zero_max_age_are_honoured() {
+    for header in ["no-store", "no-cache", "max-age=0", "max-age=60, no-store"] {
+        let leaked: &'static str = Box::leak(header.to_string().into_boxed_str());
+        let (base, calls) = counting_server("/get-challenges", Some(leaked)).await;
+        let client = client(base, policy().for_reader(TigReader::Controller)).unwrap();
+        client.get_json(ANCHORED).await.unwrap();
+        client.get_json(ANCHORED).await.unwrap();
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "{header} must not be cached"
+        );
+    }
+}
+
+#[tokio::test]
+async fn an_error_is_never_cached_as_successful_data() {
+    // §11: "errors and incomplete snapshots are not cached as successful
+    // data". A 4xx carrying a long max-age must not become a stored answer.
+    let calls = Arc::new(AtomicU32::new(0));
+    let seen = calls.clone();
+    let app = Router::new().route(
+        "/get-challenges",
+        get(move || {
+            let calls = calls.clone();
+            async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                let mut headers = HeaderMap::new();
+                headers.insert("cache-control", "max-age=600".parse().unwrap());
+                (StatusCode::BAD_REQUEST, headers, "nope".to_string())
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
+    let client = client(
+        format!("http://{addr}"),
+        policy().for_reader(TigReader::Controller),
+    )
+    .unwrap();
+    assert!(client.get_json(ANCHORED).await.is_err());
+    assert!(client.get_json(ANCHORED).await.is_err());
+    assert_eq!(
+        seen.load(Ordering::SeqCst),
+        2,
+        "an error must not be served from cache"
+    );
+}
+
+#[tokio::test]
+async fn a_cache_hit_consumes_no_rate_limit_budget() {
+    // A hit makes no request, so it must not take a token or an in-flight
+    // slot. Asserted by making the budget so small that a second real
+    // request would be paced: the pair completes promptly because only one
+    // request happens.
+    let (base, calls) = counting_server("/get-challenges", Some("max-age=60")).await;
+    let slow = ReadLimits {
+        requests_per_second: 1,
+        burst: 1,
+        ..policy().for_reader(TigReader::Controller)
+    };
+    let client = client(base, slow).unwrap();
+
+    client.get_json(ANCHORED).await.unwrap();
+    let started = Instant::now();
+    for _ in 0..5 {
+        client.get_json(ANCHORED).await.unwrap();
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "five cache hits waited on the limiter: {:?}",
+        started.elapsed()
+    );
+}

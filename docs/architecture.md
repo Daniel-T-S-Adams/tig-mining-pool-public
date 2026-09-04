@@ -399,6 +399,14 @@ artifact ID, and state. A unique constraint covers:
 (network, workflow_id, write_kind, generation)
 ```
 
+Slice 1 defines the intent states `PREPARED`, `OUTCOME_UNKNOWN`, `CONFIRMED`
+and `REJECTED`. `CONFIRMED` and `REJECTED` are set only from confirmed TIG
+reads, never from a transport status (`tig_integration.md` §7). Identity, key,
+payload digest, payload artifact pointer, benchmark binding and creation
+timestamp are immutable once written; only state changes, and only forwards —
+`CONFIRMED` and `REJECTED` are terminal and nothing returns to `PREPARED`, which is why the intent table grants `UPDATE` but enforces the rest
+with a trigger rather than by convention.
+
 Changing a canonical payload requires an explicit new generation and is
 forbidden once an earlier attempt may have reached TIG unless reconciliation
 proves it safe. Benchmark and proof generations are also bound to the TIG

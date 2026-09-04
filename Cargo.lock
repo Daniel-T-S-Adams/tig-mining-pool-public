@@ -1529,6 +1529,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "pool-workflow"
+version = "0.1.0"
+dependencies = [
+ "pool-domain",
+ "sqlx",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "potential_utf"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"

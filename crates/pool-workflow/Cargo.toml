@@ -1,0 +1,25 @@
+[package]
+name = "pool-workflow"
+description = "Workflow-database facts: TIG write intents and their idempotency (docs/architecture.md §7.3)"
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+version = "0.1.0"
+
+[dependencies]
+pool-domain = { path = "../pool-domain" }
+sqlx = { version = "0.9", default-features = false, features = [
+    "postgres",
+    "runtime-tokio",
+    "tls-rustls-ring",
+] }
+thiserror = "2"
+
+[dev-dependencies]
+# `migrate` only here: the library never runs a migration (architecture.md
+# §6), but the tests need the real migration to build their schema.
+sqlx = { version = "0.9", features = ["migrate"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true

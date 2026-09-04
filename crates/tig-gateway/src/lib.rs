@@ -11,8 +11,10 @@
 
 pub mod credential;
 pub mod readiness;
+pub mod reconcile;
 pub mod write_gate;
 
 pub use credential::{CredentialError, TigApiKey};
 pub use readiness::{Check, Evidence, Failure, Pins, WriteReady, evaluate};
+pub use reconcile::{PrecommitSubmission, Reconciliation, TrackSettings, reconcile_precommit};
 pub use write_gate::{Blocked, Revocation, WriteGate, WritePermit};

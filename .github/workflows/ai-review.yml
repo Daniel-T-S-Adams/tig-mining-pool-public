@@ -1,8 +1,8 @@
 name: AI Review
 
-# Two specialized AI reviewers + a machine-readable verdict gate.
-# Design decisions: docs/plans/ai-workflow.md (W1). Review is fail-closed:
-# a missing credential fails the verdict gate rather than skipping review.
+# Three AI review passes + a machine-readable verdict gate: one general and
+# two domain-invariants reviewers. Design decisions: docs/plans/ai-workflow.md
+# (W1/W2). Review is fail-closed: every reviewer must return a valid approval.
 # Reviewers are read-only over the checkout and post one PR comment each;
 # the gate consumes SHA-bound JSON verdict artifacts, never comment prose.
 
@@ -33,6 +33,9 @@ jobs:
             prompt: .github/review/general.md
           - reviewer: invariants
             model: claude-opus-5
+            prompt: .github/review/invariants.md
+          - reviewer: invariants-fable
+            model: claude-fable-5-1
             prompt: .github/review/invariants.md
     name: "AI review: ${{ matrix.reviewer }}"
     runs-on: ubuntu-latest
@@ -70,7 +73,7 @@ jobs:
 
       - name: Install pinned Claude Code CLI
         if: steps.key.outputs.present == 'true'
-        run: npm install -g @anthropic-ai/claude-code@2.1.221
+        run: npm install -g @anthropic-ai/claude-code@2.1.261
 
       - name: Prepare diff
         if: steps.key.outputs.present == 'true'
@@ -84,6 +87,7 @@ jobs:
           fi
 
       - name: Run reviewer
+        id: reviewer
         if: steps.key.outputs.present == 'true'
         env:
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
@@ -100,6 +104,7 @@ jobs:
             echo "## This PR"
             echo "Title: ${PR_TITLE}"
             echo "HEAD_SHA: ${HEAD_SHA}"
+            echo "REVIEWER_ID: ${{ matrix.reviewer }}"
             echo "Diff file (unified): ${PR_DIFF}"
           } > /tmp/prompt.md
           set +e
@@ -113,11 +118,15 @@ jobs:
             echo "reviewer CLI exited $STATUS"; sed -n '1,40p' /tmp/claude-err.log
             printf '{"reviewer":"%s","head_sha":"%s","verdict":"error","findings":[]}\n' \
               "${{ matrix.reviewer }}" "$HEAD_SHA" > "verdict-${{ matrix.reviewer }}.json"
+            echo "succeeded=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+          echo "succeeded=true" >> "$GITHUB_OUTPUT"
 
       - name: Validate verdict
-        if: steps.key.outputs.present == 'true'
+        if: >
+          steps.key.outputs.present == 'true' &&
+          steps.reviewer.outputs.succeeded == 'true'
         run: |
           python3 - "$HEAD_SHA" "${{ matrix.reviewer }}" <<'EOF'
           import json, sys, re
@@ -199,7 +208,7 @@ jobs:
           import glob, json, sys
           head_sha = sys.argv[1]
           files = sorted(glob.glob("verdict-*.json"))
-          expected = {"general", "invariants"}
+          expected = {"general", "invariants", "invariants-fable"}
           verdicts = {}
           for f in files:
               v = json.load(open(f))

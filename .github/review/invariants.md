@@ -44,7 +44,7 @@ Your final output must be ONLY one JSON object (no markdown fences, no prose
 before or after):
 
 {
-  "reviewer": "invariants",
+  "reviewer": "<the REVIEWER_ID value supplied under This PR>",
   "head_sha": "<the value of $HEAD_SHA>",
   "verdict": "approve" | "changes_required",
   "findings": [

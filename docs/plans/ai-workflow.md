@@ -30,14 +30,15 @@ file secrets, `.gitignore`d).
 
 ## W1 — before slice 1 (issue #37; enablement #38)
 
-Two specialized AI reviewers on every PR, built to avoid the gaps the source
-guide documented in its reference repo:
+Three AI review passes on every PR — one general-correctness pass and two
+domain-invariants passes — built to avoid the gaps the source guide documented
+in its reference repo:
 
 | Decision | Choice | Rationale |
 |---|---|---|
-| Reviewer count | **2** (general-correctness + domain-invariants) | Primary-review duty warrants two independent lenses; more only when finding-data justifies (W2) |
-| Models | general: `claude-sonnet-5`; invariants: `claude-opus-5` | Broad/fast + deep/careful; both pinned |
-| CLI | `@anthropic-ai/claude-code@2.1.221`, pinned | Never install latest in release-critical CI |
+| Reviewer count | **3** (general-correctness + two domain-invariants passes) | Primary-review duty warrants a broad lens plus two deep, independent model passes over settled invariants |
+| Models | general: `claude-sonnet-5`; invariants: `claude-opus-5` and `claude-fable-5-1` | Broad/fast plus two deep models; all model IDs are explicit |
+| CLI | `@anthropic-ai/claude-code@2.1.261`, pinned | Pin the Fable-5.1-capable runner; never install latest in release-critical CI |
 | Verdicts | Machine-readable JSON artifacts, schema-checked, **bound to the head SHA** | Never grep prose for "MUST FIX" |
 | Re-review | Runs on **every push** (superseded runs cancelled) | Skip-after-first-review leaves later code unreviewed |
 | Permissions | `contents: read` + PR-comment write only; no fork PRs; reviewers read, never write code | Review jobs are untrusted-input processors |
@@ -47,16 +48,18 @@ guide documented in its reference repo:
 
 **Bootstrap exception: ENDED 2026-08-05** (evidence: issue #38 and PR #43,
 whose own checks were the acceptance test). The `CLAUDE_CODE_OAUTH_TOKEN`
-secret is set, both reviewers run for real on every PR push, and
+secret is set, every configured reviewer runs for real on every PR push, and
 `AI review: verdict gate` is a required status check on `main` (recorded in
-the #38 closing comment). Review is **fail-closed**: a missing credential
-produces a `skipped_no_key` verdict, which the gate treats as failure — the
-primary review layer can never silently not-happen.
+the #38 closing comment). Review is **fail-closed**: every configured reviewer
+must return a valid approval bound to the current head SHA. A missing
+credential, model or CLI error, missing verdict, invalid or stale output, or
+`changes_required` verdict fails the gate — the primary review layer can never
+silently not-happen.
 
-Provenance note: the reviewers' first genuine run reviewed the PR ending this
-exception and returned `changes_required` — the draft wording claimed
-fail-closed behavior the workflow didn't yet have. The fail-closed gate and
-this paragraph are the result of resolving those findings.
+Provenance note: the original reviewers' first genuine run reviewed the PR
+ending this exception and returned `changes_required` — the draft wording
+claimed fail-closed behavior the workflow didn't yet have. The fail-closed gate
+and this paragraph are the result of resolving those findings.
 
 Also W1: PR template with the definition-of-done; `CLAUDE.md` gains the AI
 review rules.
@@ -65,15 +68,25 @@ review rules.
 
 Trigger: first slices merged and reviewer findings accumulating.
 
-- Specialist reviewers **where findings cluster** (expected: accounting/ledger
-  invariants; upload/artifact handling; add security when member-facing code
-  lands). Cap: only add a reviewer with distinct, non-overlapping focus.
+Activated for review expansion on 2026-09-05 through issue #67. Review history
+through PR #66 showed repeated, load-bearing domain-invariant findings. The
+owner therefore selected Fable 5.1 as a second mandatory invariants pass beside
+Opus 5. This deliberately overlaps the invariant remit while varying the model;
+all three reviewers remain required and fail closed. This owner decision
+supersedes the earlier ordering that required completed quantitative metrics
+before adding reviewer three. Metrics remain required before adding a fourth
+reviewer or changing the required set again.
+
+- Further specialist reviewers **where findings cluster** (expected:
+  accounting/ledger invariants; upload/artifact handling; add security when
+  member-facing code lands). Beyond the deliberate Opus/Fable invariant
+  redundancy, add a reviewer only for a distinct, non-overlapping focus.
 - Single-writer branch ownership rules written into `CLAUDE.md` (local agent
   vs CI agents), then a **bounded fix agent**: one attempt, feature branch
   only, distinct identity, may not touch workflows/tests-to-pass/scope.
 - Reviewer metrics per the guide §14: findings accepted / rejected / already
-  covered by tests; escapes found after merge. Reviewed before adding any
-  third reviewer.
+  covered by tests; escapes found after merge. Review them before adding a
+  fourth reviewer or changing the required set again.
 
 ## W3 — at first deployed environment (~slice 5) (issue #40)
 

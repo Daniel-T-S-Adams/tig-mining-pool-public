@@ -604,6 +604,56 @@ The settled boundaries are:
 - multiple failing benchmarks use their own reservations and batches; one
   benchmark never consumes another benchmark's reserve silently.
 
+**Freeze on report, resolve on arbitration.** A method report is an
+accusation, not a finding: `ArbitrationDetails` resolves to
+`NONREPRODUCIBLE`, `REPRODUCIBLE` or `INCONCLUSIVE`. A report is observable
+before its arbitration resolves, and the pool acts on that earlier signal
+without treating it as proof. How much earlier is not stated here: the lag
+follows `ReportsConfig.submission_period`, which `tig_integration.md` §14.2
+records as unpinned.
+
+On observing a report against a member-owned benchmark, the pool freezes that
+benchmark's reserved method amount, holding it against the reported outcome
+instead of releasing it when the benchmark would otherwise stop being able to
+generate a penalty.
+
+The freeze keeps that amount inside `reserved_exposure` in §11.4; it does not
+also become a `frozen charge/slash amount`. The distinction is not
+presentational: counting it in both terms would deduct one outcome from
+admission capacity twice, which §13 item 18 forbids. Because the amount was
+already reserved against this benchmark, the member's admission capacity is
+exactly what it was before the report. The freeze does not slash, and does not
+act on the member: no suspension, no effect on admission, and no reach beyond
+the reported benchmark's own reservation.
+
+**A `NONREPRODUCIBLE` arbitration does not by itself slash anything.** It is
+the trigger for the ordinary evidence, attribution and appeal process, and the
+outcome of that process decides. The bullets above still govern: a slash
+follows only where the penalty was "caused by member-produced data", and
+`POOL`, `TIG` or `UNRESOLVED` fault attribution slashes zero. A benchmark can
+arbitrate `NONREPRODUCIBLE` for a pool-side reason — `mining_system.md` §8
+names pool-constructed wrong proofs, packages the pool corrupted after durable
+acceptance, and work whose origin was never established — and charging a
+member's deposit for those would invert the rule this section exists to state.
+On `REPRODUCIBLE` or `INCONCLUSIVE`, and on any adverse arbitration not
+attributed to the member, the freeze is released in full and the member is
+charged nothing.
+
+The scope is deliberately this narrow, and the narrowness is what makes acting
+on an unproven accusation defensible at all. Reports are public and cost only
+`ReportsConfig.submission_fee`, so a third party can file them against the
+pool's honest work. Because the only effect is holding a reservation that was
+already reserved against this benchmark, a released freeze leaves an
+honestly-behaving member exactly where they started — no lost capacity, no
+charge — while each false report still costs its filer a fee. That is judged
+sufficient and no further countermeasure is specified.
+
+A member-level response would not have that property, and is ruled out
+elsewhere: `mining_system.md` §8 holds that an unresolved incident penalizes
+nobody. Bounding a member's total exposure across concurrent work is §11.4's
+job, through `reserved_exposure`, and does not need this rule to reach further
+than one benchmark.
+
 For every chargeable tier failure attributed to a member, freeze and then
 charge exactly `X` under the assignment's policy version. V0 chargeable tier
 failures are an abandoned or unusable package, TIG solution-verification
@@ -645,6 +695,37 @@ Tier fees, failure charges, collateral formulas, concurrency rules, slash
 rules, and effective TIG heights are append-only policy versions. A later
 policy does not change the amount that can be charged for an earlier assignment
 or tier purchase.
+
+### 11.7 Earnings as working capital (open)
+
+The reserve in §11.4 scales with bundle count, so an established member can
+need more collateral than they can reasonably hold in cash while their own
+earnings sit with the pool. Letting those earnings back their capacity is
+desirable and is **not specified here**, because every mechanism for it
+crosses a custody boundary this document deliberately keeps closed.
+
+The constraints any proposal must satisfy:
+
+- payout and security-deposit custody are different addresses with different
+  signing keys, and `architecture.md` §13 invariant 9 forbids them sharing an
+  address, key, ledger asset or transfer intent. A journal line moving value
+  between them without an on-chain transfer would assert deposit-escrow value
+  that is physically in the payout wallet, and §13's daily reconciliation of
+  both custody assets against finalized Base balances would fail;
+- §11.2 recognizes a deposit only from a transfer event with a unique
+  `(chain_id, tx_hash, log_index)` in a finalized Base block, and
+  `architecture.md` §6 guards custody recognition on exactly those fields;
+- §12.4's signer accepts only approved round-payout intents, so no path exists
+  to move value out of payout custody by any other route; and
+- §4 rule 9 and §8.4 state that settlement automatically moves every eligible
+  positive member amount to payout-pending, with members choosing no amount.
+  Any carve-out has to be made in those sections, which own the settlement
+  batch.
+
+A member can already achieve the effect today by being paid and depositing
+under §11.2. What is missing is only the convenience of doing it without a
+round trip, and that convenience is not worth a custody rule invented to
+support it. This is a funds-custody decision and belongs to the pool owner.
 
 ## 12. Automatic round payouts
 

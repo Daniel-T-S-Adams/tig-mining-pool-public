@@ -71,12 +71,32 @@ Impact:
 - exposure remains after solution verification and after the member compute
   slot is released.
 
-The owner-provided current maximum is `10 TIG * num_bundles`. The live mainnet
-configuration currently expresses `reports.penalty_amount` as `10 TIG`, but the
-pool must read the live value and verify exactly how many penalties a benchmark
-can incur. Admission therefore reserves the live maximum bundle-scaled
-exposure; a final slash is the exact evidenced loss, not the maximum
-reservation automatically.
+The owner-provided current maximum is `penalty_amount * num_bundles`, on a
+**per bundle** basis: a benchmark's exposure is bounded by its bundle count
+however many of its nonces are reported. That basis is what
+`accounting.md` §11.4's `method_reserve = P[s] * B[t]` assumes, and a
+per-nonce basis would not adjust the formula but invalidate it — by a factor
+of `num_nonces_per_bundle`, which is a per-track configuration value and not a
+small one.
+
+It is not confirmed. The pool must read the live value and verify exactly how
+many penalties a benchmark can incur before accepting public member
+collateral; `accounting.md` §14 already holds the §11.3–§11.5 collateral
+policy as an unanswered owner decision that no implementation may present as
+settled. `tig_integration.md` §14.1 shows why verification is not a
+formality: the code that applies a penalty sits behind `Context` hooks absent
+from the pinned tree, so the basis cannot be read off the pinned source and
+must be established on testnet or by written TIG confirmation. Until then it
+is an assumption the collateral formula rests on, recorded as one.
+
+The live mainnet configuration currently expresses `reports.penalty_amount` as
+`10 TIG`. The pool still reads the live value every accepted block rather than
+compiling it in, because §14.1 determined the penalty is governed by the
+configuration live when the arbitration is applied and can therefore change
+retroactively.
+
+Admission reserves the live maximum bundle-scaled exposure; a final slash is
+the exact evidenced loss, not the maximum reservation automatically.
 
 Local hidden re-execution may reduce the probability of submitting this work,
 but it is only a candidate control. It cannot prove all work was honestly

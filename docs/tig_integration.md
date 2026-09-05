@@ -207,6 +207,7 @@ returned by the opening `GET /get-block?include_data=true` call.
 | `GET /get-benchmark-data?benchmark_id=...` | Full precommit, benchmark, proof and fraud data for an individual benchmark. Used incrementally to build the compact active-benchmark cache needed for source hyperparameters, bundle qualities and algorithm/track active-bundle counts. |
 | `GET /get-binary-blob?algorithm_id=...` | The confirmed algorithm archive used by the member runtime. The pool calculates and records its digest. |
 | `GET /get-round-emissions?round=...` | Round-level accounting reconciliation only. It cannot reconstruct the pool's missing per-block qualifier attribution. |
+| Method reports and arbitrations against the pool's benchmarks | The reports filed against the pool as a benchmarker, the exact nonces reported, and each arbitration outcome. Required for the freeze rule in `accounting.md` §11.6, which cannot be evaluated without it. **The exact endpoint, parameters and response shape are not yet pinned** — see §14.2. |
 
 ### 5.1 Active challenge and algorithm tests
 
@@ -715,6 +716,36 @@ spanning a `reports.penalty_amount` change, or written TIG operator
 confirmation. Until then the pool must reserve under the conservative
 reading: the penalty may be recalculated with any configuration up to charge
 time.
+
+### 14.2 Method report and arbitration visibility (open)
+
+The pool can observe the reports filed against it as a benchmarker, including
+exactly which nonces were reported, and the arbitration outcome for each. That
+observation is what `accounting.md` §11.6's freeze-on-report rule is evaluated
+from: without it, the rule cannot be implemented.
+
+It is recorded here as an open item because the endpoint, its parameters and
+its response shape are **not pinned**. §5's other reads each name an exact
+path and the fields the pool depends on; this one cannot yet, and §14.1 shows
+why the gap is easy to miss — the arbitration code sits behind the `Context`
+trait hooks `get_arbitration_details` and `add_arbitration_to_mempool`, whose
+implementation is not part of the pinned open-source tree, so reading the
+pinned commit alone does not reveal the read.
+
+Before the collateral rules are built, the spike must establish:
+
+- the exact request and response shape, and whether the read is
+  block-anchored or latest-state — which decides whether it may be cached
+  under §11 and whether it belongs in a §9 snapshot;
+- how a reported nonce is attributed to a bundle and therefore to one
+  member-owned benchmark, since §11.6 freezes per benchmark, not per member;
+- the value and meaning of `ReportsConfig.submission_period`, which bounds how
+  long a benchmark's reservation can still be frozen. The pool reads the live
+  value rather than assuming one round; and
+- whether an arbitration outcome is observable per report, per benchmark, or
+  only as an aggregate penalty.
+
+Until it is pinned, no code may assume a path or field name for this read.
 
 ## 15. Upgrade procedure
 

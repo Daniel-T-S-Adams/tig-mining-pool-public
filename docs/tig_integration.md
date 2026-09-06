@@ -207,7 +207,7 @@ returned by the opening `GET /get-block?include_data=true` call.
 | `GET /get-benchmark-data?benchmark_id=...` | Full precommit, benchmark, proof and fraud data for an individual benchmark. Used incrementally to build the compact active-benchmark cache needed for source hyperparameters, bundle qualities and algorithm/track active-bundle counts. |
 | `GET /get-binary-blob?algorithm_id=...` | The confirmed algorithm archive used by the member runtime. The pool calculates and records its digest. |
 | `GET /get-round-emissions?round=...` | Round-level accounting reconciliation only. It cannot reconstruct the pool's missing per-block qualifier attribution. |
-| Method reports and arbitrations against the pool's benchmarks | The reports filed against the pool as a benchmarker, the exact nonces reported, and each arbitration outcome. Required for the freeze rule in `accounting.md` §11.6, which cannot be evaluated without it. **The exact endpoint, parameters and response shape are not yet pinned** — see §14.2. |
+| `GET /get-reports?round=...` | Method reports for one round and their arbitrations, joined by report ID. Carries the exact nonce reported and the benchmarker reported against. Public, and mutable while a round is open. Drives `accounting.md` §11.6's freeze rule. **Which round the parameter selects is not settled** — see §14.2. |
 
 ### 5.1 Active challenge and algorithm tests
 
@@ -703,49 +703,116 @@ config-access pattern in the pinned tree is `get_config()` — the latest-block
 configuration, as `submit_report` itself demonstrates. The governing
 configuration is therefore the one live when the arbitration outcome is
 applied (the arbitration/charge block), and a `reports.penalty_amount` change
-**can apply retroactively** to already-open benchmarks — confirming the
-residual-risk stance of `accounting.md` §11.5: collateral formulas based on
-the assignment block alone cannot guarantee coverage, so a pool risk buffer
-is required.
+**can apply retroactively** to already-open benchmarks. A collateral formula
+based on the assignment block alone therefore cannot guarantee coverage.
+
+What the pool does about that is `accounting.md` §11.5's to decide, not this
+section's: this document owns what TIG does, that one owns the pool's
+response.
 
 Recorded ambiguity (not a guess): the pinned open source cannot distinguish
 the arbitration-confirmation block from a hypothetically distinct later
 charge block, because the applying code is server-side. Live confirmation
 that would settle it: observe one real report → arbitration on testnet
 spanning a `reports.penalty_amount` change, or written TIG operator
-confirmation. Until then the pool must reserve under the conservative
-reading: the penalty may be recalculated with any configuration up to charge
-time.
+confirmation. The distinction does not change the exposure either way — both
+readings put the governing configuration after the benchmark — so
+`accounting.md` §11.5 decides against the conservative reading, which is the
+wider of the two.
 
-### 14.2 Method report and arbitration visibility (open)
+### 14.2 Method report and arbitration reads
 
-The pool can observe the reports filed against it as a benchmarker, including
-exactly which nonces were reported, and the arbitration outcome for each. That
-observation is what `accounting.md` §11.6's freeze-on-report rule is evaluated
-from: without it, the rule cannot be implemented.
+`GET /get-reports?round=<round>` returns method reports for one round
+together with their arbitrations. The shape below was verified against the
+live mainnet API on 2026-09-05; local definitions are `swagger.yaml:318` and
+the authoritative Rust structures are `tig-structs/src/core.rs:109`.
 
-It is recorded here as an open item because the endpoint, its parameters and
-its response shape are **not pinned**. §5's other reads each name an exact
-path and the fields the pool depends on; this one cannot yet, and §14.1 shows
-why the gap is easy to miss — the arbitration code sits behind the `Context`
-trait hooks `get_arbitration_details` and `add_arbitration_to_mempool`, whose
-implementation is not part of the pinned open-source tree, so reading the
-pinned commit alone does not reveal the read.
+- `round` is required, an unsigned integer.
+- The endpoint takes no `X-Api-Key`, like every other read in §5 (§4: "Read
+  endpoints used by the pool are public").
+- There is no pagination and no server-side filtering. Reports for several
+  rounds take one call per round.
+- It is rate-limited per IP like every other read and can return 429, so §11's
+  limiter and `Retry-After` handling apply unchanged.
 
-Before the collateral rules are built, the spike must establish:
+```text
+{
+  "reports": [
+    {
+      "id": "<benchmark_id>_<nonce>",
+      "details": {
+        "player_id":    "0x…",   // the reporter
+        "benchmarker":  "0x…",   // whose benchmark was reported
+        "benchmark_id": "<32 lowercase hex>",
+        "nonce":        <uint64>,
+        "round":        <uint32>,
+        "fee_paid":     "<18-decimal fixed-point integer string>"
+      },
+      "state": { "block_confirmed": <uint32> }
+    }
+  ],
+  "arbitrations": [
+    {
+      "report_id": "<matches reports[].id>",
+      "details": { "result": "nonreproducible" | "reproducible" | "inconclusive" },
+      "state": { "block_confirmed": <uint32> }
+    }
+  ]
+}
+```
 
-- the exact request and response shape, and whether the read is
-  block-anchored or latest-state — which decides whether it may be cached
-  under §11 and whether it belongs in a §9 snapshot;
-- how a reported nonce is attributed to a bundle and therefore to one
-  member-owned benchmark, since §11.6 freezes per benchmark, not per member;
-- the value and meaning of `ReportsConfig.submission_period`, which bounds how
-  long a benchmark's reservation can still be frozen. The pool reads the live
-  value rather than assuming one round; and
-- whether an arbitration outcome is observable per report, per benchmark, or
-  only as an aggregate penalty.
+Reports and arbitrations are separate collections joined on
+`report.id == arbitration.report_id`. A report with no matching arbitration is
+still open — that absence is the state §11.6 freezes on, and it is not the
+same as an arbitration that returned `inconclusive`. The reported nonce is
+`report.details.nonce`; there is no separate collection of reported nonces.
 
-Until it is pinned, no code may assume a path or field name for this read.
+The pool's own reports are those whose `details.benchmarker` is the pool
+player ID. `details.benchmark_id` is what attributes a report to one
+member-owned benchmark, which is what §11.6 needs to freeze one reservation
+rather than a member.
+
+**Which round the parameter selects is not settled, and it matters.**
+§14.1's reading of the pinned source is that `submit_report` persists into
+`ReportDetails` only `fee_paid` and *the benchmark's* `round`
+(`tig-structs/src/core.rs` lines 493–502). If `details.round` is the
+benchmark's round then `?round=X` selects reports *about* round-X benchmarks;
+if it is the round the report was filed in, the same query selects reports
+*made during* round X. Those are different sets — a benchmark from round X is
+reported during the submission window that follows it — and nothing observed
+so far distinguishes them, because a single example cannot separate the two
+when both values could coincide.
+
+Until it is confirmed, a caller must not assume either. The pool needs
+*every* report against a benchmark to evaluate `accounting.md` §11.6's freeze
+and §11.4's release condition, which turns on every report and arbitration
+being terminal; polling the wrong round set would leave reports unseen and a
+reservation released while method exposure is live. The conservative
+interim is to poll the benchmark's own round **and** every round its
+submission window can reach, which is a superset under either reading.
+
+`ReportsConfig.submission_period` is what bounds that window, and its value
+and unit are themselves unpinned — the fixture's `120` is a constructed
+value, not an observation. No code may assume a round count here; the pool
+reads the live configuration, and confirming the unit is part of the same
+open item.
+
+**Not cacheable.** The read is addressed by round, not by block, and a round
+accumulates reports while it is open, so the same URL returns different bodies
+within one round. It is outside §11's caching scope for the same reason
+`get-benchmarks` is, and it is not block-anchored, so it does not belong in a
+§9 snapshot either.
+
+Two Swagger inaccuracies at this pin, both confirmed against the live API:
+
+| Swagger says | Live API and Rust type |
+|---|---|
+| `Report.id` and `Arbitration.report_id` are MD5 values | Composite IDs of the form `<benchmark_id>_<nonce>` |
+| The result enum spells `nonreprodicible` | `nonreproducible` |
+
+The lowercase wire casing matches the enum-casing discrepancy the spike
+already recorded (`protocol_spike_report.md` §9 item 6); `tig-structs`
+declares the variants in Rust casing and they serialize lowercase.
 
 ## 15. Upgrade procedure
 

@@ -582,13 +582,45 @@ The pool reads `penalty_amount` every accepted block and records the exact
 value and policy used by each reservation. Any change immediately pauses new
 precommits until compatibility has been reviewed and requirements recomputed.
 
-Before mainnet, the spike must establish whether TIG calculates a later report
-penalty using configuration from the benchmark, report, arbitration, or charge
-block. If a new value can apply retroactively to an already open benchmark, no
-formula based only on its assignment block can guarantee full collateral. That
-residual risk must be handled explicitly by a configured pool risk buffer or a
-published rule allowing additional collateral to be requested; it cannot be
-hidden by retroactively enlarging or slashing the member's deposit.
+`tig_integration.md` §14.1 determined that the governing configuration is the
+one live when the penalty is applied, so a `penalty_amount` increase **can
+apply retroactively** to an already open benchmark. No formula based only on
+the assignment block can therefore guarantee full collateral. The spike's own
+conclusion, recorded in `protocol_spike_report.md` §7 finding 7, was that a
+risk buffer is required.
+
+**The owner has stated a different intent: carry the exposure rather than
+buffer it**, on the expectation that `penalty_amount` will not change without
+several weeks of public notice, and that the pause above — which stops new
+precommits the moment the value changes — bounds what is exposed to
+benchmarks already open when a change lands.
+
+This is recorded as the owner's position, not as settled policy, and it does
+not lift §14's hold: that section still holds the §11.3–§11.5 collateral
+policy as an unanswered owner decision, and no implementation may accept
+public member collateral until it is answered. `CLAUDE.md` reserves
+security-deposit decisions to an explicit human decision, and this section
+records one rather than deriving it.
+
+Two premises it rests on are **not established**, and the position is taken
+knowingly rather than derived from them:
+
+- how long an open benchmark remains exposed is unknown. §14.1 cannot exclude
+  a charge block later than the arbitration block, and §14.2 records
+  `ReportsConfig.submission_period`'s value and unit as unpinned, so "several
+  weeks of notice exceeds the horizon" compares against a horizon nobody has
+  measured; and
+- the notice expectation is an observation about how TIG has behaved, not a
+  property of the protocol, and nothing in the pinned source guarantees it.
+
+If `penalty_amount` rose with less notice than the horizon of the benchmarks
+then open, the pool absorbs the difference between what was reserved and what
+is charged. It is not recoverable from the member: the reservation is that
+member's whole committed exposure, and §11.2 recognizes a deposit only from an
+inbound transfer, so there is no mechanism that would enlarge one after the
+fact. Should either premise fail, this is the section to revisit, and the
+mechanism to add is a buffer or an additional-collateral call — never a
+retroactive slash.
 
 ### 11.6 Failure charges, method losses, and tier effects
 
@@ -609,8 +641,9 @@ accusation, not a finding: `ArbitrationDetails` resolves to
 `NONREPRODUCIBLE`, `REPRODUCIBLE` or `INCONCLUSIVE`. A report is observable
 before its arbitration resolves, and the pool acts on that earlier signal
 without treating it as proof. How much earlier is not stated here: the lag
-follows `ReportsConfig.submission_period`, which `tig_integration.md` §14.2
-records as unpinned.
+follows `ReportsConfig.submission_period`, whose value and unit
+`tig_integration.md` §14.2 records as unpinned — as it does which round set
+the pool must poll to see every report against a benchmark.
 
 On observing a report against a member-owned benchmark, the pool freezes that
 benchmark's reserved method amount, holding it against the reported outcome
@@ -636,8 +669,17 @@ names pool-constructed wrong proofs, packages the pool corrupted after durable
 acceptance, and work whose origin was never established — and charging a
 member's deposit for those would invert the rule this section exists to state.
 On `REPRODUCIBLE` or `INCONCLUSIVE`, and on any adverse arbitration not
-attributed to the member, the freeze is released in full and the member is
-charged nothing.
+attributed to the member, that report is settled and the member is charged
+nothing for it.
+
+Settling a report is not the same as releasing the reservation. The freeze
+lifts, but the method portion goes on being held under §11.4's ordinary
+condition — until the benchmark can no longer generate a
+method-verification penalty and *every* report and arbitration against it is
+terminal. A benchmark that survives one report is still reportable, and a
+second report may already be open, so releasing collateral on the first
+non-adverse outcome would leave the remaining exposure uncovered. What the
+non-adverse outcome ends is the charge, not the cover.
 
 The scope is deliberately this narrow, and the narrowness is what makes acting
 on an unproven accusation defensible at all. Reports are public and cost only
@@ -891,13 +933,16 @@ The owner has confirmed:
    it from a member's earned TIG; and
 5. a changed payout address is held for 48 hours with out-of-band notification.
 
-The remaining decision is:
+The remaining decisions are:
 
 1. the dynamic slashable-deposit and malicious-work policy in sections
    11.3-11.5. A fixed `10 TIG` per benchmark is explicitly not accepted because
    direct method-verification exposure scales with `num_bundles` and TIG's live
    report penalty. The threats and unresolved evidence/consequence choices are
-   enumerated in [member_attack_model.md](member_attack_model.md).
+   enumerated in [member_attack_model.md](member_attack_model.md); and
+2. whether a member's earnings may back their working capacity, and by what
+   mechanism (§11.7). Every route crosses the payout/security-deposit custody
+   boundary, so it is a funds-custody decision rather than an accounting one.
 
 Until this is answered, testnet may exercise security-deposit fixtures using
 explicit fixture policy values, but no implementation may accept public member

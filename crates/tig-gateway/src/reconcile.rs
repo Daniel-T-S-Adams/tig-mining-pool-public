@@ -65,8 +65,38 @@ pub struct PrecommitSubmission {
 pub struct TrackSettings {
     pub num_bundles: u64,
     pub fuel_budget: u64,
-    /// Selected hyperparameters, compared as written.
-    pub hyperparameters: BTreeMap<String, String>,
+    /// Selected hyperparameters, as values.
+    ///
+    /// `mining_system.md` §6.6 copies the source benchmark's hyperparameters
+    /// and `tig_integration.md` §4 requires lossless numeric handling on the
+    /// §6.1 write body, so a numeric hyperparameter has to reach TIG as a
+    /// number. Comparison normalises instead — see `hyperparameters_match`.
+    /// Storing the normalised form here would transmit a re-typed method.
+    pub hyperparameters: BTreeMap<String, serde_json::Value>,
+}
+
+/// Whether two hyperparameter sets name the same values.
+///
+/// Both sides render to text before comparing, so `250` and `"250"` are the
+/// same hyperparameter: TIG returns these as strings and the pool selects
+/// them as values, and a type difference is not a different method. The
+/// rendering exists only here; nothing transmits it.
+fn hyperparameters_match(
+    a: &BTreeMap<String, serde_json::Value>,
+    b: &BTreeMap<String, serde_json::Value>,
+) -> bool {
+    fn render(map: &BTreeMap<String, serde_json::Value>) -> BTreeMap<&String, String> {
+        map.iter()
+            .map(|(k, v)| {
+                let text = match v {
+                    serde_json::Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                };
+                (k, text)
+            })
+            .collect()
+    }
+    render(a) == render(b)
 }
 
 /// What a search of confirmed precommits established.
@@ -151,21 +181,14 @@ fn candidate_of(index: usize, record: &serde_json::Value) -> Result<Candidate, R
         .get("details")
         .ok_or_else(|| shape("missing details".to_string()))?;
 
-    // Hyperparameters compare as written. TIG returns them as strings and
-    // the pool submits them as values, so a type difference is not a
-    // different hyperparameter.
-    let hyperparameters = match details.get("hyperparameters") {
+    // Kept as values; `hyperparameters_match` does the normalising, so
+    // nothing downstream can mistake the comparison form for the wire one.
+    let hyperparameters: BTreeMap<String, serde_json::Value> = match details.get("hyperparameters")
+    {
         None | Some(serde_json::Value::Null) => BTreeMap::new(),
-        Some(serde_json::Value::Object(map)) => map
-            .iter()
-            .map(|(k, v)| {
-                let rendered = match v {
-                    serde_json::Value::String(s) => s.clone(),
-                    other => other.to_string(),
-                };
-                (k.clone(), rendered)
-            })
-            .collect(),
+        Some(serde_json::Value::Object(map)) => {
+            map.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+        }
         Some(_) => {
             return Err(shape(
                 "details.hyperparameters is not an object".to_string(),
@@ -210,7 +233,14 @@ impl Candidate {
             && submitted
                 .track_settings
                 .get(&self.track_id)
-                .is_some_and(|offered| *offered == self.settings)
+                .is_some_and(|offered| {
+                    offered.num_bundles == self.settings.num_bundles
+                        && offered.fuel_budget == self.settings.fuel_budget
+                        && hyperparameters_match(
+                            &offered.hyperparameters,
+                            &self.settings.hyperparameters,
+                        )
+                })
     }
 }
 

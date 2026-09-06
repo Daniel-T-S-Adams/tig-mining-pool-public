@@ -12,9 +12,13 @@
 pub mod credential;
 pub mod readiness;
 pub mod reconcile;
+pub mod transmit;
 pub mod write_gate;
+pub mod write_policy;
 
 pub use credential::{CredentialError, TigApiKey};
 pub use readiness::{Check, Evidence, Failure, Pins, WriteReady, evaluate};
 pub use reconcile::{PrecommitSubmission, Reconciliation, TrackSettings, reconcile_precommit};
+pub use transmit::{PrecommitTransmitter, TransmitError, Transmitted, precommit_body};
 pub use write_gate::{Blocked, Revocation, WriteGate, WritePermit};
+pub use write_policy::{WritePolicy, WritePolicyError};

@@ -113,6 +113,14 @@ pub struct World {
     next_bench_seq: u64,
     benchmarks: BTreeMap<String, Bench>,
     injections: HashMap<String, VecDeque<InjectMode>>,
+    /// Writes that actually reached this server, per endpoint.
+    ///
+    /// Counted on arrival, before any injection is applied, because the
+    /// question slice-1 criterion E3 asks is how many requests the client
+    /// SENT — not how many the server chose to answer, and not how many
+    /// benchmarks resulted. A client that resends an ambiguous write shows
+    /// up here even if the second request would have been deduplicated.
+    writes_received: HashMap<String, u32>,
 }
 
 pub type SharedWorld = Arc<Mutex<World>>;
@@ -179,6 +187,7 @@ impl World {
             next_bench_seq: 1,
             benchmarks: BTreeMap::new(),
             injections: HashMap::new(),
+            writes_received: HashMap::new(),
         })
     }
 
@@ -429,6 +438,10 @@ impl World {
             "proofs": proofs,
             "frauds": [],
         })
+    }
+
+    fn count_write(&mut self, target: &str) {
+        *self.writes_received.entry(target.to_string()).or_insert(0) += 1;
     }
 
     fn take_injection(&mut self, target: &str) -> Option<InjectMode> {
@@ -700,6 +713,7 @@ async fn submit_precommit(
 ) -> ApiResult {
     let mut w = lock(&world);
     require_api_key(&w, &headers)?;
+    w.count_write("submit-precommit");
     let injection = w.take_injection("submit-precommit");
     if let Some(mode) = injection
         && mode != InjectMode::Ambiguous
@@ -852,6 +866,7 @@ async fn submit_benchmark(
 ) -> ApiResult {
     let mut w = lock(&world);
     require_api_key(&w, &headers)?;
+    w.count_write("submit-benchmark");
     let injection = w.take_injection("submit-benchmark");
     if let Some(mode) = injection
         && mode != InjectMode::Ambiguous
@@ -944,6 +959,7 @@ async fn submit_proof(
 ) -> ApiResult {
     let mut w = lock(&world);
     require_api_key(&w, &headers)?;
+    w.count_write("submit-proof");
     let injection = w.take_injection("submit-proof");
     if let Some(mode) = injection
         && mode != InjectMode::Ambiguous
@@ -1069,6 +1085,7 @@ async fn fake_state(State(world): State<SharedWorld>) -> ApiResult {
         "block_id": w.block_id(),
         "benchmarks": w.benchmarks_json(),
         "active": w.active_benchmark_ids(),
+        "writes_received": w.writes_received,
     })))
 }
 

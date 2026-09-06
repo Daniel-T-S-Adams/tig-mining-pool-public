@@ -8,12 +8,21 @@ version = "0.1.0"
 
 [dependencies]
 pool-domain = { path = "../pool-domain" }
+pool-workflow = { path = "../pool-workflow" }
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "rustls-tls",
+] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
 thiserror = "2"
 tracing = "0.1"
 
 [dev-dependencies]
+fake-tig = { path = "../fake-tig" }
+axum = "0.8"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net"] }
 # The §10.3 alert is a log event, so the test captures tracing output the
 # way pool-telemetry's span tests do.
 tracing-subscriber = { version = "0.3", features = ["json"] }

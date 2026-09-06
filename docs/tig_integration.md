@@ -531,9 +531,14 @@ enough to be implemented wrongly:
   default ceiling would be a protocol constant in the binary (§12) reached
   exactly when configuration was absent. The reader shares are summed
   against the ceiling when the policy loads, so a config that over-allocates
-  the per-IP budget cannot produce a usable policy at all. The POST-lane
-  values above are not yet read from configuration because no component
-  writes yet; they become configuration with the TIG gateway.
+  the per-IP budget cannot produce a usable policy at all.
+- The POST-lane values above are configuration too, under `write_limits`, and
+  are read by `crates/tig-gateway` rather than by the read client — the crate
+  that holds the API key is the one that writes. The same rules apply as to
+  `read_limits`: every field is required, unknown fields are refused so a
+  typo cannot be silently dropped, and there is no compiled fallback, because
+  a default would be a protocol constant in the binary (§12) reached exactly
+  when configuration was missing.
 - The 30-second GET timeout bounds **one attempt**. The whole-call backstop
   exists only so a read cannot hang indefinitely; it is deliberately loose
   enough that the retry policy below stays reachable, and it is not derived

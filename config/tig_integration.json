@@ -120,5 +120,11 @@
         "max_concurrent": 1
       }
     }
+  },
+  "write_limits": {
+    "connect_timeout_seconds": 5,
+    "call_timeout_seconds": 60,
+    "min_seconds_between_initial_writes": 5,
+    "retry_interval_after_reconciliation_seconds": 60
   }
 }

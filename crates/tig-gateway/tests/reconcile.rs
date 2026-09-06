@@ -48,9 +48,13 @@ fn track(num_bundles: u64, fuel_budget: u64) -> TrackSettings {
     TrackSettings {
         num_bundles,
         fuel_budget,
+        // Values, not text: the pool chose a float and an integer, and
+        // transmits them at those types. The fixture record returns noise as
+        // a string and restart_period as a number, so the match crosses the
+        // type boundary in both directions.
         hyperparameters: BTreeMap::from([
-            ("noise".to_string(), "0.15".to_string()),
-            ("restart_period".to_string(), "250".to_string()),
+            ("noise".to_string(), json!(0.15)),
+            ("restart_period".to_string(), json!(250)),
         ]),
     }
 }
@@ -208,6 +212,23 @@ fn tig_generated_fields_are_not_part_of_the_match() {
     record["details"]["num_nonces"] = json!(999);
     assert_eq!(
         reconcile_precommit(&[record], &expected()).unwrap(),
+        Reconciliation::Confirmed {
+            benchmark_id: "bench_a".to_string()
+        }
+    );
+}
+
+#[test]
+fn a_hyperparameter_the_pool_chose_as_text_still_matches() {
+    // The normalising runs on the pool's side too, not only TIG's.
+    let mut expected = expected();
+    for settings in expected.track_settings.values_mut() {
+        settings
+            .hyperparameters
+            .insert("restart_period".to_string(), json!("250"));
+    }
+    assert_eq!(
+        reconcile_precommit(&[precommit("bench_a", Some(100_021))], &expected).unwrap(),
         Reconciliation::Confirmed {
             benchmark_id: "bench_a".to_string()
         }

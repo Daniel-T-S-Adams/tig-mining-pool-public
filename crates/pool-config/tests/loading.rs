@@ -166,12 +166,60 @@ fn each_binary_accepts_only_its_own_role() {
         (Binary::PoolController, "pool_controller"),
         (Binary::TigGateway, "pool_gateway"),
     ] {
-        let toml = valid_toml(&scratch.password_file())
+        let mut toml = valid_toml(&scratch.password_file())
             .replace("user = \"pool_migration\"", &format!("user = \"{role}\""));
+        // The controller's own required section. It has no default, so a
+        // controller config without it does not load at all.
+        if matches!(binary, Binary::PoolController) {
+            toml.push_str(ORCHESTRATION);
+        }
         let path = scratch.write(&toml);
         Config::load(&path, binary)
             .unwrap_or_else(|e| panic!("{} with role {role} must load: {e}", binary.as_str()));
     }
+}
+
+/// `mining_system.md` §11 makes `internal_pool_unverified_limit` versioned
+/// policy with no settled value, so this is a test fixture and never a
+/// production constant.
+const ORCHESTRATION: &str = "\n[orchestration]\ninternal_pool_unverified_limit = 8\n";
+
+#[test]
+fn a_controller_without_an_unverified_limit_does_not_load() {
+    // No default: a compiled fallback would be a policy value reached exactly
+    // when the operator forgot to set one.
+    let scratch = Scratch::new("no-limit");
+    let toml = valid_toml(&scratch.password_file())
+        .replace("user = \"pool_migration\"", "user = \"pool_controller\"");
+    let path = scratch.write(&toml);
+    let err = Config::load(&path, Binary::PoolController)
+        .expect_err("the controller has no default limit");
+    assert_invalid(err, "internal_pool_unverified_limit");
+}
+
+#[test]
+fn a_zero_unverified_limit_is_rejected() {
+    let scratch = Scratch::new("zero-limit");
+    let mut toml = valid_toml(&scratch.password_file())
+        .replace("user = \"pool_migration\"", "user = \"pool_controller\"");
+    toml.push_str("\n[orchestration]\ninternal_pool_unverified_limit = 0\n");
+    let path = scratch.write(&toml);
+    let err = Config::load(&path, Binary::PoolController).expect_err("0 admits nothing");
+    assert_invalid(err, "at least 1");
+}
+
+#[test]
+fn another_binary_may_not_carry_the_orchestration_policy() {
+    // A gateway config naming an orchestration limit reads as though the
+    // gateway enforced it, which `architecture.md` §3 says it does not.
+    let scratch = Scratch::new("gateway-orchestration");
+    let mut toml = valid_toml(&scratch.password_file())
+        .replace("user = \"pool_migration\"", "user = \"pool_gateway\"");
+    toml.push_str(ORCHESTRATION);
+    let path = scratch.write(&toml);
+    let err =
+        Config::load(&path, Binary::TigGateway).expect_err("the gateway enforces no such limit");
+    assert_invalid(err, "belongs to pool-controller");
 }
 
 #[test]

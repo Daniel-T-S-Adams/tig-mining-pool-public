@@ -106,6 +106,20 @@ pub struct TelemetryConfig {
     pub deployment: String,
 }
 
+/// The controller's orchestration policy.
+///
+/// `mining_system.md` §11 lists `internal_pool_unverified_limit` among the
+/// numerical values "required before full product implementation", as
+/// *versioned policy*. So it is configuration with no default: a compiled
+/// fallback would be a policy value reached exactly when the operator forgot
+/// to set one, which is the case fail-closed exists for.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OrchestrationConfig {
+    /// The §6.1 gate: `pool_unverified < internal_pool_unverified_limit`.
+    pub internal_pool_unverified_limit: i64,
+}
+
 /// The configuration shared by every pool binary.
 ///
 /// Binary-specific sections are added by the slices that introduce those
@@ -118,6 +132,9 @@ pub struct Config {
     pub network: Network,
     pub database: DatabaseConfig,
     pub telemetry: TelemetryConfig,
+    /// Present for `pool-controller` and absent for every other binary, which
+    /// `validate_for` enforces in both directions.
+    pub orchestration: Option<OrchestrationConfig>,
 }
 
 /// Which binary is loading, so cross-field rules can differ where the
@@ -253,6 +270,39 @@ impl Config {
         }
         if self.telemetry.level.trim().is_empty() {
             return Err(invalid("telemetry.level must not be empty".into()));
+        }
+
+        // Required for the controller and refused for anyone else. Both
+        // directions matter: a controller with no limit could admit without
+        // one, and a gateway config carrying an orchestration policy would
+        // read as though the gateway enforced it, which `architecture.md` §3
+        // says it does not.
+        match (binary, &self.orchestration) {
+            (Binary::PoolController, None) => {
+                return Err(invalid(
+                    "pool-controller requires [orchestration] with \
+                     internal_pool_unverified_limit; it has no default because \
+                     mining_system.md §11 makes it versioned policy"
+                        .into(),
+                ));
+            }
+            (Binary::PoolController, Some(orchestration)) => {
+                if orchestration.internal_pool_unverified_limit < 1 {
+                    return Err(invalid(format!(
+                        "orchestration.internal_pool_unverified_limit must be at \
+                         least 1, found {}: a limit of 0 admits nothing, which is \
+                         a misconfiguration rather than a policy",
+                        orchestration.internal_pool_unverified_limit
+                    )));
+                }
+            }
+            (other, Some(_)) => {
+                return Err(invalid(format!(
+                    "[orchestration] belongs to pool-controller; {} must not carry it",
+                    other.as_str()
+                )));
+            }
+            (_, None) => {}
         }
 
         Ok(())

@@ -6,10 +6,15 @@
 //! ledger, which records that a request was sent before it is sent.
 
 pub mod attempt;
+pub mod decision;
 pub mod intent;
 
 pub use attempt::{
     AttemptError, AttemptOutcome, PostgresAttemptLedger, WriteAttempt, WriteAttemptLedger,
+};
+pub use decision::{
+    AdmissionError, Admitted, AnchorSnapshot, NewDecision, PRECOMMIT_ADMISSION_LOCK, RecordedDraw,
+    RecordedTie, admit_precommit,
 };
 pub use intent::{
     IntentError, IntentState, NewIntent, PostgresIntentRepository, TigWriteIntentRepository,

@@ -357,7 +357,12 @@ so the address above is what slice-1 configuration must name.
   benchmarks created before members exist and bounding the carve-out to
   `testnet` via A2. This is a protocol-meaning change to a source-of-truth
   document and needs the owner's explicit approval when it lands — it is
-  flagged here, not made here.
+  flagged here, not made here. Auto-merge (`plans/ai-workflow.md`) removed the
+  merge click that used to be where that approval was given, and there is no
+  path carve-out, so the mechanism is now explicit: **open that PR as a
+  draft**. Drafts are never armed for auto-merge and their verdict gate is
+  red, so it cannot land until the owner marks it ready, which is the act of
+  approving.
 
 ### G. Restart safety
 

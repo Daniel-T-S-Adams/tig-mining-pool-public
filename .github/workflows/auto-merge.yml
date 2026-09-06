@@ -1,0 +1,50 @@
+name: Auto-merge
+
+# Arms GitHub's native auto-merge on every eligible PR, so a green PR lands
+# without a human click. This job never merges past protection: it asks GitHub
+# to merge the PR *when branch protection is satisfied* — `fmt + clippy +
+# test` green, every AI verdict `approve` at the current head SHA, branch up
+# to date. `gh pr merge --auto` merges immediately rather than arming only
+# when protection is already satisfied at this head SHA, which is the same
+# guarantee reached sooner. Protection stays the only thing that decides
+# whether a merge may happen.
+# Decision and accepted trade-offs: docs/plans/ai-workflow.md.
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review]
+
+permissions:
+  # `pull-requests: write` is what arms auto-merge. `contents: write` covers
+  # the immediate-merge path above: without it, a PR that is already green
+  # when this runs fails instead of merging.
+  contents: write
+  pull-requests: write
+
+jobs:
+  arm:
+    name: Arm auto-merge
+    # Same-repo, non-draft PRs only, mirroring the AI review job: a fork PR's
+    # token is read-only and could not arm anyway, and a draft is not a
+    # candidate for merge (its reviewers do not run, so its gate is red).
+    # Default branch only, because protection is the entire safety argument
+    # above and `main` is the only branch that has it: arming a PR against an
+    # unprotected stacked branch would merge it with no checks at all.
+    if: >
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.base.ref == github.event.repository.default_branch &&
+      github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    steps:
+      # Squash, matching this repository's history (one commit per PR,
+      # `(#NN)`-suffixed). Re-arming on every push is deliberate and
+      # idempotent: auto-merge is cleared when a PR is taken back to draft or
+      # a merge conflict appears, and this restores it on the next push.
+      # Not masked with `|| true`: if the repository's auto-merge setting is
+      # off, this step fails loudly rather than leaving PRs silently unarmed.
+      - name: Enable auto-merge
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          gh pr merge "$PR_NUMBER" --repo "${{ github.repository }}" --auto --squash

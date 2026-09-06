@@ -510,7 +510,7 @@ before multiple product slices are developed in parallel.
   `secrets/`; policy in `CLAUDE.md` and `architecture.md` §9
 - [x] Add contribution rules for changing settled mining behavior.
   — `CLAUDE.md` mandatory workflow (owning-doc update in the same PR, ADR for
-  durable decisions, AI review, human-only merge)
+  durable decisions, AI review, auto-merge on green)
 - [x] Add a short implementation plan with independently testable vertical
   slices and acceptance criteria.
   — [`plans/slice-1-gateway.md`](plans/slice-1-gateway.md) §4 for slice 1;

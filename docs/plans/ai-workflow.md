@@ -14,15 +14,20 @@ executable feedback, durable memory, and explicit authority boundaries — a
 longer prompt is not a substitute.*
 
 Because the human does not read most diffs, **AI review is the primary review
-layer here, not additional coverage**. The human's remaining roles are the
-approve/merge click (informed by an evidence bundle), spend/custody/secret
-decisions, and the launch gates in `pre_build_checklist.md` §9. Those are
-never delegated, and are enforced by branch protection — not prompts.
+layer here, not additional coverage**. Since 2026-09-06 it is also the *only*
+pre-merge layer: a green verdict gate merges the PR, with no click (see
+"Auto-merge on green"). The human's remaining roles are spend/custody/secret
+decisions and the launch gates in `pre_build_checklist.md` §9. Those are never
+delegated. Branch protection still enforces what CI must prove before a merge —
+the required checks, the up-to-date branch — but the boundary around the
+human's own decisions is now convention plus the owner's manual override, which
+protection does not enforce.
 
 ## Already in place (pre-plan)
 
 Operating contract (`CLAUDE.md`/`AGENTS.md`), protected `main` (required CI
-check, human-only merge, up-to-date branches), `make check` with no masked
+check, human-only merge — superseded 2026-09-06, see "Auto-merge on green" —
+up-to-date branches), `make check` with no masked
 failures, pinned-action CI, deterministic feedback layer (`fixtures/`,
 `crates/fake-tig`), issues-with-acceptance-criteria as the unit of agent work,
 durable memory (ADRs, plans, spike report), secrets discipline (Doppler-style
@@ -64,6 +69,45 @@ and this paragraph are the result of resolving those findings.
 Also W1: PR template with the definition-of-done; `CLAUDE.md` gains the AI
 review rules.
 
+## Auto-merge on green (2026-09-06)
+
+The human merge click is removed. Once branch protection is satisfied —
+`fmt + clippy + test` green, every AI verdict `approve` at the current head
+SHA, branch up to date — GitHub squash-merges the PR itself.
+`.github/workflows/auto-merge.yml` arms GitHub's native auto-merge on PRs
+against the default branch; protection alone decides whether and when a merge
+happens, so no job in this repository holds the power to merge past a red
+check. Only the default branch is armed, because protection is what supplies
+that guarantee and `main` is the only branch carrying it.
+
+Where a plan doc promises the owner's explicit approval for a specific change
+(slice-1 §F6a is the current instance), that PR is opened as a **draft**:
+drafts are never armed and their reviewers do not run, so marking it ready is
+the act of approving.
+
+Owner decision: the click was not a review. Diffs were not being read, so the
+click added latency, not scrutiny, and a gate nobody exercises is better
+removed than pretended. Enforcement moves accordingly — repository setting
+`allow_auto_merge` on, `required_approving_review_count` 0 on `main`, both
+required status checks unchanged.
+
+The trade-off accepted with it, stated plainly: AI review is now the only
+thing between a PR and `main`, with **no carve-out** — including for PRs that
+change the reviewers' own prompts, the review workflow, the auto-merge
+workflow, or `CLAUDE.md`. A PR can therefore alter what "green" means and then
+merge itself. Two things bound that risk rather than removing it: the owner
+retains a manual override in both directions (`enforce_admins` is off), and
+`CLAUDE.md` still forbids agents from weakening a gate. Both are conventions,
+not enforcement.
+
+Consequences to watch in the W2 metrics (issue #39): escapes now land on
+`main` instead of being caught at the click; and a `must_fix` finding the
+author wishes to reject can no longer be waved through by merging anyway. A
+re-review counts only after a substantive change that addresses the finding —
+re-rolling a nondeterministic reviewer on an empty commit until it relents is
+not a resolution. An unaddressed finding the author rejects is cleared solely
+by the owner merging by hand.
+
 ## W2 — during early slices, evidence-driven (issue #39)
 
 Trigger: first slices merged and reviewer findings accumulating.
@@ -99,7 +143,7 @@ Trigger: the smallest deployed testnet exists (`architecture.md` §11.2).
 
 ## Never delegated (any phase)
 
-PR approval and merge; production/mainnet anything; migrations against
-deployed environments; funds custody, payout keys, slashing; raising spend;
-weakening tests/gates/branch protection; secret rotation. See `CLAUDE.md`
-"Human-only actions".
+Production/mainnet anything; migrations against deployed environments; funds
+custody, payout keys, slashing; raising spend; weakening tests/gates/branch
+protection; secret rotation. See `CLAUDE.md` "Human-only actions". PR approval
+and merge left this list on 2026-09-06 — see "Auto-merge on green".

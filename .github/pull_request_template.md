@@ -19,8 +19,8 @@ could act on. -->
 
 ## Evidence
 
-<!-- Test output, live-run timelines, measurements — what a human needs to
-approve without reading the diff. -->
+<!-- Test output, live-run timelines, measurements — what a reader needs to
+trust this change without re-running it. -->
 
 ## Rejected review findings (if any)
 

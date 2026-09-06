@@ -42,7 +42,11 @@ the same PR workflow as code.
 1. Work on a feature branch. **Never push directly to `main`.**
 2. Open a PR for every change, including doc-only changes. Link the related
    issue if one exists.
-3. **Never merge PRs. Only a human merges.**
+3. **Never merge a PR by hand.** Merging is automatic: GitHub squash-merges
+   a PR as soon as branch protection is satisfied — `fmt + clippy + test`
+   green, every AI verdict `approve` at the current head SHA, branch up to
+   date. No human approval is involved. Never merge manually and never force
+   a merge past a red check.
 4. Once `make check` exists, it must pass before pushing. Never mask a failing
    check (`|| true` is forbidden on anything described as required).
 5. A new durable architectural decision requires an ADR in `docs/adr/`
@@ -76,7 +80,6 @@ the same PR workflow as code.
 
 These require an explicit human decision — never perform them autonomously:
 
-- Approving or merging a PR.
 - Running database migrations against any deployed environment.
 - Anything involving funds custody, payout signing keys, security deposits, or
   slashing.
@@ -105,4 +108,5 @@ These require an explicit human decision — never perform them autonomously:
 - No secrets or environment files were added.
 - (Once code exists) `make check` passes without ignored failures, and tests
   cover the changed behavior.
-- A human reviewed and merged the PR.
+- Branch protection was satisfied — `fmt + clippy + test` green, every AI
+  verdict `approve` at the head SHA — and GitHub auto-merged the PR.

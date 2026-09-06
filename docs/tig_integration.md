@@ -207,7 +207,7 @@ returned by the opening `GET /get-block?include_data=true` call.
 | `GET /get-benchmark-data?benchmark_id=...` | Full precommit, benchmark, proof and fraud data for an individual benchmark. Used incrementally to build the compact active-benchmark cache needed for source hyperparameters, bundle qualities and algorithm/track active-bundle counts. |
 | `GET /get-binary-blob?algorithm_id=...` | The confirmed algorithm archive used by the member runtime. The pool calculates and records its digest. |
 | `GET /get-round-emissions?round=...` | Round-level accounting reconciliation only. It cannot reconstruct the pool's missing per-block qualifier attribution. |
-| `GET /get-reports?round=...` | Method reports for one round and their arbitrations, joined by report ID. Carries the exact nonce reported and the benchmarker reported against. Public, and mutable while a round is open. Drives `accounting.md` §11.6's freeze rule. **Which round the parameter selects is not settled** — see §14.2. |
+| `GET /get-reports?round=...` | Method reports against one round's benchmarks and their arbitrations, joined by report ID. Carries the exact nonce reported and the benchmarker reported against. Public, and mutable while that round's reporting window is open. Drives `accounting.md` §11.6's freeze rule. See §14.2. |
 
 ### 5.1 Active challenge and algorithm tests
 
@@ -772,36 +772,50 @@ player ID. `details.benchmark_id` is what attributes a report to one
 member-owned benchmark, which is what §11.6 needs to freeze one reservation
 rather than a member.
 
-**Which round the parameter selects is not settled, and it matters.**
-§14.1's reading of the pinned source is that `submit_report` persists into
-`ReportDetails` only `fee_paid` and *the benchmark's* `round`
-(`tig-structs/src/core.rs` lines 493–502). If `details.round` is the
-benchmark's round then `?round=X` selects reports *about* round-X benchmarks;
-if it is the round the report was filed in, the same query selects reports
-*made during* round X. Those are different sets — a benchmark from round X is
-reported during the submission window that follows it — and nothing observed
-so far distinguishes them, because a single example cannot separate the two
-when both values could coincide.
+**`?round=X` selects reports about round-X benchmarks**, not reports filed
+during round X. The two are different sets — a round-X benchmark is reported
+during the window that follows it — so which one the parameter means decides
+whether the pool sees its own reports at all.
 
-Until it is confirmed, a caller must not assume either. The pool needs
-*every* report against a benchmark to evaluate `accounting.md` §11.6's freeze
-and §11.4's release condition, which turns on every report and arbitration
-being terminal; polling the wrong round set would leave reports unseen and a
-reservation released while method exposure is live. The conservative
-interim is to poll the benchmark's own round **and** every round its
-submission window can reach, which is a superset under either reading.
+The pinned source settles what the field holds. `submit_report` binds `round`
+from the *reportable benchmark* being reported against
+(`tig-protocol/src/contracts/players.rs` line 217, destructuring
+`get_reportable_benchmark`) and persists that same value into `ReportDetails`
+(line 259). Nothing copies the submitting block's round into the report.
+`details.round` is therefore the reported benchmark's originating round, which
+is what §14.1 read from `tig-structs/src/core.rs` lines 493–502.
 
-`ReportsConfig.submission_period` is what bounds that window, and its value
-and unit are themselves unpinned — the fixture's `120` is a constructed
-value, not an observation. No code may assume a round count here; the pool
-reads the live configuration, and confirming the unit is part of the same
-open item.
+That the query parameter filters on `details.round` — rather than on either
+`block_confirmed` — is **owner confirmation, not a pinned-source fact**: the
+filter lives in the API layer, which is not part of the pinned tree, so no
+line of it can be cited here. It is consistent with the persisted field, and
+it is the reading the pool implements.
 
-**Not cacheable.** The read is addressed by round, not by block, and a round
-accumulates reports while it is open, so the same URL returns different bodies
-within one round. It is outside §11's caching scope for the same reason
-`get-benchmarks` is, and it is not block-anchored, so it does not belong in a
-§9 snapshot either.
+A caller therefore issues **one query per benchmark round**: to see every
+report against a round-X benchmark, query `?round=X`. That is what
+`accounting.md` §11.6's freeze and §11.4's release condition need, both of
+which turn on every report against a benchmark being seen and terminal.
+Querying the rounds the reports were *filed* in would instead return reports
+about other rounds' benchmarks and miss the ones being looked for.
+
+`ReportsConfig.submission_period` bounds how long that answer can still grow,
+and the pinned source fixes its **unit as rounds**: `submit_report` refuses a
+report once `latest_block.round > benchmark_round +
+config.reports.submission_period` (line 219). So `?round=X` stops taking new
+reports at the end of round `X + submission_period`; only arbitrations change
+after that.
+
+The **value** remains live configuration and must never be assumed. The
+fixture's `120` is a constructed value, not an observation, and now that the
+unit is known to be rounds it is visibly not a plausible live one — the pool
+reads `ReportsConfig` from the block it is acting on.
+
+**Not cacheable.** The read is addressed by round, not by block, and a round's
+report set grows for as long as its reporting window is open — through the end
+of round `X + submission_period` — so the same URL returns different bodies
+over many blocks, and its arbitrations keep changing after that. It is outside
+§11's caching scope for the same reason `get-benchmarks` is, and it is not
+block-anchored, so it does not belong in a §9 snapshot either.
 
 Two Swagger inaccuracies at this pin, both confirmed against the live API:
 

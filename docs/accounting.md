@@ -606,10 +606,11 @@ Two premises it rests on are **not established**, and the position is taken
 knowingly rather than derived from them:
 
 - how long an open benchmark remains exposed is unknown. §14.1 cannot exclude
-  a charge block later than the arbitration block, and §14.2 records
-  `ReportsConfig.submission_period`'s value and unit as unpinned, so "several
-  weeks of notice exceeds the horizon" compares against a horizon nobody has
-  measured; and
+  a charge block later than the arbitration block; §14.2 now pins
+  `ReportsConfig.submission_period`'s unit as rounds, but its value is live
+  configuration and the arbitration lag beyond the reporting window is not
+  bounded by anything pinned. "Several weeks of notice exceeds the horizon"
+  still compares against a horizon nobody has measured; and
 - the notice expectation is an observation about how TIG has behaved, not a
   property of the protocol, and nothing in the pinned source guarantees it.
 
@@ -640,10 +641,10 @@ The settled boundaries are:
 accusation, not a finding: `ArbitrationDetails` resolves to
 `NONREPRODUCIBLE`, `REPRODUCIBLE` or `INCONCLUSIVE`. A report is observable
 before its arbitration resolves, and the pool acts on that earlier signal
-without treating it as proof. How much earlier is not stated here: the lag
-follows `ReportsConfig.submission_period`, whose value and unit
-`tig_integration.md` §14.2 records as unpinned — as it does which round set
-the pool must poll to see every report against a benchmark.
+without treating it as proof. How much earlier is not stated here: reports
+against a benchmark can still arrive until the end of round
+`benchmark_round + submission_period`, and `tig_integration.md` §14.2 pins
+that unit as rounds while its value stays live configuration.
 
 On observing a report against a member-owned benchmark, the pool freezes that
 benchmark's reserved method amount, holding it against the reported outcome

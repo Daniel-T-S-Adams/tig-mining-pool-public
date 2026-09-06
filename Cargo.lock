@@ -1481,6 +1481,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "pool-decision"
+version = "0.1.0"
+dependencies = [
+ "pool-domain",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "pool-domain"
 version = "0.1.0"
 dependencies = [

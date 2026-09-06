@@ -6,6 +6,12 @@
 use std::fmt;
 use std::str::FromStr;
 
+pub mod challenge_tie;
+
+pub use challenge_tie::{
+    CHALLENGE_TIE_DOMAIN, DrawRank, challenge_tie_seed, draw_rank, draw_ranks,
+};
+
 /// The TIG network a process operates against.
 ///
 /// Deliberately has no `Default` impl: docs/architecture.md §9 requires that

@@ -1,0 +1,21 @@
+[package]
+name = "pool-decision"
+description = "The pure decision rules of mining_system.md §6"
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+version = "0.1.0"
+
+[dependencies]
+pool-domain = { path = "../pool-domain" }
+# Hyperparameters are copied verbatim from a source benchmark at the types TIG
+# published them (`mining_system.md` §6.6, `tig_integration.md` §4), so they
+# are values here, not text.
+serde_json = "1"
+thiserror = "2"
+
+[dev-dependencies]
+serde = { version = "1", features = ["derive"] }
+
+[lints]
+workspace = true

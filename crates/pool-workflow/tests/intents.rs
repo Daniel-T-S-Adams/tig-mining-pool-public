@@ -49,6 +49,15 @@ async fn concurrent_duplicate_intents_leave_exactly_one_row() {
     let Some(db) = TempDb::migrated("concurrent").await else {
         return;
     };
+    // The intents below need their owner mapping to exist: §6.1 opens the
+    // unverified interval when the intent is created, and the foreign key
+    // from `tig_write_intent` makes that ordering structural.
+    pool_test_support::seed_workflows(
+        &db.pool_as("pool_controller").await,
+        "testnet",
+        &["w1", "w2", "w3", "author", "rearm", "terminal"],
+    )
+    .await;
     let repo = Arc::new(PostgresIntentRepository::new(
         db.pool_as("pool_controller").await,
     ));
@@ -92,6 +101,15 @@ async fn the_same_key_with_a_different_payload_is_refused() {
     let Some(db) = TempDb::migrated("payload").await else {
         return;
     };
+    // The intents below need their owner mapping to exist: §6.1 opens the
+    // unverified interval when the intent is created, and the foreign key
+    // from `tig_write_intent` makes that ordering structural.
+    pool_test_support::seed_workflows(
+        &db.pool_as("pool_controller").await,
+        "testnet",
+        &["w1", "w2", "w3", "author", "rearm", "terminal"],
+    )
+    .await;
     let repo = PostgresIntentRepository::new(db.pool_as("pool_controller").await);
 
     repo.create(precommit("w1", 1, 0xab)).await.unwrap();
@@ -114,6 +132,15 @@ async fn a_new_generation_is_how_a_payload_changes() {
     let Some(db) = TempDb::migrated("generation").await else {
         return;
     };
+    // The intents below need their owner mapping to exist: §6.1 opens the
+    // unverified interval when the intent is created, and the foreign key
+    // from `tig_write_intent` makes that ordering structural.
+    pool_test_support::seed_workflows(
+        &db.pool_as("pool_controller").await,
+        "testnet",
+        &["w1", "w2", "w3", "author", "rearm", "terminal"],
+    )
+    .await;
     let repo = PostgresIntentRepository::new(db.pool_as("pool_controller").await);
 
     let first = repo.create(precommit("w1", 1, 0xab)).await.unwrap();
@@ -131,6 +158,15 @@ async fn a_generation_cannot_be_reused_across_a_different_benchmark() {
     let Some(db) = TempDb::migrated("binding").await else {
         return;
     };
+    // The intents below need their owner mapping to exist: §6.1 opens the
+    // unverified interval when the intent is created, and the foreign key
+    // from `tig_write_intent` makes that ordering structural.
+    pool_test_support::seed_workflows(
+        &db.pool_as("pool_controller").await,
+        "testnet",
+        &["w1", "w2", "w3", "author", "rearm", "terminal"],
+    )
+    .await;
     let repo = PostgresIntentRepository::new(db.pool_as("pool_controller").await);
 
     repo.create(benchmark("w1", 1, "bench-a", 0xab))
@@ -156,6 +192,15 @@ async fn the_benchmark_binding_is_required_and_refused_by_kind() {
     let Some(db) = TempDb::migrated("kinds").await else {
         return;
     };
+    // The intents below need their owner mapping to exist: §6.1 opens the
+    // unverified interval when the intent is created, and the foreign key
+    // from `tig_write_intent` makes that ordering structural.
+    pool_test_support::seed_workflows(
+        &db.pool_as("pool_controller").await,
+        "testnet",
+        &["w1", "w2", "w3", "author", "rearm", "terminal"],
+    )
+    .await;
     let repo = PostgresIntentRepository::new(db.pool_as("pool_controller").await);
 
     // Both benchmark-bound kinds, not just one: §7.3 binds Proof exactly as
@@ -192,6 +237,15 @@ async fn the_schema_refuses_the_binding_even_without_the_repository() {
     let Some(db) = TempDb::migrated("constraint").await else {
         return;
     };
+    // The intents below need their owner mapping to exist: §6.1 opens the
+    // unverified interval when the intent is created, and the foreign key
+    // from `tig_write_intent` makes that ordering structural.
+    pool_test_support::seed_workflows(
+        &db.pool_as("pool_controller").await,
+        "testnet",
+        &["w1", "w2", "w3", "author", "rearm", "terminal"],
+    )
+    .await;
     let pool = db.pool_as("pool_controller").await;
 
     let bare = sqlx::query(
@@ -237,6 +291,15 @@ async fn identity_and_payload_cannot_be_edited() {
     let Some(db) = TempDb::migrated("immutable").await else {
         return;
     };
+    // The intents below need their owner mapping to exist: §6.1 opens the
+    // unverified interval when the intent is created, and the foreign key
+    // from `tig_write_intent` makes that ordering structural.
+    pool_test_support::seed_workflows(
+        &db.pool_as("pool_controller").await,
+        "testnet",
+        &["w1", "w2", "w3", "author", "rearm", "terminal"],
+    )
+    .await;
     let pool = db.pool_as("pool_controller").await;
     let repo = PostgresIntentRepository::new(pool.clone());
     repo.create(precommit("w1", 1, 0xab)).await.unwrap();
@@ -285,6 +348,15 @@ async fn the_gateway_records_outcomes_but_never_invents_a_write() {
     let Some(db) = TempDb::migrated("gateway").await else {
         return;
     };
+    // The intents below need their owner mapping to exist: §6.1 opens the
+    // unverified interval when the intent is created, and the foreign key
+    // from `tig_write_intent` makes that ordering structural.
+    pool_test_support::seed_workflows(
+        &db.pool_as("pool_controller").await,
+        "testnet",
+        &["w1", "w2", "w3", "author", "rearm", "terminal"],
+    )
+    .await;
     PostgresIntentRepository::new(db.pool_as("pool_controller").await)
         .create(precommit("w1", 1, 0xab))
         .await
@@ -388,6 +460,15 @@ async fn each_transition_guard_is_load_bearing_on_its_own() {
     let Some(db) = TempDb::migrated("guards").await else {
         return;
     };
+    // The intents below need their owner mapping to exist: §6.1 opens the
+    // unverified interval when the intent is created, and the foreign key
+    // from `tig_write_intent` makes that ordering structural.
+    pool_test_support::seed_workflows(
+        &db.pool_as("pool_controller").await,
+        "testnet",
+        &["w1", "w2", "w3", "author", "rearm", "terminal"],
+    )
+    .await;
     let controller = db.pool_as("pool_controller").await;
     let repo = PostgresIntentRepository::new(controller.clone());
 
@@ -461,6 +542,15 @@ async fn a_different_artifact_pointer_is_a_conflict_not_a_silent_discard() {
     let Some(db) = TempDb::migrated("artifact").await else {
         return;
     };
+    // The intents below need their owner mapping to exist: §6.1 opens the
+    // unverified interval when the intent is created, and the foreign key
+    // from `tig_write_intent` makes that ordering structural.
+    pool_test_support::seed_workflows(
+        &db.pool_as("pool_controller").await,
+        "testnet",
+        &["w1", "w2", "w3", "author", "rearm", "terminal"],
+    )
+    .await;
     let repo = PostgresIntentRepository::new(db.pool_as("pool_controller").await);
 
     let mut first = precommit("w1", 1, 0xab);
@@ -491,6 +581,21 @@ async fn networks_do_not_share_a_generation_space() {
     let Some(db) = TempDb::migrated("networks").await else {
         return;
     };
+    // The intents below need their owner mapping to exist: §6.1 opens the
+    // unverified interval when the intent is created, and the foreign key
+    // from `tig_write_intent` makes that ordering structural.
+    pool_test_support::seed_workflows(
+        &db.pool_as("pool_controller").await,
+        "testnet",
+        &["w1", "w2", "w3", "author", "rearm", "terminal"],
+    )
+    .await;
+    pool_test_support::seed_workflows_owned_by_member(
+        &db.pool_as("pool_controller").await,
+        "mainnet",
+        &["w1", "w2", "w3", "author", "rearm", "terminal"],
+    )
+    .await;
     let repo = PostgresIntentRepository::new(db.pool_as("pool_controller").await);
 
     repo.create(precommit("w1", 1, 0xab)).await.unwrap();

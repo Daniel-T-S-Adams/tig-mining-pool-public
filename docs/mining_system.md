@@ -1013,7 +1013,18 @@ member payout records
 
 Implementation must preserve these invariants:
 
-1. One TIG benchmark has exactly one member owner.
+1. One TIG benchmark has exactly one member owner, **except** for pool-owned
+   bootstrap benchmarks created before members exist. Those carry a permanent
+   pool-owned placeholder rather than a member, are confined to `testnet` —
+   `tig_integration.md` §2.1 and slice-1 criterion A2 constrain the network,
+   and the schema refuses a mainnet placeholder outright — and can never be
+   re-owned: the mapping is immutable
+   once written, so a bootstrap benchmark's faults can never be attributed or
+   charged to a member (§8). The carve-out exists because the mapping must be
+   written when a benchmark is created and the registration slice arrives
+   later; without it the invariant would be satisfied only by back-filling an
+   owner nobody chose. Every benchmark created once members exist has exactly
+   one member owner, with no exception.
 2. A member never receives the pool's TIG credentials.
 3. Work starts only from a confirmed precommit and its confirmed selected
    track.

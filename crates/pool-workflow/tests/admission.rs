@@ -236,35 +236,53 @@ async fn the_next_precommit_at_the_limit_is_refused() {
 }
 
 #[tokio::test]
-async fn a_rejected_precommit_stops_occupying_the_limit() {
-    // A rejected write never created a benchmark, so it occupies nothing.
-    // Every other state does: a confirmed precommit IS an unverified
-    // benchmark until TIG verifies it, and slice 1 has no signal that says so.
-    let Some(db) = TempDb::migrated("admit_rejected").await else {
+async fn a_terminal_workflow_stops_occupying_the_limit() {
+    // `mining_system.md` §6.1: a benchmark is unverified "from creation of its
+    // pool precommit intent until TIG records it as verified or it reaches a
+    // terminal stopped, expired, or failed state". The recount reads that
+    // interval, so capacity is released exactly when the interval closes —
+    // not when an intent happens to be rejected, and not never.
+    let Some(db) = TempDb::migrated("admit_terminal_releases").await else {
         return;
     };
     let pool = with_anchor(&db).await;
 
     admit_precommit(&pool, &decision("w1", 1), 2).await.unwrap();
     admit_precommit(&pool, &decision("w2", 1), 2).await.unwrap();
-    assert!(matches!(
-        admit_precommit(&pool, &decision("w3", 1), 2).await,
-        Err(AdmissionError::AtUnverifiedLimit { .. })
-    ));
+    assert!(
+        matches!(
+            admit_precommit(&pool, &decision("w3", 1), 2).await,
+            Err(AdmissionError::AtUnverifiedLimit { .. })
+        ),
+        "both workflows are unverified, so the limit is reached"
+    );
 
-    sqlx::query("UPDATE pool.tig_write_intent SET state = 'REJECTED' WHERE workflow_id = 'w1'")
-        .execute(&pool)
+    // w1 reaches a terminal state; its interval closes and the slot frees.
+    let w1 = pool_workflow::workflow::find(&pool, pool_domain::Network::Testnet, "w1")
         .await
+        .unwrap()
         .unwrap();
+    pool_workflow::workflow::expire(
+        &pool,
+        pool_domain::Network::Testnet,
+        "w1",
+        w1.revision,
+        "deadline passed",
+        // After the anchor height the interval opened at; an interval cannot
+        // close before it opened.
+        100_200,
+    )
+    .await
+    .unwrap();
 
     let admitted = admit_precommit(&pool, &decision("w3", 1), 2).await.unwrap();
-    assert_eq!(admitted.pool_unverified, 1, "only w2 still occupies a slot");
+    assert_eq!(
+        admitted.pool_unverified, 1,
+        "only w2's interval is still open"
+    );
 
-    // A confirmed one still does.
-    sqlx::query("UPDATE pool.tig_write_intent SET state = 'CONFIRMED' WHERE workflow_id = 'w2'")
-        .execute(&pool)
-        .await
-        .unwrap();
+    // And a workflow that is merely *confirmed* still occupies one: a
+    // confirmed precommit is an unverified benchmark until TIG verifies it.
     assert!(matches!(
         admit_precommit(&pool, &decision("w4", 1), 2).await,
         Err(AdmissionError::AtUnverifiedLimit {
@@ -453,6 +471,20 @@ async fn another_network_does_not_occupy_this_one_s_limit() {
     let pool = with_anchor(&db).await;
 
     for n in 1..=3 {
+        // The workflow row too: an intent cannot exist without its owner
+        // mapping, which is the foreign key F6 relies on.
+        // A member-owned row, because §10 invariant 1's bootstrap carve-out is
+        // testnet-only and the schema enforces that. What this test is about
+        // is the network scoping of the count.
+        sqlx::query(
+            "INSERT INTO pool.workflow
+                 (network, workflow_id, owner_kind, owner_id, unverified_from_block)
+             VALUES ('mainnet', $1, 'MEMBER', 'member_1', 1)",
+        )
+        .bind(format!("m{n}"))
+        .execute(&pool)
+        .await
+        .unwrap();
         sqlx::query(
             "INSERT INTO pool.tig_write_intent
                  (network, workflow_id, write_kind, generation, payload_digest)
@@ -685,6 +717,197 @@ async fn a_non_canonical_reserve_never_reaches_the_numeric_cast() {
         );
     }
     assert_eq!(count(&pool, "pool.precommit_decision").await, 0);
+}
+
+#[tokio::test]
+async fn admission_creates_the_workflow_with_its_owner_and_open_interval() {
+    // F6 and `mining_system.md` §6.1. The workflow row is created in the same
+    // transaction as the decision and the intent, with its permanent owner and
+    // with §6.1's unverified interval already open at the decision's anchor
+    // height — "from creation of its pool precommit intent", not from its
+    // confirmation.
+    let Some(db) = TempDb::migrated("admit_workflow").await else {
+        return;
+    };
+    let pool = with_anchor(&db).await;
+    admit_precommit(&pool, &decision("w1", 1), 4).await.unwrap();
+
+    let row = sqlx::query(
+        "SELECT state, owner_kind, owner_id, unverified_from_block, unverified_to_block
+         FROM pool.workflow WHERE network = 'testnet' AND workflow_id = 'w1'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("the admission created the workflow row");
+
+    assert_eq!(row.get::<String, _>("state"), "DECIDED");
+    assert_eq!(row.get::<String, _>("owner_kind"), "POOL_BOOTSTRAP");
+    assert_eq!(row.get::<String, _>("owner_id"), "pool-bootstrap");
+    assert_eq!(
+        row.get::<i64, _>("unverified_from_block"),
+        100_080,
+        "the interval opens at the decision's anchor height, which is where \
+         the precommit intent was created"
+    );
+    assert_eq!(row.get::<Option<i64>, _>("unverified_to_block"), None);
+}
+
+#[tokio::test]
+async fn an_intent_cannot_exist_without_its_owner_mapping() {
+    // F6, made structural. §2 requires the benchmark → owner mapping to be
+    // permanent and §8 charges faults to it, so an intent whose workflow was
+    // never created is a write the pool could make and then be unable to
+    // attribute. The foreign key is what makes the admission's ordering
+    // impossible to skip rather than merely conventional.
+    let Some(db) = TempDb::migrated("admit_orphan_intent").await else {
+        return;
+    };
+    let pool = with_anchor(&db).await;
+
+    let error = sqlx::query(
+        "INSERT INTO pool.tig_write_intent
+             (network, workflow_id, write_kind, generation, payload_digest)
+         VALUES ('testnet', 'never_decided', 'precommit', 1,
+                 decode(repeat('ab', 32), 'hex'))",
+    )
+    .execute(&pool)
+    .await
+    .expect_err("no workflow owns that id");
+    assert!(
+        error
+            .to_string()
+            .contains("tig_write_intent_has_a_workflow"),
+        "unexpected error: {error}"
+    );
+}
+
+#[tokio::test]
+async fn a_workflow_cannot_exist_without_an_open_interval() {
+    // §6.1's interval opens at creation, so there is no such thing as a
+    // workflow that is not yet unverified. A nullable column would let one
+    // exist and §7.6's concurrency counting would skip it.
+    let Some(db) = TempDb::migrated("admit_interval_required").await else {
+        return;
+    };
+    let pool = with_anchor(&db).await;
+
+    let error = sqlx::query(
+        "INSERT INTO pool.workflow (network, workflow_id, owner_kind, owner_id)
+         VALUES ('testnet', 'w9', 'POOL_BOOTSTRAP', 'pool-bootstrap')",
+    )
+    .execute(&pool)
+    .await
+    .expect_err("a workflow is unverified from the moment it exists");
+    assert!(
+        error.to_string().contains("unverified_from_block"),
+        "unexpected error: {error}"
+    );
+}
+
+#[tokio::test]
+async fn a_settled_workflow_cannot_take_a_new_generation() {
+    // §7.3 allows a new generation for a changed payload, but only while the
+    // workflow can still receive the write. Once it is terminal its §6.1
+    // interval is closed and `confirm_precommit` would refuse the
+    // confirmation — so admitting one would have the pool make a TIG write it
+    // could never record.
+    let Some(db) = TempDb::migrated("admit_settled").await else {
+        return;
+    };
+    let pool = with_anchor(&db).await;
+    admit_precommit(&pool, &decision("w1", 1), 4).await.unwrap();
+
+    let w = pool_workflow::workflow::find(&pool, pool_domain::Network::Testnet, "w1")
+        .await
+        .unwrap()
+        .unwrap();
+    pool_workflow::workflow::expire(
+        &pool,
+        pool_domain::Network::Testnet,
+        "w1",
+        w.revision,
+        "deadline passed",
+        100_200,
+    )
+    .await
+    .unwrap();
+
+    let error = admit_precommit(&pool, &decision("w1", 2), 4)
+        .await
+        .expect_err("the workflow is settled");
+    assert!(
+        matches!(error, AdmissionError::WorkflowSettled { ref state, .. } if state == "EXPIRED"),
+        "unexpected error: {error}"
+    );
+    assert_eq!(count(&pool, "pool.precommit_decision").await, 1);
+    assert_eq!(count(&pool, "pool.tig_write_intent").await, 1);
+}
+
+#[tokio::test]
+async fn a_concurrent_confirmation_cannot_be_overtaken_by_a_new_generation() {
+    // The row is read FOR UPDATE. Without that lock this read races a
+    // concurrent `workflow::transition`: under READ COMMITTED the admission
+    // could see DECIDED while the other transaction was committing the move to
+    // PRECOMMIT_CONFIRMED, and admit a second generation for a workflow whose
+    // first had already confirmed at TIG.
+    //
+    // The interleave is forced rather than hoped for: a separate connection
+    // holds the row locked while the admission runs, so the admission must
+    // wait and then read the committed state.
+    let Some(db) = TempDb::migrated("admit_race_confirm").await else {
+        return;
+    };
+    let pool = std::sync::Arc::new(with_anchor(&db).await);
+    admit_precommit(&pool, &decision("w1", 1), 4).await.unwrap();
+
+    let mut holder = sqlx::PgConnection::connect_with(&db.as_role("pool_controller"))
+        .await
+        .unwrap();
+    sqlx::query("BEGIN").execute(&mut holder).await.unwrap();
+    sqlx::query("SELECT 1 FROM pool.workflow WHERE workflow_id = 'w1' FOR UPDATE")
+        .execute(&mut holder)
+        .await
+        .unwrap();
+
+    let admitting = {
+        let pool = std::sync::Arc::clone(&pool);
+        tokio::spawn(async move { admit_precommit(&pool, &decision("w1", 2), 4).await })
+    };
+
+    // While the row is held, the admission cannot have read it.
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert!(
+        !admitting.is_finished(),
+        "the admission read the row unlocked"
+    );
+
+    // Commit the confirmation under the lock, then release.
+    sqlx::query(
+        "UPDATE pool.workflow
+         SET state = 'PRECOMMIT_CONFIRMED', revision = revision + 1,
+             benchmark_id = 'bench_a', confirmed_track_id = 't002',
+             confirmed_settings = '{}'::jsonb, precommit_confirmed_block = 100
+         WHERE workflow_id = 'w1'",
+    )
+    .execute(&mut holder)
+    .await
+    .unwrap();
+    sqlx::query("COMMIT").execute(&mut holder).await.unwrap();
+
+    let error = admitting
+        .await
+        .unwrap()
+        .expect_err("the workflow confirmed while this admission waited");
+    assert!(
+        matches!(error, AdmissionError::WorkflowSettled { ref state, .. }
+                 if state == "PRECOMMIT_CONFIRMED"),
+        "unexpected error: {error}"
+    );
+    assert_eq!(
+        count(&pool, "pool.tig_write_intent").await,
+        1,
+        "no second generation was admitted"
+    );
 }
 
 async fn count(pool: &sqlx::PgPool, table: &str) -> i64 {

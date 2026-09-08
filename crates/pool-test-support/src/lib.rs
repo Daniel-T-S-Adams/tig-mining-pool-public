@@ -36,6 +36,54 @@ pub const PROVISION_ROLES_SQL: &str = include_str!("../../../scripts/provision-d
 /// the others.
 const PROVISION_LOCK: i64 = 0x7069_6f6f_6c5f_726f;
 
+/// Seed the workflow rows an intent needs to exist.
+///
+/// `pool.tig_write_intent` carries a foreign key to `pool.workflow`, because
+/// `mining_system.md` §2 requires the benchmark → owner mapping to exist from
+/// creation and §8 charges faults to it — an intent whose workflow was never
+/// created is a write the pool could make and then be unable to attribute.
+/// Production creates all three rows in one admission transaction; a test that
+/// exercises intents alone seeds the owner mapping with this.
+///
+/// The interval opens at height 1: `mining_system.md` §6.1 counts a benchmark
+/// as unverified from the intent's creation, and these tests do not care where.
+pub async fn seed_workflows(pool: &PgPool, network: &str, workflow_ids: &[&str]) {
+    seed(
+        pool,
+        network,
+        workflow_ids,
+        "POOL_BOOTSTRAP",
+        "pool-bootstrap",
+    )
+    .await;
+}
+
+/// The same, member-owned.
+///
+/// `mining_system.md` §10 invariant 1's bootstrap carve-out is testnet-only and
+/// the schema enforces it, so a mainnet fixture cannot use the placeholder.
+pub async fn seed_workflows_owned_by_member(pool: &PgPool, network: &str, workflow_ids: &[&str]) {
+    seed(pool, network, workflow_ids, "MEMBER", "member_fixture").await;
+}
+
+async fn seed(pool: &PgPool, network: &str, ids: &[&str], kind: &str, owner: &str) {
+    for id in ids {
+        sqlx::query(
+            "INSERT INTO pool.workflow
+                 (network, workflow_id, owner_kind, owner_id, unverified_from_block)
+             VALUES ($1, $2, $3, $4, 1)
+             ON CONFLICT (network, workflow_id) DO NOTHING",
+        )
+        .bind(network)
+        .bind(id)
+        .bind(kind)
+        .bind(owner)
+        .execute(pool)
+        .await
+        .expect("seeding a workflow");
+    }
+}
+
 /// Run dynamically built SQL.
 ///
 /// sqlx 0.9 requires `'static` query strings, so generated statements go

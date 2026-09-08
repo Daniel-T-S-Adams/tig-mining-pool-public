@@ -8,6 +8,7 @@
 pub mod attempt;
 pub mod decision;
 pub mod intent;
+pub mod workflow;
 
 pub use attempt::{
     AttemptError, AttemptOutcome, PostgresAttemptLedger, WriteAttempt, WriteAttemptLedger,
@@ -19,4 +20,8 @@ pub use decision::{
 pub use intent::{
     IntentError, IntentState, NewIntent, PostgresIntentRepository, TigWriteIntentRepository,
     WriteIntent, WriteKind,
+};
+pub use workflow::{
+    ConfirmedBenchmark, ConfirmedFraud, ConfirmedPrecommit, ConfirmedProof, Owner,
+    POOL_BOOTSTRAP_OWNER, Submitted, Workflow, WorkflowError, WorkflowState,
 };

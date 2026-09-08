@@ -143,6 +143,17 @@ pub enum AdmissionError {
     },
     #[error("internal_pool_unverified_limit must be at least 1, found {0}")]
     LimitNotPositive(i64),
+    /// The workflow already exists and has moved past `DECIDED`.
+    ///
+    /// §7.3 forbids a new generation once an earlier attempt may have reached
+    /// TIG unless reconciliation proves it safe, and that reconciliation is
+    /// E4's and D3's rather than this transaction's.
+    #[error("{network} workflow {workflow_id} is {state}; it cannot take a new write")]
+    WorkflowSettled {
+        network: Network,
+        workflow_id: String,
+        state: String,
+    },
     /// The anchor is not the newest usable persisted snapshot (D2e).
     ///
     /// §6.3's draw is fixed by the anchor block, so free choice of anchor
@@ -280,6 +291,76 @@ pub async fn admit_precommit(
         .as_ref()
         .map(|tie| serde_json::Value::from(tie.candidates.clone()));
     let tie_winner = decision.draw.tie.as_ref().map(|tie| tie.winner.clone());
+
+    // F6: the workflow row, with its permanent owner and §6.1's unverified
+    // interval already open, is created **here** — inside the same transaction
+    // as the decision and the intent (`architecture.md` §7.2).
+    //
+    // §6.1 counts a benchmark as unverified "from creation of its pool
+    // precommit intent", so the interval opens at the decision's anchor
+    // height. Creating the workflow afterwards, or in a later transaction,
+    // would leave an intent whose owner mapping did not yet exist — a write
+    // the pool could make and then be unable to attribute. The foreign key
+    // from `tig_write_intent` makes that ordering impossible to skip.
+    // FOR UPDATE, and it matters. Without the lock this read races a
+    // concurrent `workflow::transition` on the same row: under READ COMMITTED
+    // this transaction can see DECIDED while another is committing the move to
+    // PRECOMMIT_CONFIRMED, and then admit a second generation for a workflow
+    // whose first generation has already confirmed at TIG — two live
+    // generations for one benchmark, which is precisely what the check below
+    // exists to prevent.
+    let existing_state: Option<String> = sqlx::query_scalar(
+        "SELECT state FROM pool.workflow
+         WHERE network = $1 AND workflow_id = $2
+         FOR UPDATE",
+    )
+    .bind(decision.network.as_str())
+    .bind(&decision.workflow_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(unavailable)?;
+
+    match existing_state.as_deref() {
+        None => {
+            sqlx::query(
+                "INSERT INTO pool.workflow
+                     (workflow_id, network, owner_kind, owner_id, unverified_from_block)
+                 VALUES ($1, $2, 'POOL_BOOTSTRAP', $3, $4)",
+            )
+            .bind(&decision.workflow_id)
+            .bind(decision.network.as_str())
+            .bind(crate::workflow::POOL_BOOTSTRAP_OWNER)
+            .bind(decision.anchor.height)
+            .execute(&mut *tx)
+            .await
+            .map_err(unavailable)?;
+        }
+        // §7.3 allows a new generation for a changed payload, but only while
+        // the workflow can still receive the write. A workflow that has
+        // reached a terminal state has a closed §6.1 interval and no
+        // lifecycle path left: `confirm_precommit` would refuse the
+        // confirmation, so the pool would have made a TIG write it could
+        // never record.
+        // §7.3 forbids a new generation once an earlier attempt may have
+        // reached TIG, unless reconciliation proves it safe. Past DECIDED the
+        // earlier precommit was at least sent, and from PRECOMMIT_CONFIRMED it
+        // demonstrably landed — `confirm_precommit` would then refuse the new
+        // generation's confirmation, leaving a TIG write the pool could never
+        // record. That reconciliation is E4's and D3's; until it lands, only a
+        // workflow that has sent nothing may take another generation.
+        // A workflow still at DECIDED has sent nothing, so §7.3's new
+        // generation is safe.
+        Some(state)
+            if crate::workflow::WorkflowState::parse_state(state)
+                == Some(crate::workflow::WorkflowState::Decided) => {}
+        Some(state) => {
+            return Err(AdmissionError::WorkflowSettled {
+                network: decision.network,
+                workflow_id: decision.workflow_id.clone(),
+                state: state.to_string(),
+            });
+        }
+    }
 
     let decision_row = sqlx::query(
         "INSERT INTO pool.precommit_decision
@@ -421,31 +502,27 @@ async fn require_newest_anchor(
 
 /// The authoritative recount of unverified workflows.
 ///
-/// Counted from the precommit intents themselves, inside the lease, because
-/// §7.6 forbids a cached metric authorizing work.
+/// Counted from `pool.workflow`'s open unverified intervals, inside the lease,
+/// because §7.6 forbids a cached metric authorizing work.
 ///
-/// **What counts, in slice 1.** A workflow is unverified when it holds a
-/// precommit intent that is not `REJECTED`. A rejected precommit never
-/// created a benchmark and occupies nothing. Every other state may correspond
-/// to a live unverified benchmark — `PREPARED` and `OUTCOME_UNKNOWN` because
-/// the write may yet land, `CONFIRMED` because a confirmed precommit *is* an
-/// unverified benchmark until TIG verifies it.
-///
-/// Slice 1 has no verification signal to retire a `CONFIRMED` row, so the
-/// count only grows. That direction is deliberate: over-counting refuses work
-/// the pool could have taken, while under-counting exceeds the limit
-/// `mining_system.md` §10 invariant 23 forbids exceeding. The state machine
-/// (criterion F) introduces the benchmark lifecycle this query will read
-/// instead, and replacing this query does not reshape the transaction around
-/// it — which is the requirement D2b states for the other deferred half.
+/// `mining_system.md` §6.1 defines the interval and both its ends: a benchmark
+/// is unverified "from creation of its pool precommit intent until TIG records
+/// it as verified or it reaches a terminal stopped, expired, or failed state".
+/// An open interval — `unverified_to_block IS NULL` — is exactly that
+/// condition, which is why the count reads the interval rather than inferring
+/// one from intent states. Inferring it was the earlier implementation and it
+/// was wrong in the safe direction: a workflow that had reached a terminal
+/// state went on consuming capacity forever, because a `CONFIRMED` intent
+/// never stops being confirmed.
 async fn count_unverified(
     tx: &mut sqlx::PgConnection,
     network: Network,
 ) -> Result<i64, AdmissionError> {
     let row = sqlx::query(
-        "SELECT count(DISTINCT workflow_id) AS unverified
-         FROM pool.tig_write_intent
-         WHERE network = $1 AND write_kind = 'precommit' AND state <> 'REJECTED'",
+        "SELECT count(*) AS unverified
+         FROM pool.workflow
+         WHERE network = $1
+           AND unverified_to_block IS NULL",
     )
     .bind(network.as_str())
     .fetch_one(&mut *tx)

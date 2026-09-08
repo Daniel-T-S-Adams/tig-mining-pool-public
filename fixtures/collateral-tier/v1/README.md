@@ -59,6 +59,16 @@ computed with integer math only; no value passed through a float.
 Checked against `docs/mining_system.md` §11 ("Decisions intentionally left
 open"):
 
+0. **Account names and `pending_returns` are superseded by ADR 0008 and await
+   a `v2`.** These cases use `LIABILITY:MEMBER_SECURITY_DEPOSIT` and a
+   `pending_returns` term. ADR 0008 merged deposits and settled earnings into
+   one `LIABILITY:MEMBER_BALANCE` backed by one `ASSET:TIG_MEMBER_CUSTODY`,
+   and `accounting.md` §11.4 now deducts *recorded withdrawal requests* from a
+   *matured* balance. The admission arithmetic
+   these cases assert is unchanged — the same subtraction under new names — so
+   they remain valid as tests of the formula and invalid as a source of
+   account names. `v1` is immutable; the rename goes in a `v2` (issue #31).
+
 1. **Numerical `J[k]` and `X`** are explicitly open ("required before full
    product implementation", mining_system.md §11). The values here are fixture
    inventions; implementation tests must treat them as versioned policy inputs,

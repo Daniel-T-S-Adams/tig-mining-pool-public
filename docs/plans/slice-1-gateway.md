@@ -230,8 +230,9 @@ so the address above is what slice-1 configuration must name.
   `X` policy version, and the resulting maximum across proposed tracks
   (`accounting.md` §11.4) — and posts **no accounting batch**. The
   `eligible_collateral[m] - reserved_exposure[m] >= precommit_reserve`
-  admission check is member-scoped against a finalized security-deposit
-  liability, which slice 1 has no members, tiers, or deposits to supply; it
+  admission check is `accounting.md` §11.4's `eligible_collateral[m]` over a
+  matured `LIABILITY:MEMBER_BALANCE`, which slice 1 has no members, tiers, or
+  deposits to supply; it
   lands with the deposits slice (checklist §10 step 8) and must slot into
   this transaction without reshaping it. Recording inputs without a posting
   keeps slice 1 clear of the balanced-batch rules in `accounting.md` §8–§10.

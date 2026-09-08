@@ -125,10 +125,16 @@ The arrows distinguish three kinds of flow:
 
 ### 2.2 TIG credential and signing boundary
 
-The TIG account signing key is used only for manual API-key provisioning or
-rotation and is not present in any v0 runtime process. On testnet, the dedicated
-operator-controlled browser wallet may sign TIG's ownership proof through the
-official operator UI, following `tig_integration.md` section 4. The browser and
+The TIG account signing key is used only for manual operations — API-key
+provisioning or rotation, and `accounting.md` §8.3a's per-round sweep of a
+settled round out of the reward wallet — and is not present in any v0 runtime
+process. The sweeps are infrequent by construction: TIG's payment delay is
+weeks, so they are two operator-signed transfers per paid round — one to
+member custody, one to operating custody — never a hot path.
+
+On testnet, the dedicated operator-controlled browser wallet may sign TIG's
+ownership proof through the official operator UI, following
+`tig_integration.md` section 4. The browser and
 wallet extension remain part of the operator workstation, not the pool runtime.
 This testnet-only exception carries no production authority. A production or
 mainnet signing key remains offline or hardware-/managed-key protected and
@@ -159,8 +165,8 @@ the secret.
 | **Artifact Worker / Proof Builder** | Bounded package parsing; structural checks; accepted-object publication; canonical commitment payload construction; sampled proof construction; artifact checksum checks before use; derived payload publication; physical deletion and deletion result | Semantic solution correctness; TIG submissions; orchestration policy; member trust decisions; releasing work before durable publication |
 | **Artifact Store** | Quarantine bytes and one immutable authoritative accepted package per benchmark; derived commitment/proof payloads; provider integrity metadata | Workflow authority; member ownership; lifecycle decisions; accounting facts |
 | **Workflow Database** | Compact authoritative workflow, idempotency, snapshot, ownership, artifact-reference, job, intent, attempt, lease, audit, and ledger facts | Large packages, raw per-nonce solution bodies, or an unbounded copy of TIG responses |
-| **Accounting Ledger** | Append-only per-block attribution; balanced credit, round-payment, deposit, slash, and payout batches under `accounting.md`; immutable corrections; reconciliation status | TIG reward calculation; orchestration; possession of custody or payout signing keys |
-| **Funds Gateway** | Separate payout- and security-custody signer identities; allow-listed Base/TIG transfer simulation, signing, broadcast attempts, and ambiguous-result reconciliation for immutable approved intents | Mining decisions; payout calculation; deposit/slash policy; creating or editing intents; ledger posting |
+| **Accounting Ledger** | Append-only per-block attribution; balanced credit, round-settlement, deposit, slash, withdrawal, and custody-sweep batches under `accounting.md`; immutable corrections; reconciliation status | TIG reward calculation; orchestration; possession of custody or payout signing keys |
+| **Funds Gateway** | Separate member-custody and operating signer identities; allow-listed Base/TIG transfer simulation, signing, broadcast attempts, and ambiguous-result reconciliation for immutable approved intents | Mining decisions; withdrawal calculation; deposit/slash policy; creating or editing intents; ledger posting; the reward wallet's protocol identity key |
 | **Monitoring / Operator Tools** | Health visibility, alerts, read-only inspection, and audited commands with actor, reason, and idempotency key | Direct table edits; secret display; unrecorded retries or payout changes |
 
 The controller remains logically accountable for completing proofs: it observes
@@ -212,8 +218,8 @@ No network RPC is introduced merely to separate code. A broker is added only
 if measured PostgreSQL queue contention or fan-out requires it.
 
 `funds-gateway` is not part of the no-public-funds protocol spike. It is added
-as a private, separately deployed process before accepting security deposits or
-making mainnet round payouts. Its payout and security-custody instances use
+as a private, separately deployed process before accepting member deposits or
+making mainnet withdrawals. Its member-custody and operating instances use
 different keys, policies, and custody addresses even if they share code.
 
 ## 5. Benchmark and payout flows
@@ -294,23 +300,41 @@ different keys, policies, and custody addresses even if they share code.
 5. A later correction is a new reversing or adjusting batch; historical entries
    are never updated in place.
 
-### 5.5 Round settlement and automatic payout
+### 5.5 Round settlement and member withdrawal
 
-1. Controller reconciles every block allocation to TIG's closed round and waits
-   for the exact delayed TIG payment to be finalized in payout custody.
-2. The accounting projector posts the settlement and creates each eligible
-   round-member payout liability and immutable transfer intent atomically.
-3. Funds Gateway claims an approved intent, checks chain/token/destination/
+Settlement and withdrawal are separate flows under ADR 0008: a round settles
+into balances automatically, and a transfer happens only when a member asks.
+
+1. Controller reconciles every block allocation to TIG's closed round, waits
+   for the exact delayed TIG payment to be finalized in the reward wallet, and
+   creates that round's two `(network, round, leg)` sweep intents
+   (`accounting.md` §8.3a — one per destination address, since an ERC-20
+   transfer has one recipient). It signs neither: the reward-wallet key is the
+   protocol identity of §2.2, an operator signs each transfer manually, and
+   the controller posts each completion from its own finalized event. An
+   ambiguous broadcast is reconciled by signer nonce, transaction, receipt and
+   exact token event before any re-signing, exactly as for a Funds Gateway
+   transfer — the intent key bounds the ledger, not the chain.
+2. The accounting projector posts the settlement, crediting each eligible
+   member's single balance. No transfer intent is created.
+3. On a member withdrawal request, the projector checks the amount against the
+   member's unencumbered balance and creates one immutable withdrawal intent
+   atomically with the liability move.
+4. Funds Gateway claims an approved intent, checks chain/token/destination/
    amount and signer limits, and records the signed transaction hash and nonce
    before broadcast.
-4. Ambiguous sends are reconciled by signer nonce, transaction, receipt, and
+5. Ambiguous sends are reconciled by signer nonce, transaction, receipt, and
    exact token event; a retry cannot create another transfer.
-5. Controller posts payout completion only from the finalized exact event. A
-   held member does not block other members and remains a round liability.
+6. Controller posts completion only from the finalized exact event. A held
+   member does not block other members and keeps their balance.
 
-The exact token unit, fee, rounding, finality, suspense, corrections, deposits,
-and automatic round-payout rules are defined in [accounting.md](accounting.md).
-This architecture fixes their append-only and idempotent posting boundary.
+§8.6's sweep of pool value out of member custody follows the same intent,
+signing and confirmation path, with its destination allow-listed to operating
+custody.
+
+The exact token unit, fee, rounding, finality, suspense, corrections, balance,
+and withdrawal rules are defined in [accounting.md](accounting.md). This
+architecture fixes their append-only and idempotent posting boundary.
 
 ## 6. State-change ownership
 
@@ -349,8 +373,11 @@ transition.
 | Append an accounting batch/correction | Controller accounting projector | Network/block/policy version or correction ID |
 | Recognize a custody deposit or TIG round settlement | Controller accounting projector | Chain ID, transaction hash, log index, exact token/address, and finalized block |
 | Freeze/finalize a security-deposit slash | Controller accounting projector | Policy version, member-fault evidence, appeal state, and approved command ID |
-| Create a round-payout or deposit-return intent | Controller accounting projector | Network/round/member or deposit-return generation and immutable amount/destination |
-| Sign/broadcast a funds transfer | Funds Gateway | Approved intent ID, allow-listed call, signer nonce, and signed transaction hash |
+| Record a member withdrawal request | Pool API account system | Member ID, request ID, canonical request hash, and reauthentication evidence |
+| Advance, reduce, or cancel a recorded withdrawal request | Controller accounting projector | Request ID plus request revision; the same transaction that posts `accounting.md` §8.5's batch or §10's correction |
+| Create a member withdrawal or custody-sweep intent | Controller accounting projector | Network/member/withdrawal generation for a withdrawal; network/round/leg for a reward-wallet sweep; and for an operating sweep, `accounting.md` §8.6's cause identifier — tier activation, `X` charge decision, finalized slash, suspense resolution, or correction ID — plus an immutable amount/destination in every case |
+| Sign/broadcast a funds transfer from member or operating custody | Funds Gateway | Approved intent ID, allow-listed call, signer nonce, and signed transaction hash |
+| Sign/broadcast a reward-wallet sweep leg | Operator, manually, with the offline reward-wallet key | Approved `(network, round, leg)` intent ID and the signed transaction hash |
 | Confirm a funds transfer and post completion | Controller accounting projector | Finalized receipt plus exact token Transfer event |
 | Decide artifact retention eligibility | Controller reconciler | Confirmed active/terminal evidence and no pending dependency |
 | Physically delete an artifact | Artifact Worker | Deletion job ID, artifact version, and recorded result |
@@ -625,7 +652,7 @@ secret-manager-backed files:
 | Secret/capability | Available to |
 |---|---|
 | Member Ed25519 private key | Member Agent only |
-| TIG account signing key | Manual provisioning only: dedicated operator browser wallet on testnet; offline or hardware-/managed-key protected in production |
+| TIG account signing key (reward wallet) | Manual operations only — API-key provisioning/rotation and `accounting.md` §8.3a's per-round reward-wallet sweep: dedicated operator browser wallet on testnet; offline or hardware-/managed-key protected in production. Never in a runtime process, including Funds Gateway |
 | TIG API key | TIG Gateway only |
 | API database credential | Pool API only, API role |
 | Controller database credential | Controller only, controller role |
@@ -812,8 +839,15 @@ what prevent silent duplication.
    auditable result.
 7. No long database transaction spans network or bulk artifact work.
 8. A lease claimant that has lost its fence cannot commit a late result.
-9. TIG payout custody and slashable security-deposit custody never share an
-   address, signing key, ledger asset, or transfer intent.
+9. Member TIG, pool operating funds, and the pool's TIG protocol identity
+   never share a custody address or signing key. Member value is one pot
+   (ADR 0008), so a member's TIG does not move when its collateral status
+   changes; the only transfers out of it are a member withdrawal to that
+   member's verified address and `accounting.md` §8.6's sweep of pool value to
+   the one allow-listed operating-custody address. The reward wallet's key —
+   the protocol identity of §2.2 — signs no transfer to a member or to any
+   address other than member and operating custody, and is held by no runtime
+   process.
 10. Funds Gateway can execute an immutable approved intent but cannot decide
     who is paid, how much is paid, or whether a member is slashed.
 11. One accepted package object is authoritative for a benchmark; all database

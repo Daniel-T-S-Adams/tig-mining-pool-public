@@ -154,16 +154,37 @@ protection, multi-person recovery, and a tested rotation/runbook.
 
 Before public deposits or payouts, the private Funds Gateway described in
 [architecture.md](architecture.md) uses two different signer identities and
-custody addresses: one for TIG-funded round payouts and one for slashable member
-security deposits and their returns. Neither key is available to the Pool API,
+custody addresses: one holding all member value (`accounting.md` §11.7) and one
+holding the pool's own operating funds. Neither is the reward wallet, whose key
+is the pool's TIG protocol identity and signs no member transfer (§2.2 of
+[architecture.md](architecture.md)). Neither key is available to the Pool API,
 controller, TIG Gateway, database, CI, member software, or operator CLI.
 
 The signer receives only immutable approved intents, allow-lists the Base chain
 and TIG token contract, enforces transaction/rolling/hot-balance limits, and
 records the nonce and signed transaction hash before broadcast. The
-security-deposit signer additionally requires the approved return/slash policy
-state and multi-person authorization. It cannot create an intent, change a
-destination or amount, decide a slash, or convert escrow into payout liquidity.
+member-custody signer additionally requires the approved policy state for the
+transfer's cause and **unconditional multi-person authorization** — every
+transfer, at any amount, with no threshold. This section owns that rule;
+`accounting.md` §12.4 points here rather than restating it, and thresholds
+there govern operating custody only.
+
+That control guarded every collateral movement before ADR 0008
+merged the pots, and merging them widened what one signature reaches rather
+than narrowing it, so relaxing it here would weaken a check while the reason
+to keep it grew.
+
+It signs exactly two transfer kinds: a member withdrawal to that member's
+verified address, and `accounting.md` §8.6's sweep of pool value to the one
+allow-listed operating-custody address. A finalized slash is a ledger
+batch rather than a signed transfer — it reclassifies a liability to equity,
+and only §8.6's sweep moves its tokens. The signer cannot create an intent,
+change a destination or amount, or decide a slash.
+
+One pot means this key's compromise reaches every member's balance at once;
+`accounting.md` §11.7 records that cost and ADR 0008 records the decision. The
+allow-list is what bounds it: the only non-member destination it can reach is
+the pool's own operating custody.
 Production custody and recovery use an approved hardware/managed or multisig
 design and remain a public-launch gate; no such key enters the protocol spike.
 
@@ -203,8 +224,8 @@ request the API:
 5. returns the same non-enumerating denial for absent and cross-worker objects.
 
 Account and operator credentials are separate from worker credentials. A
-worker key cannot change account recovery, link a payout wallet, alter an
-automatic payout, or invoke an operator endpoint. Operator access cannot
+worker key cannot change account recovery, link a payout wallet, request or
+alter a withdrawal, or invoke an operator endpoint. Operator access cannot
 impersonate a worker request; recovery is an explicit audited action.
 
 ### 4.3 Request abuse controls
@@ -483,9 +504,10 @@ At minimum, audit these events:
 - terminal outcome and `MEMBER`/`POOL`/`TIG`/`UNRESOLVED` fault attribution,
   including any later correction;
 - qualifier attribution and accounting batch/correction identifiers;
-- security-deposit recognition, freeze, appeal, finalized slash, and return;
-- round settlement, automatic payout intent, signing attempt, ambiguous result,
-  finalized transfer, and emergency payout hold;
+- deposit recognition, freeze, appeal, finalized slash, and withdrawal;
+- round settlement, withdrawal request, withdrawal or custody-sweep intent,
+  signing attempt, ambiguous result, finalized transfer, and emergency
+  withdrawal hold;
 - configuration or fee-policy activation;
 - operator command request, approval, application, rejection, and emergency
   write disable/enable; and
@@ -522,9 +544,13 @@ produce the fail-closed states and alerts specified in the architecture.
 1. A testnet process never receives a production credential or mainnet-enabled
    configuration.
 2. The TIG signing key never enters a pool runtime, repository, CI system, log,
-   or agent session. Only the manual testnet provisioning exception in
-   `architecture.md` section 2.2 may use an operator browser wallet; production
-   signing remains offline or hardware-/managed-key protected. Only the TIG
+   or agent session. It has exactly two manual uses, both in
+   `architecture.md` section 2.2: API-key provisioning or rotation, and
+   `accounting.md` §8.3a's per-round reward-wallet sweep. On testnet an
+   operator browser wallet may perform both — ADR 0008 records the judgement
+   that the value a sweep moves there is testnet TIG only, which keeps it
+   inside ADR 0007's bound. Production signing remains offline or
+   hardware-/managed-key protected for both uses. Only the TIG
    Gateway receives the testnet API key, and only a separately deployed Funds
    Gateway can receive a production custody signer.
 3. A worker credential authorizes exactly one stored worker and its descendant

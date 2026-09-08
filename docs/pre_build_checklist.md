@@ -257,6 +257,9 @@ Outputs: [security.md](security.md), [accounting.md](accounting.md), and
   ledger entries.
 - [x] Define delegated TIG and slashable security-deposit recognition and
   custody separately from earned balances.
+  — **Superseded by ADR 0008.** Delegated TIG stays separate and non-custodial,
+  but deposits and earned balances are now one member balance in one member
+  custody address; `accounting.md` §11.7 is the current rule.
 - [x] Settle the dynamic bundle-scaled method reserve and separate per-failure
   reserve shape, fault-attribution/appeal boundary, and collateral return
   rule.
@@ -272,6 +275,9 @@ Outputs: [security.md](security.md), [accounting.md](accounting.md), and
   charge `X`, and internal-limit recovery headroom.
 - [x] Define when credits are automatically paid, whether a minimum applies,
   and the payout cadence.
+  — **Superseded by ADR 0008.** Settlement into a member's balance stays
+  automatic; paying *out* is member-initiated, with no minimum and no cadence
+  (`accounting.md` §12.1).
 - [x] Confirm payout-address-change protection and who pays Base gas; payout
   authorization, replay protection, limits, and operator
   recovery.
@@ -343,7 +349,9 @@ credentials.
 - [x] Create payout cases covering several members, zero qualifiers, fee
   subtraction, rounding, dust, delayed TIG settlement, and automatic round
   transfers.
-  — PR #18 (`payouts.json`)
+  — PR #18 (`payouts.json`). ADR 0008 replaced automatic round transfers with
+  member-initiated withdrawal from one balance, so cases 9 and 10 need a `v2`;
+  the residual is recorded in the fixture's own README and on issue #31.
 - [x] Record the expected output for every fixture independently of the future
   implementation.
   — every set carries expected values and a README recording derivation and
@@ -528,14 +536,14 @@ public pool handling deposits, earned balances, or payouts.
   boundary.
 - [ ] Complete backup and disaster-recovery procedures for workflow and ledger
   data.
-- [ ] Complete payout and deposit-return controls, reconciliation, alerting,
-  and an emergency pause procedure.
+- [ ] Complete withdrawal and custody-sweep controls, reconciliation,
+  alerting, and an emergency pause procedure.
 - [ ] Test restoration and replay from a database backup plus confirmed TIG
   state.
 - [ ] Load-test member APIs and artifact storage at or above the intended launch
   capacity.
 - [ ] Conduct security review of authentication, uploads, signing, ledger, and
-  payouts/deposit returns.
+  member withdrawals.
 - [ ] Obtain jurisdiction-specific legal and tax guidance for operating the
   pool, accepting deposits, charging fees, and paying members.
 - [ ] Publish member terms covering rewards, failures, deposits, fees,
@@ -556,7 +564,7 @@ Once sections 1-7 are complete, build the product in this order:
 5. Persistent reconciliation, operator tooling, and monitoring.
 6. Per-block qualifier attribution and accounting ledger.
 7. Member registration, aliases, authentication, and dashboard.
-8. Deposits, earned balances, automatic round payouts, and reconciliation.
+8. Deposits, the single member balance, withdrawals, and reconciliation.
 9. Public documentation and website.
 10. Discord community and launch operations.
 

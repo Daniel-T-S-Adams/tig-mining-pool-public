@@ -8,9 +8,10 @@ covers member-owned benchmarks, orchestration, proof-material handoff, TIG
 submissions, raw-factor balancing, qualifier attribution, pool payouts,
 participant failure tracking, and artifact retention.
 
-The pool website, account registration, automatic round payouts, deployment
-topology, and Discord community are separate designs. They must use the mining
-and payout facts produced by this system rather than redefining them.
+The pool website, account registration, member balances and withdrawals,
+deployment topology, and Discord community are separate designs. They must use
+the mining and payout facts produced by this system rather than redefining
+them.
 
 ## 1. Goals
 
@@ -181,8 +182,8 @@ Consequences of this policy:
 If TIG reports pool proceeds but `total_q[b]` is zero, the system must not
 invent an allocation. It records the proceeds in a suspense state and raises
 an operator alert. [accounting.md](accounting.md) specifies exact token
-rounding, dust handling, the pool fee, delayed TIG settlement, and automatic
-per-round member payouts.
+rounding, dust handling, the pool fee, delayed TIG settlement, and the single
+member balance a round settles into (ADR 0008).
 
 ## 4. End-to-end benchmark flow
 
@@ -1093,6 +1094,12 @@ settled in [architecture.md](architecture.md).
   `internal_pool_unverified_limit`/recovery headroom, all as versioned policy;
 - review the technical package deadline and global capacity headroom using
   spike measurements without replacing the settled tier rule;
+- a **trust-label mechanism**, deferred with its direction confirmed: a member
+  the pool trusts could be allowed more concurrent bundles than their
+  collateral alone permits. §8's flat-tier rule stands until it is designed —
+  a tier does not bypass collateral, and nothing may raise an admission limit
+  above §6.1's formula until this decision lands. `accounting.md` §14 records
+  the same item from the accounting side;
 - use spike measurements to decide the mandatory pool-side solution-verification
   and hidden method-reexecution checks before benchmark commitment;
 - account, alias, login, account-level recovery proof, and enrollment-ticket

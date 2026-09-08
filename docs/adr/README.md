@@ -11,3 +11,4 @@ status is authoritative for implementation; the mining rules remain in
 - [ADR 0005: Block-derived challenge-tie draw](0005-challenge-tie-derivation.md)
 - [ADR 0006: Allocating the TIG read budget across reader processes](0006-tig-read-budget-allocation.md)
 - [ADR 0007: Dedicated browser wallet for testnet API-key provisioning](0007-testnet-browser-wallet.md)
+- [ADR 0008: One member balance for earnings, collateral, and withdrawal](0008-single-member-balance.md)

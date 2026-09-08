@@ -1,11 +1,11 @@
 # TIG mining pool: accounting and payout contract
 
 Status: technical contract and v0 tier economics settled; numerical policy values pending  
-Last updated: 2026-07-31
+Last updated: 2026-09-06
 
 This document defines how confirmed TIG proceeds become internal member
 credits, how exact integer allocation and corrections work, and the boundary
-between earned balances, deposits, custody, and automatic round payouts. It
+between the single member balance, custody, and withdrawal. It
 implements the payout rule in [mining_system.md](mining_system.md) and the
 transaction boundary in [architecture.md](architecture.md).
 
@@ -24,8 +24,9 @@ This contract covers:
 - zero-qualifier suspense;
 - TIG block posting and round reconciliation;
 - append-only double-entry batches and corrections;
-- separation of earned balances, deposits, and custody; and
-- automatic per-round payout authorization, signing, replay protection, and
+- one member balance holding deposits and settled earnings, and the custody
+  that backs each part of it; and
+- member-initiated withdrawal authorization, signing, replay protection, and
   confirmation.
 
 It does not make TIG's reward calculation, change qualifier attribution, treat
@@ -136,9 +137,12 @@ The containing round then moves through:
 ROUND_RECONCILED
     -> TIG_PAYMENT_PENDING
     -> ASSETS_SETTLED
-    -> PAYING
-    -> PAID
 ```
+
+The ladder ends there. Under ADR 0008 a round is never *paid*: settlement
+credits member balances and starts no transfer, and withdrawal is per member
+and per request, decoupled from any round. A round-level `PAYING` or `PAID`
+would be a state nothing enters and nothing leaves.
 
 Rules:
 
@@ -158,11 +162,16 @@ Rules:
 7. Credits remain `earned_pending` while the pool waits for TIG's delayed
    payment for that round. A protocol reward entry or claimable amount is a
    receivable, not spendable custody.
-8. `ASSETS_SETTLED` requires exact reconciled TIG for the round to be available
-   in the pool's finalized payout custody. A wall-clock estimate, including the
-   expected several-week delay, is never settlement evidence.
-9. Settlement automatically starts that round's member payout; members do not
-   request withdrawals or choose an amount.
+8. `ASSETS_SETTLED` requires that round's member share and unresolved suspense
+   to be available in the pool's finalized member custody — §8.3a's member leg
+   complete from its own finalized token event. The round's pool fee goes to
+   operating custody on the other leg and gates nothing here.
+
+   A wall-clock estimate, including the expected several-week delay, is never
+   settlement evidence.
+9. Settlement credits each eligible positive member amount to that member's
+   single balance (§11.7). It does not start an outbound transfer: withdrawal
+   is member-initiated under §12, for unencumbered balance only.
 
 The two-descendant rule is for internal TIG history. On-chain Base receipt
 finality is separately defined in section 12.
@@ -295,22 +304,42 @@ all line amounts > 0
 Minimum account classes are:
 
 ```text
-ASSET:TIG_REWARD_RECEIVABLE
-ASSET:TIG_PAYOUT_CUSTODY
-ASSET:SECURITY_DEPOSIT_CUSTODY
-ASSET:TIG_OPERATING_CUSTODY
+ASSET:TIG_REWARD_RECEIVABLE                    the claim on TIG
+ASSET:TIG_REWARD_WALLET                        the benchmarker wallet
+ASSET:TIG_MEMBER_CUSTODY                       the one member pot
+ASSET:TIG_OPERATING_CUSTODY                    pool funds
 LIABILITY:MEMBER_EARNED_PENDING:<round>:<member_id>
-LIABILITY:ROUND_PAYOUT_PENDING:<round>:<member_id>
+LIABILITY:MEMBER_BALANCE:<member_id>           deposits and settled earnings
+LIABILITY:MEMBER_WITHDRAWAL_PENDING:<member_id>:<generation>
 LIABILITY:PAYOUT_SUSPENSE:<block_id>
-LIABILITY:MEMBER_SECURITY_DEPOSIT:<member_id>
 REVENUE:POOL_FEE
 REVENUE:TIER_JOINING_FEES
+REVENUE:FAILURE_CHARGES                        §11.6's chargeable `X`
 EQUITY:SECURITY_LOSS_RESERVE               finalized slashes; restricted use
 EXPENSE:ACCOUNTING_LOSS                    explicit approved correction only
 ```
 
-Payout, security-deposit, and operating custody are different addresses or
-contract vaults and different ledger assets. None silently backs another.
+Three addresses with three roles, and three ledger assets. None silently backs
+another.
+
+- **The reward wallet** is the pool's TIG benchmarker identity. TIG mints the
+  pool's round rewards to it, and it holds nothing else: §8.3a sweeps each
+  settled round out of it. Its key is the pool's protocol identity
+  (`architecture.md` §2.2): it signs no transfer to a member and to no address
+  other than member and operating custody, an operator signs §8.3a's sweep
+  manually, and no runtime process holds it.
+- **Member custody** is the single pot ADR 0008 decided on. Every member's
+  deposits and settled earnings are here, whether they are collateral,
+  withdrawable, or frozen — the ledger says which, and the tokens do not move
+  when the answer changes.
+- **Operating custody** holds the pool's own money: the fee, tier fees, and
+  the security loss reserve's realized value.
+
+`MEMBER_BALANCE` is one liability per member: deposits under §11.2 and settled
+earnings under §8.4 are the same balance. Encumbrance is a computed property of
+it, defined once in §11.7 — three terms, not two — and not a second account, so
+no batch can move value between "collateral" and "earnings" because there is
+nowhere to move it to, and no *transfer* corresponds to the distinction either.
 
 ### 8.1 Ordinary attributed block
 
@@ -330,10 +359,10 @@ Credit  LIABILITY:PAYOUT_SUSPENSE:<block>           pool_proceeds
 ### 8.3 Protocol asset settlement
 
 When the TIG payment attributable to a reconciled round is finalized in the
-pool payout-custody address:
+pool's reward wallet — the benchmarker identity TIG mints to:
 
 ```text
-Debit   ASSET:TIG_PAYOUT_CUSTODY
+Debit   ASSET:TIG_REWARD_WALLET
 Credit  ASSET:TIG_REWARD_RECEIVABLE
 ```
 
@@ -343,21 +372,151 @@ custody address are stored as evidence. If TIG pays multiple rounds in one
 transfer, the cumulative payment must reconcile exactly before the oldest fully
 funded round advances; funds are never assigned by a guess.
 
-### 8.4 Funding an automatic round payout
+### 8.3a Sweeping a settled round out of the reward wallet
+
+The reward wallet is a collection point, not custody. Once §8.3 records a
+round's payment, it is swept out in **two transfers** — one per destination
+address, because an ERC-20 transfer has exactly one recipient:
+
+```text
+member leg      Debit   ASSET:TIG_MEMBER_CUSTODY
+                Credit  ASSET:TIG_REWARD_WALLET
+
+operating leg   Debit   ASSET:TIG_OPERATING_CUSTODY
+                Credit  ASSET:TIG_REWARD_WALLET
+```
+
+Two intents, two signatures, two finalized events, two completion batches.
+Each posts only from its own event, so neither depends on the other having
+landed and a lost broadcast on one leg does not strand the other.
+
+**The member leg carries two things**, split the way §8.1 and §8.2 already
+split the liability: the round's member share, and the round's unresolved §8.2
+suspense. A round containing a suspense block has a third liability, and
+sweeping only the member share and the fee would strand that value in the
+reward wallet — under the protocol identity key, which is the one place this
+design exists to keep member value away from. Suspense proceeds go to member
+custody because that is where most of them end up: §7's resolution credits
+members, which moves a liability and no tokens.
+
+Not *all* of them, though. §5 defers a suspense block's pool fee until
+resolution, so a member-crediting resolution also recognizes that fee — pool
+revenue whose tokens are sitting in member custody. It leaves through §8.6 like
+any other pool value, which is why that section's suspense cause covers the
+pool's share of **any** resolution, fee or full award. A resolution that awards
+everything to the pool is the same path with a larger share. No
+operating-to-member transfer is ever needed.
+
+**Of the two legs, only the member leg gates settlement**; the operating leg is
+the pool's own money and delays no member. §12.1 lists the full settlement
+conditions, of which this leg's completion is one.
+
+The sweep exists so the pool's TIG protocol identity is never also the wallet
+member funds are paid out of. `architecture.md` §2.2 keeps the reward wallet's
+key out of every runtime process; a withdrawal signed from that wallet would
+put it in one, and a stolen key would then take the member funds and the
+pool's TIG identity together.
+
+**Who signs them.** The accounting projector creates both intents, keyed
+`(network, round, leg)` where `leg` is `member` or `operating`. The
+**operator** signs and broadcasts each manually with the offline reward-wallet
+key — the Funds Gateway never holds that key, and neither does any other
+runtime process. The controller then posts each completion from its own
+finalized exact token event, as it does for every other transfer.
+`architecture.md` §6 names that division; §2.2 and §9 record that the key
+signs these sweeps as well as API-key provisioning.
+
+The per-leg key guarantees **one completion batch per leg**, not one on-chain
+transfer: it is a ledger key, and the transfer is signed by hand. So the
+operator discipline is the same one §12.4 requires of the Funds Gateway, and
+`tig_integration.md` §10 requires of every ambiguous write — before re-signing
+or re-broadcasting a leg whose result was ambiguous, reconcile the previous
+attempt by signer nonce, transaction, receipt and exact token event. A
+re-observed payment cannot produce a second completion batch; only that
+reconciliation can stop it producing a second transfer.
+
+### 8.4 Settling a round into member balances
 
 Once a round is fully reconciled and funded, every eligible positive member
-amount moves to that round's payout-pending account in one batch:
+amount moves from that round's earned-pending account into the member's single
+balance (§11.7) in one batch:
 
 ```text
 Debit   LIABILITY:MEMBER_EARNED_PENDING:<round>:<member>
-Credit  LIABILITY:ROUND_PAYOUT_PENDING:<round>:<member>
+Credit  LIABILITY:MEMBER_BALANCE:<member>
 ```
 
-This batch creates immutable automatic transfer intents. The sum of all
-round-payout-pending liabilities must never exceed finalized, unencumbered TIG
-payout custody allocated to members. An amount held for a missing/recently
-changed destination stays in `MEMBER_EARNED_PENDING` until that member becomes
-eligible; it does not block the rest of the round.
+The credit is unencumbered and immediately withdrawable. It does not create a
+transfer intent — under ADR 0008 settlement no longer starts a payout — and it
+is not yet collateral-eligible: §11.7's maturity rule governs when it can be
+reserved under §11.4.
+
+This is a distinct recognition path from §11.2's inbound deposit, with
+different evidence: the reconciled round rather than a finalized transfer
+event. Neither path may record the other kind of value.
+
+The batch posts only after §8.3a's **member leg** completes, so the balance it
+credits is covered by member custody at the instant it exists. The operating
+leg is the pool's own money and gates nothing here. Maturity changes
+nothing about where the tokens are (§11.7): it decides only whether the
+balance may back work.
+
+### 8.5 Funding a member withdrawal
+
+A member-initiated withdrawal moves the requested unencumbered amount to a
+withdrawal-pending account in one batch, which creates one immutable transfer
+intent:
+
+```text
+Debit   LIABILITY:MEMBER_BALANCE:<member>
+Credit  LIABILITY:MEMBER_WITHDRAWAL_PENDING:<member>:<generation>
+```
+
+Both accounts are backed by the same custody, so this batch moves no tokens
+and needs no transfer to precede it — which is the whole benefit of one pot.
+The intent it creates is for the outbound transfer to the member, and §12.5's
+confirmation is what finally debits member custody.
+
+A missing, invalid or held destination leaves the amount in `MEMBER_BALANCE`;
+no intent is created and no other member is affected.
+
+### 8.6 Sweeping pool value out of member custody
+
+When member value stops being a member liability, the tokens follow it out of
+the one pot:
+
+```text
+Debit   ASSET:TIG_OPERATING_CUSTODY
+Credit  ASSET:TIG_MEMBER_CUSTODY
+```
+
+The causes, each with its own cause identifier:
+
+| Cause | Identifier |
+|---|---|
+| §11.3's tier joining fee | the tier activation |
+| §11.6's chargeable failure charge `X` | the charge decision |
+| A finalized slash (§11.2) | the finalized slash |
+| The pool's share of a §7 suspense resolution — the §5 deferred fee, or a full award | `(network, block_id, resolution_generation)` |
+| A §10 correction that moves member value to a pool account | the correction ID |
+
+`sweep_cause_id` in §9 is whichever of these applies. The
+`X` charge is listed separately from a slash on purpose: §11.6 and
+`mining_system.md` §8 both refuse to describe a chargeable tier failure as
+fraud, and sweeping it under a slash's identifier would record it as one. Its
+credit side is `REVENUE:FAILURE_CHARGES` (§8), distinct from the pool fee and
+from the loss reserve, so §13 item 12's margin term for un-swept charges is
+computable from the ledger rather than inferred.
+
+These are the **only** transfers out of member custody other than a member
+withdrawal, and their destination is allow-listed to operating custody. There
+is no transfer in the other direction and no internal rebalancing at all:
+under one pot a member's value never moves because its collateral status
+changed, only because it left the pool.
+
+Completion posts only from a finalized exact token event, and each sweep is
+keyed to its cause, so a retry after an ambiguous broadcast cannot sweep the
+same value twice.
 
 ## 9. Idempotency and immutable batches
 
@@ -369,7 +528,9 @@ suspense resolution   (network, block_id, resolution_generation)
 correction batch      correction_id
 round reconciliation  (network, round)
 asset settlement      (network, settlement_source_id)
-round payout intent    (network, round, member_id, payout_generation)
+withdrawal intent     (network, member_id, withdrawal_generation)
+reward wallet sweep   (network, round, leg)      leg: member | operating
+operating sweep       (network, sweep_cause_id)   §8.6's cause table
 on-chain transfer     (chain_id, signer, transaction_nonce)
 journal line          (batch_id, line_number)
 ```
@@ -380,9 +541,10 @@ outbox event commits in one transaction. Posted lines are immutable: no UPDATE
 or DELETE privilege is granted to the application roles.
 
 Balances are projections of journal lines and may be rebuilt. A cached balance
-is never more authoritative than the journal. A transaction locks the round
-and its member liabilities before creating payout intents, so two workers
-cannot pay the same round-member amount twice.
+is never more authoritative than the journal. A transaction locks one member's
+balance and their recorded withdrawal requests before creating a withdrawal
+intent (§12.3), so two concurrent requests cannot each pass §12.1's
+unencumbered gate for the same value.
 
 ## 10. Corrections
 
@@ -405,17 +567,28 @@ allowed only when their derivation is equally reproducible.
 If a correction reduces a member balance:
 
 1. consume `earned_pending` first;
-2. then consume round-payout-pending value whose transfer is not yet signed;
-3. never alter an already signed, broadcast, or finalized round transfer;
-4. if the member has already been paid too much, record an explicit member
-   receivable/negative future-earnings balance, stop new payout intents and
-   work, notify the member, and require an operator resolution; and
-5. never charge other members or a future block silently for the shortfall.
+2. then consume unencumbered `MEMBER_BALANCE`;
+3. then consume balance held by a **recorded withdrawal request that has not
+   yet posted**, reducing or cancelling that request in the same transaction
+   so the encumbrance and the balance move together;
+4. then consume **posted** `MEMBER_WITHDRAWAL_PENDING` whose transfer is not
+   yet signed;
+5. never alter an already signed, broadcast, or finalized transfer, and never
+   consume balance encumbered by a §11.4 reservation or a §11.6 freeze — that
+   value is held against an open exposure and taking it would silently shift
+   the pool's own error onto the cover for a member's work. Rules 3 and 4 are
+   the deliberate exceptions: nothing has left the pool and the member has not
+   yet been paid, so the two withdrawal states are reachable while a
+   reservation and a freeze are not;
+6. if the member has already been paid too much, record an explicit member
+   receivable/negative future-earnings balance, stop new withdrawal intents
+   and work, notify the member, and require an operator resolution; and
+7. never charge other members or a future block silently for the shortfall.
 
 Writing off a shortfall to `EXPENSE:ACCOUNTING_LOSS` requires an explicit
 approved correction and does not relabel it as mining expense or payout dust.
 
-## 11. Member deposits and custody separation
+## 11. Member balance and custody separation
 
 The system recognizes two unrelated things that must never share a field,
 balance, custody address, or permission calculation.
@@ -450,9 +623,13 @@ does not reinterpret earlier proceeds or member allocations.
 
 ### 11.2 Slashable pool security deposit
 
-A member must separately transfer TIG to the pool's dedicated security-deposit
-escrow before receiving public-pool work. Recognize it only from a transfer
-event on the allow-listed token and chain that:
+A member may transfer TIG to the pool's dedicated member-custody address
+(§8, §11.7) at any time. A deposit is one of the two ways matured balance
+arises; §8.4's settled earnings are the other, so a member whose matured
+balance already covers §11.4 needs no deposit to keep working.
+
+Recognize a deposit only from a transfer event on the allow-listed token and
+chain that:
 
 - names a verified member wallet/source and configured custody destination;
 - has a unique `(chain_id, tx_hash, log_index)`;
@@ -463,12 +640,17 @@ event on the allow-listed token and chain that:
 Recognition posts:
 
 ```text
-Debit   ASSET:SECURITY_DEPOSIT_CUSTODY
-Credit  LIABILITY:MEMBER_SECURITY_DEPOSIT:<member>
+Debit   ASSET:TIG_MEMBER_CUSTODY
+Credit  LIABILITY:MEMBER_BALANCE:<member>
 ```
 
-Security deposits remain completely separate from delegation, earnings, round
-payouts, and pool operating funds. They cannot pay another member or silently
+Under ADR 0008 this is one of two recognition paths into the same balance;
+§8.4's settlement credit is the other, with different evidence. A deposit is
+recognized only from the transfer event above, and a settled earning only from
+a reconciled round. Neither may record the other kind of value.
+
+The balance remains completely separate from delegation and from pool
+operating funds. They cannot pay another member or silently
 cover a pool error. A proposed slash first freezes the disputed amount without
 moving the member liability, notifies the member, and records the evidence and
 appeal deadline. A final slash is a new audited journal batch authorized only
@@ -476,18 +658,26 @@ by the published member-fault policy, with benchmark evidence, amount, policy
 version, actor, and appeal result:
 
 ```text
-Debit   LIABILITY:MEMBER_SECURITY_DEPOSIT:<member>
+Debit   LIABILITY:MEMBER_BALANCE:<member>
 Credit  EQUITY:SECURITY_LOSS_RESERVE
 ```
+
+A slash reaches only encumbered balance: the frozen amount established by
+§11.6 against a specific reservation. It can never take unencumbered balance,
+which is the member's to withdraw.
 
 The reserve may reimburse documented member-caused TIG fees, penalties, or
 accounting losses. It is not ordinary pool-fee revenue, cannot fund member
 payouts, and cannot be distributed to an operator merely because a slash
 occurred. Any later use is another approved, auditable batch.
 
-Custody must use a dedicated escrow address or contract and production signing
-boundary, not the round-payout hot wallet. The pool must publish enforceable
-member terms and obtain legal review before accepting these funds.
+Member value is held in one dedicated custody address with its own production
+signing boundary — never the pool's reward wallet, whose key is the TIG
+protocol identity (§8, ADR 0008).
+
+The pool must publish enforceable member terms and obtain legal review before
+accepting these funds. ADR 0008 makes that obligation larger, not smaller:
+the pool now holds member value for as long as the member chooses.
 
 ### 11.3 Non-refundable tier joining fee
 
@@ -496,22 +686,23 @@ join transaction. Tier `k` grants eligibility for at most `k` concurrent
 unverified benchmarks; it does not purchase guaranteed work or pool capacity.
 The fee is separate from delegated TIG and slashable security collateral.
 
-The member may authorize the fee to be taken only from finalized,
-unencumbered security-deposit value after every existing reservation, pending
-return, and frozen charge. Activation of the tier and the balanced fee journal
-batch commit together:
+The member may authorize the fee to be taken only from finalized, **matured**
+unencumbered balance after every existing reservation, recorded withdrawal
+request, and frozen charge.
+
+Activation of the tier and the balanced fee journal batch commit together:
 
 ```text
-Debit   LIABILITY:MEMBER_SECURITY_DEPOSIT:<member>
+Debit   LIABILITY:MEMBER_BALANCE:<member>
 Credit  REVENUE:TIER_JOINING_FEES
 ```
 
-The corresponding custody value is no longer security-deposit backing and is
-swept to operating custody through a separately reconciled transfer:
+The corresponding custody value is no longer member backing and is swept out
+of member custody under §8.6:
 
 ```text
 Debit   ASSET:TIG_OPERATING_CUSTODY
-Credit  ASSET:SECURITY_DEPOSIT_CUSTODY
+Credit  ASSET:TIG_MEMBER_CUSTODY
 ```
 
 A failed, ambiguous, or unfinalized fee debit never activates the tier.
@@ -520,7 +711,7 @@ Tier removal creates no refund. A removed member may immediately buy a tier by
 paying its then-current `J[k]` again; there is no cooldown or tier-admission
 queue. Every purchase has a new idempotent fee batch and membership period.
 Rejoining does not release or reset outstanding benchmarks, reservations,
-fines, appeals, deposit returns, or method-verification exposure.
+fines, appeals, pending withdrawals, or method-verification exposure.
 
 ### 11.4 Dynamic per-assignment collateral
 
@@ -543,8 +734,8 @@ precommit_reserve = max(assignment_reserve[s,t] for every proposed track t)
 ```
 
 The maximum is necessary because TIG selects the track only after the
-precommit. The pool atomically reserves that amount from the member's finalized
-eligible security-deposit liability before creating the precommit intent. Once
+precommit. The pool atomically reserves that amount from the member's
+`eligible_collateral` below before creating the precommit intent. Once
 TIG confirms the selected track and exact `fee_paid`, the reservation may be
 reduced to that track's exact requirement, never increased by silently applying
 a later pool policy.
@@ -558,8 +749,9 @@ of these example values is compiled into admission logic.
 For member `m`:
 
 ```text
-eligible_collateral[m] = finalized security-deposit liability
-                         - pending returns
+eligible_collateral[m] = matured[m]
+                         - matured portion of recorded withdrawal requests
+                           not yet posted (§11.7)
                          - frozen charge/slash amounts
 
 reserved_exposure[m]   = sum(open assignment reservations)
@@ -567,6 +759,12 @@ reserved_exposure[m]   = sum(open assignment reservations)
 new work is allowed only if:
 eligible_collateral[m] - reserved_exposure[m] >= precommit_reserve
 ```
+
+`matured[m]` is the part of §11.7's single balance that may back work:
+finalized recognized deposits, plus settled earnings whose round has matured
+under §11.7. Unmatured earnings are withdrawable but count zero here, which is
+why only the *matured* portion of a request is deducted: spending an unmatured
+earning must not cost admission capacity it never contributed.
 
 One reservation remains attached to one member-owned benchmark even after the
 member's compute slot is released. Its method portion remains reserved until
@@ -617,9 +815,11 @@ knowingly rather than derived from them:
 If `penalty_amount` rose with less notice than the horizon of the benchmarks
 then open, the pool absorbs the difference between what was reserved and what
 is charged. It is not recoverable from the member: the reservation is that
-member's whole committed exposure, and §11.2 recognizes a deposit only from an
-inbound transfer, so there is no mechanism that would enlarge one after the
-fact. Should either premise fail, this is the section to revisit, and the
+member's whole committed exposure, and §11.4 never increases a reservation
+after the fact — neither recognition path into the balance, §11.2's transfer
+or §8.4's settlement, enlarges one that already exists.
+
+Should either premise fail, this is the section to revisit, and the
 mechanism to add is a buffer or an additional-collateral call — never a
 retroactive slash.
 
@@ -654,7 +854,7 @@ generate a penalty.
 The freeze keeps that amount inside `reserved_exposure` in §11.4; it does not
 also become a `frozen charge/slash amount`. The distinction is not
 presentational: counting it in both terms would deduct one outcome from
-admission capacity twice, which §13 item 18 forbids. Because the amount was
+admission capacity twice, which §13 item 19 forbids. Because the amount was
 already reserved against this benchmark, the member's admission capacity is
 exactly what it was before the report. The freeze does not slash, and does not
 act on the member: no suspension, no effect on admission, and no reach beyond
@@ -698,7 +898,18 @@ job, through `reserved_exposure`, and does not need this rule to reach further
 than one benchmark.
 
 For every chargeable tier failure attributed to a member, freeze and then
-charge exactly `X` under the assignment's policy version. V0 chargeable tier
+charge exactly `X` under the assignment's policy version:
+
+```text
+Debit   LIABILITY:MEMBER_BALANCE:<member>
+Credit  REVENUE:FAILURE_CHARGES
+```
+
+`REVENUE:FAILURE_CHARGES` is its own account, not the pool fee and not the
+loss reserve. §8.6 sweeps its tokens out of member custody under the charge
+decision's own identifier, and §13 item 12 counts what is charged but not yet
+swept as a named margin term — both of which need this credit side to exist
+before they can be computed. V0 chargeable tier
 failures are an abandoned or unusable package, TIG solution-verification
 failure, and a benchmark with zero bundles meeting TIG's minimum verification
 quality. The last outcome is a capacity/economic failure, not an allegation of
@@ -727,73 +938,214 @@ A dispute remains frozen until a reviewer who did not make the original fault
 decision records a reasoned result. Pool/TIG fault or insufficient evidence
 releases the freeze; custody is not evidence of member fault.
 
-An unlock request immediately removes the requested amount from admission
-collateral. Return is allowed only after all affected reservations are released,
+A withdrawal request immediately removes from admission collateral the
+**matured portion** §11.7's draw order assigns to it, and encumbers its whole
+amount against withdrawal. The two figures differ whenever a request draws on
+unmatured earnings, which never counted as collateral.
+
+It is payable only after all affected reservations are released,
 the last relevant benchmark is no longer reportable, every report/arbitration
 is terminal, and one additional TIG round has passed. A pending appeal keeps
-only the disputed amount locked. Return uses the verified member wallet and is
-never combined with a mining payout.
+only the disputed amount locked.
+
+Under ADR 0008 there is one outbound member path, so a withdrawal may combine
+matured balance and unmatured earnings; what it may never include is
+encumbered balance. §11.7's draw order decides the split: unmatured earnings
+first, then matured balance. Unmatured earnings are subject to none of the
+waits above — nothing was ever reserved against them — so a member whose
+request fits inside them is paid without waiting. Every withdrawal uses the
+verified member wallet under §12.2.
 
 Tier fees, failure charges, collateral formulas, concurrency rules, slash
 rules, and effective TIG heights are append-only policy versions. A later
 policy does not change the amount that can be charged for an earlier assignment
 or tier purchase.
 
-### 11.7 Earnings as working capital (open)
+### 11.7 One member balance
 
-The reserve in §11.4 scales with bundle count, so an established member can
-need more collateral than they can reasonably hold in cash while their own
-earnings sit with the pool. Letting those earnings back their capacity is
-desirable and is **not specified here**, because every mechanism for it
-crosses a custody boundary this document deliberately keeps closed.
+ADR 0008 settles what this section previously held open. A member has **one
+balance** with the pool. §11.2's recognized deposits and §8.4's settled round
+earnings are the same liability, `LIABILITY:MEMBER_BALANCE:<member>`;
+§11.4 reserves against it and §12 withdraws from it.
 
-The constraints any proposal must satisfy:
+**Maturity.** A settled earning is withdrawable at once but is not
+collateral-eligible until it can no longer be destroyed by a method penalty.
+Until then the same TIG would be covering the penalty that could take it, so
+counting it as collateral would be counting nothing.
 
-- payout and security-deposit custody are different addresses with different
-  signing keys, and `architecture.md` §13 invariant 9 forbids them sharing an
-  address, key, ledger asset or transfer intent. A journal line moving value
-  between them without an on-chain transfer would assert deposit-escrow value
-  that is physically in the payout wallet, and §13's daily reconciliation of
-  both custody assets against finalized Base balances would fail;
-- §11.2 recognizes a deposit only from a transfer event with a unique
-  `(chain_id, tx_hash, log_index)` in a finalized Base block, and
-  `architecture.md` §6 guards custody recognition on exactly those fields;
-- §12.4's signer accepts only approved round-payout intents, so no path exists
-  to move value out of payout custody by any other route; and
-- §4 rule 9 and §8.4 state that settlement automatically moves every eligible
-  positive member amount to payout-pending, with members choosing no amount.
-  Any carve-out has to be made in those sections, which own the settlement
-  batch.
+The condition is **per contributing benchmark**, not per earning round. A
+round's earnings mature only when *every benchmark whose qualifiers were
+attributed in that round* has both a closed reporting window — the end of round
+`benchmark_round + submission_period`, keyed to that benchmark's own round —
+and every report against it terminal.
 
-A member can already achieve the effect today by being paid and depositing
-under §11.2. What is missing is only the convenience of doing it without a
-round trip, and that convenience is not worth a custody rule invented to
-support it. This is a funds-custody decision and belongs to the pool owner.
+Keying it to the earning round alone would be wrong, and not rarely. A
+benchmark's lifespan is measured in blocks while a round is far longer, so a
+benchmark started before a round boundary earns qualifiers attributed after it.
+`tig_integration.md` §14.2's `?round=` selects by the *benchmark's* round, so
+round-R earnings produced by a round R-1 benchmark would be judged against a
+window that had nothing to do with them — and could be called matured, and
+reserved against under §11.4, while a report against that very benchmark was
+still open.
 
-## 12. Automatic round payouts
+Maturity is an admission property and nothing else. **No transfer corresponds
+to it.** Matured and unmatured value sit in the same custody address, so a
+round maturing moves no tokens, changes no asset, and posts no batch — it
+changes what §11.4's formula may count. This is the simplification one pot
+buys: a member's TIG never moves because its collateral status changed, only
+because it left the pool.
 
-### 12.1 Round eligibility
+How the pool observes those reports is `tig_integration.md` §14.2's, not this
+section's: that document owns the TIG reads, and §11.6 already depends on the
+same observation for its freeze rule.
 
-The pool starts a round payout only when:
+A recognized §11.2 deposit is matured on recognition. Nothing about it came
+from a round, so no method penalty can reach back and destroy it.
+
+**Encumbrance.** The balance splits into encumbered and unencumbered parts:
+
+```text
+matured[m]      = the matured part of LIABILITY:MEMBER_BALANCE:<m>
+unmatured[m]    = the rest of it
+balance[m]      = matured[m] + unmatured[m]
+
+encumbered[m]   = reserved_exposure[m]
+                  + frozen charge/slash amounts
+                  + recorded withdrawal requests not yet posted
+
+unencumbered[m] = balance[m] - encumbered[m]
+```
+
+`balance[m]` is `MEMBER_BALANCE` alone. A withdrawal that has reached §8.5's
+batch has already left that account, so counting `MEMBER_WITHDRAWAL_PENDING`
+as balance *and* deducting it as an encumbrance would deduct it twice.
+
+The third encumbrance term is therefore a *recorded request that has not yet
+posted*, and it exists for the window §11.6 creates: a request removes its
+amount from admission collateral immediately, while §11.6's waits run and
+before any batch exists. Without it two requests for the same value would each
+pass §12.1's gate. The request itself is durable state with an owner —
+`architecture.md` §6 names it — not an intention held in memory.
+
+The term deducts the request's **whole recorded amount**, matured and
+unmatured alike. It is what stops a second request claiming value the first
+already claimed, and the motivating case of ADR 0008 — a member whose balance
+is all unmatured earnings, which the draw order takes first — is exactly the
+case where deducting only a matured portion would deduct nothing and let two
+requests for the same value both pass §12.1's gate.
+
+The *other* deduction is narrower, and the two must not be confused. §11.4's
+`eligible_collateral[m]` deducts only the **matured portion** the draw order
+assigns to a request, because its base is `matured[m]` and an unmatured
+earning never contributed admission capacity to begin with. Same request, two
+questions: how much can still leave (here, the whole amount) and how much can
+still back work (there, the matured part).
+
+The matured/unmatured split of a recorded request is re-evaluated whenever the
+round it draws on matures, since maturity moves value between the two
+questions. A request recorded entirely against unmatured round R encumbers the
+same total before and after R matures; what changes is how much of it §11.4
+also deducts.
+
+Only unencumbered balance may leave under §12. Only encumbered balance may be
+slashed under §11.2. A slash therefore cannot take value a member could have
+withdrawn, and a withdrawal cannot take value the pool is holding against an
+open exposure. Encumbrance is computed from §11.4, §11.6 and the request
+record, not stored as a separate account, so no batch can quietly reclassify
+value.
+
+**Backing.** One address backs the whole pot:
+
+```text
+ASSET:TIG_MEMBER_CUSTODY  >=  sum(balance[m])
+                              + sum(withdrawal-pending amounts)
+```
+
+Coverage rather than equality. The pot also holds, briefly and by name: a
+round's member share swept under §8.3a but not yet settled by §8.4, unresolved
+§8.2 suspense proceeds swept with it, and value that became the pool's — a
+tier fee, an `X` charge, a finalized slash, a correction — awaiting §8.6's
+sweep. §13 item 12 enumerates the same terms, and daily reconciliation
+accounts for each rather than treating it as a mismatch.
+
+The inequality holds at every batch boundary without any in-flight allowance,
+because no batch in this document moves value between member custody and
+anywhere else except at a finalized token event: §8.3a's inbound sweep, §8.6's
+outbound sweep, §11.2's recognized deposit, and §12.5's completed withdrawal.
+The batches in between — settlement, reservation, freeze, maturation — move
+liabilities inside the one pot.
+
+**What one pot costs, recorded plainly.** The pool's earlier design split
+member value across two custody addresses so that a stolen payout key could
+not reach collateral and a stolen deposit key could not pay anyone. One pot
+gives that up: a compromise of the member-custody signing key reaches every
+member's collateral and every member's withdrawable balance at once. ADR 0008
+records the decision and what was weighed. What remains, and what §13 and
+`architecture.md` §13 invariant 9 now enforce, is the separation that survives:
+member value never shares an address or key with pool operating funds, and
+never with the pool's TIG protocol identity.
+
+**Withdrawal draw order.** A withdrawal draws unmatured settled earnings
+first, oldest round first, and then matured balance. Without a fixed order the
+amount and the waits would depend on an implementation's choice, because one
+fungible liability carries no record of which atoms were once collateral.
+Oldest-round-first also makes "how much of round R's earnings remain"
+derivable from the ledger, which is what maturity is evaluated against.
+§11.6's waits apply to exactly the matured portion drawn.
+
+**What did not change.** §11.1's delegated TIG is still not pool value and
+still grants no capacity. Pool revenue, the security loss reserve, and
+operating custody remain distinct from the member balance and from each other.
+
+## 12. Member withdrawals
+
+### 12.1 Settlement and withdrawal eligibility
+
+Two separate gates, because ADR 0008 separated the two events.
+
+**A round settles into member balances** (§8.4) only when:
 
 - every block batch in the round is posted and no unresolved payout suspense
   remains for that round;
-- the complete round is reconciled to TIG's round data;
-- the exact corresponding TIG payment is finalized and reconciled in payout
-  custody;
+- the complete round is reconciled to TIG's round data; and
+- the exact corresponding TIG payment is finalized and reconciled in the
+  reward wallet (§8.3); and
+- that round's §8.3a **member leg** has completed from its own finalized token
+  event, so the balances §8.4 credits are covered by member custody at the
+  instant they exist.
+
+The expected TIG payment delay may be several weeks. The pool waits for actual
+funds, not elapsed time. Settlement is automatic and needs no member action;
+what it produces is a balance, not a transfer.
+
+**A withdrawal becomes payable** only when:
+
+- the requested amount is unencumbered under §11.7 at the moment the intent is
+  created, and remains so until it is spent. The check excludes *this*
+  request's own recorded amount and no other: a recorded request encumbers
+  balance against every **competing** request, but a gate that also counted
+  the request it is deciding would refuse every withdrawal ever made;
+- §11.6's waits are satisfied for the matured portion §11.7's draw order
+  assigns to this withdrawal;
 - no accounting/security hold affects the member; and
 - member, token, chain, and destination configuration remains compatible.
 
-The expected TIG payment delay may be several weeks. The pool waits for actual
-funds, not elapsed time. Once funded, it automatically pays every positive
-member amount for that round. There is no member withdrawal request, chosen
-amount, daily cadence, or minimum payout. The pool pays Base gas as an
-operating cost and the exact TIG liability is not reduced for gas.
+The member chooses when to ask and how much, up to their unencumbered balance.
+There is no minimum, no cadence, and no automatic payout. A request above the
+unencumbered amount is refused with the available figure, never partially
+filled: a partial fill would silently choose an amount for the member, which
+is what this model exists to stop doing.
+
+The pool pays Base gas as an operating cost and the exact TIG liability is not
+reduced for gas.
 
 ### 12.2 Destination authorization
 
-The payout destination is an account setting, never a worker setting. Before
-public funds the account system must require:
+The withdrawal destination is an account setting, never a worker setting.
+Under ADR 0008 a withdrawal is member-initiated, which makes account
+compromise the direct route to a member's funds — these controls carry more
+weight than they did when payout went automatically to a long-verified
+address. Before public funds the account system must require:
 
 - a verified Base address linked through a domain-separated EIP-191 or EIP-712
   signature containing pool domain, member ID, chain ID, address, random nonce,
@@ -803,32 +1155,36 @@ public funds the account system must require:
 - one-time nonces and exact-domain validation to prevent signature reuse on a
   different pool or chain; and
 - a 48-hour security delay and out-of-band notification after destination
-  change, during which automatic payouts to that member are held.
+  change, during which withdrawals for that member are held.
 
 The service never accepts a destination from a worker credential or unaudited
-operator edit. A member can explicitly request a payout hold. A missing,
-invalid, or temporarily held destination leaves only that member's round
-liability pending and does not delay other members.
+operator edit. A member can explicitly request a withdrawal hold. A missing,
+invalid, or temporarily held destination leaves the amount in the member's
+balance and affects no other member.
 
-### 12.3 Deterministic payout intents
+### 12.3 Deterministic withdrawal intents
 
-When a round becomes `ASSETS_SETTLED`, one transaction locks the round, moves
-each member's exact amount to `ROUND_PAYOUT_PENDING`, and creates one immutable
-payout intent for every eligible positive amount. The intent fixes:
+One transaction checks the requested amount against §11.7's unencumbered
+balance, moves it to `MEMBER_WITHDRAWAL_PENDING` (§8.5), and creates one
+immutable withdrawal intent. The intent fixes:
 
 ```text
-network and TIG round
-member and payout_intent_id
+network
+member and withdrawal_intent_id
 exact attoTIG amount
 verified destination
 chain ID and TIG token contract
-payout policy/config version
+withdrawal policy/config version
 ```
 
-The unique `(network, round, member_id, payout_generation)` makes retries return
-the same intent. Payouts may be broadcast sequentially or in bounded batches,
-but the accounting cohort is one round. A failed or dropped transaction remains
-pending until chain state proves whether that same intent can be rebroadcast.
+The unique `(network, member_id, withdrawal_generation)` makes retries return
+the same intent. The accounting cohort is one request, not one round: a
+withdrawal is no longer part of a round cohort at all. A failed or dropped
+transaction remains pending until chain state proves whether that same intent
+can be rebroadcast. The amount has already left `MEMBER_BALANCE`,
+so a second request cannot spend it — §11.7's `encumbered[m]` deliberately
+excludes a posted withdrawal for exactly that reason, and counting it in both
+places would deduct the same value twice.
 
 ### 12.4 Signing and broadcast
 
@@ -836,15 +1192,30 @@ Production signing is the separate private Funds Gateway and key-custody design;
 the Pool API, workers, controller, TIG Gateway, database, and CI never receive
 the private key. The signer:
 
-- accepts only approved immutable round-payout intents;
+- accepts only approved immutable intents of two kinds out of member custody:
+  a member withdrawal to that member's verified address, and §8.6's sweep of
+  pool value to operating custody. Nothing else leaves member custody. A
+  finalized slash is a ledger batch, not a signed intent: it reclassifies a
+  liability to equity, and only §8.6's sweep moves its tokens;
+- allow-lists the sweep destination to the one operating-custody address and
+  to nothing else, so a compromised member-custody signer can reach a member's
+  own verified address or the pool, and no third party;
+- never holds the reward wallet's key. §8.3a's sweep out of that wallet is
+  signed by an operator, manually, with the offline protocol identity key that
+  `architecture.md` §2.2 and §6 keep out of every runtime process — the Funds
+  Gateway included;
 - allow-lists chain ID, token contract, transfer method, destination, and exact
   amount;
 - simulates the ERC-20 transfer before signing;
 - uses one serialized nonce lane per signing address;
 - records transaction nonce and signed transaction hash before broadcast;
 - never substitutes a destination or amount during retry; and
-- enforces per-transaction, rolling daily, and hot-wallet limits, with
-  configured multi-person approval above a threshold.
+- enforces per-transaction, rolling daily, and hot-wallet limits. Multi-person
+  authorization is `security.md` §3.4's rule and is not restated here: it is
+  **unconditional** for every member-custody transfer, and thresholds apply
+  only to operating custody. One pot means a single signature would otherwise
+  move collateral-backed value whenever an amount fell below a configured
+  line, and which amounts those are would be an implementer's choice.
 
 An ambiguous broadcast is reconciled by transaction hash, signer nonce, receipt,
 and token `Transfer` event. A fee replacement uses the same nonce and exact
@@ -870,16 +1241,17 @@ and [Base network identifiers](https://docs.base.org/base-chain/quickstart/conne
 On confirmation, post:
 
 ```text
-Debit   LIABILITY:ROUND_PAYOUT_PENDING:<round>:<member>
-Credit  ASSET:TIG_PAYOUT_CUSTODY
+Debit   LIABILITY:MEMBER_WITHDRAWAL_PENDING:<member>:<generation>
+Credit  ASSET:TIG_MEMBER_CUSTODY
 ```
 
 Operator recovery may hold an unsigned intent, re-run reconciliation,
 or rebroadcast the exact signed transaction. It cannot mark a transfer paid
 without finalized chain evidence, edit a posted batch, redirect funds, bypass
 approval limits, or convert a failure into a new transfer silently. Emergency
-controls can disable all new payout-intent creation and signing while reads
-and reconciliation continue.
+controls can disable all new withdrawal-intent creation and signing while
+reads, settlement and reconciliation continue — settlement produces no
+transfer, so halting withdrawals does not stall the ledger.
 
 ## 13. Reconciliation and invariants
 
@@ -894,30 +1266,50 @@ Before and after every batch, enforce:
 7. no posted line is updated or deleted;
 8. suspense remains a liability until an approved resolution batch;
 9. cached balances equal a rebuild from journal lines;
-10. round-payout-pending liabilities never exceed reconciled, allocated payout
-    custody;
-11. delegated TIG, security deposits, pending earnings, payout liabilities,
-    and pool revenue are distinct and cannot be silently netted;
-12. one round-member payout intent spends one liability once;
-13. one signed intent fixes chain, token, destination, amount, signer, and
+10. withdrawal-pending liabilities are covered by member custody, which is
+    item 12's check — they are not a separate custody's problem under one pot;
+11. delegated TIG, member balance, pool revenue and the security loss reserve
+    are distinct and cannot be silently netted, and encumbered balance is
+    never spent as unencumbered (ADR 0008);
+12. member custody **covers** every member liability (§11.7):
+    `ASSET:TIG_MEMBER_CUSTODY >= sum(balance[m]) + sum(withdrawal-pending)`.
+    Coverage, not equality. The margin is named, and daily reconciliation
+    accounts for each term rather than treating it as a mismatch:
+    (a) a round's member share swept under §8.3a but not yet settled into
+    balances by §8.4, still `MEMBER_EARNED_PENDING`;
+    (b) unresolved §8.2 suspense proceeds swept with it;
+    (c) pool value awaiting §8.6's sweep — every cause in §8.6's table,
+    including the pool's share of a §7 suspense resolution, which is the §5
+    deferred fee even when the resolution credits members.
+    No in-flight allowance is needed, because value enters or leaves member
+    custody only at a finalized token event;
+13. one withdrawal intent spends one liability once, and one sweep per cause:
+    `(network, round, leg)` for each leg of a reward-wallet sweep, and §8.6's
+    cause identifier — tier activation, `X` charge decision, finalized slash,
+    suspense resolution, or correction ID — for an operating sweep;
+14. one signed intent fixes chain, token, destination, amount, signer, and
     nonce;
-14. only a finalized exact token event completes a round payout; and
-15. any mismatch stops posting/payouts and alerts rather than creating a
-    compensating guess.
-16. a tier activation and its non-refundable fee post atomically;
-17. tier removal or repurchase never releases existing financial exposure; and
-18. the same outcome cannot consume `X` or a method reserve twice under one
-    policy reason.
+15. only a finalized exact token event completes a withdrawal or a sweep;
+16. any mismatch stops posting/transfers and alerts rather than creating a
+    compensating guess;
+17. a tier activation and its non-refundable fee post atomically;
+18. tier removal or repurchase never releases existing financial exposure;
+19. the same outcome cannot consume `X` or a method reserve twice under one
+    policy reason; and
+20. settled earnings count zero toward `eligible_collateral` until their round
+    has matured under §11.7.
 
 Daily reconciliation compares:
 
 - accepted TIG blocks, per-block proceeds, and round totals;
 - reward receivable versus identified TIG settlement;
-- Base finalized token balances and transfer events versus both custody assets;
-- member, suspense, security-deposit, and round-payout liabilities versus their
-  separate backing assets;
-- round payout intents versus signer nonces, transactions, receipts, and events;
-  and
+- Base finalized token balances and transfer events versus the reward wallet,
+  member custody, and operating custody assets;
+- member balance split by maturity, suspense, and withdrawal-pending
+  liabilities versus member custody's coverage inequality (§13 item 12), with
+  each named margin term accounted for;
+- withdrawal and sweep intents versus signer nonces, transactions, receipts,
+  and events; and
 - ledger cached balances versus a journal rebuild.
 
 ## 14. Owner decisions required
@@ -928,11 +1320,19 @@ The owner has confirmed:
    at least seven days' notice; and
 2. a `15%` initial TIG protocol reward share for non-custodial delegators,
    adjustable later through a new effective policy; and
-3. automatic distribution of each round after TIG's actual delayed payment is
-   finalized in pool custody, with no request, minimum, or daily batch rule;
-4. the pool pays Base ETH gas for those automatic transfers without deducting
-   it from a member's earned TIG; and
-5. a changed payout address is held for 48 hours with out-of-band notification.
+3. automatic settlement of each round into member balances after TIG's actual
+   delayed payment is finalized in pool custody, with no request, minimum, or
+   daily batch rule. Automatic *distribution* was the earlier decision; ADR
+   0008 replaced it with member-initiated withdrawal, keeping settlement
+   automatic;
+4. the pool pays Base ETH gas for member transfers without deducting it from a
+   member's earned TIG;
+5. a changed payout address is held for 48 hours with out-of-band
+   notification; and
+6. one member balance holding both deposits and settled earnings, withdrawable
+   by member request up to the unencumbered amount, and held in one member
+   custody address separate from the reward wallet and from operating funds
+   (§11.7, ADR 0008).
 
 The remaining decisions are:
 
@@ -941,10 +1341,12 @@ The remaining decisions are:
    direct method-verification exposure scales with `num_bundles` and TIG's live
    report penalty. The threats and unresolved evidence/consequence choices are
    enumerated in [member_attack_model.md](member_attack_model.md); and
-2. whether a member's earnings may back their working capacity, and by what
-   mechanism (§11.7). Every route crosses the payout/security-deposit custody
-   boundary, so it is a funds-custody decision rather than an accounting one.
+2. the trust-label mechanism that would let a trusted member's allowed bundle
+   count exceed what their collateral alone permits. The rule itself belongs
+   to `mining_system.md` §11, which records it; this entry exists because
+   §11.4's formula is what such a mechanism would relax. Nothing may raise an
+   admission limit above that formula until it lands.
 
-Until this is answered, testnet may exercise security-deposit fixtures using
+Until decision 1 is answered, testnet may exercise deposit fixtures using
 explicit fixture policy values, but no implementation may accept public member
 collateral or present the proposal as settled policy.

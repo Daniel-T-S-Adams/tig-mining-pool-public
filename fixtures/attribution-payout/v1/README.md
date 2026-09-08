@@ -97,6 +97,32 @@ sum to `2989000000000000010`; fees + members = proceeds
 
 ## Open questions
 
+0. **Cases 8, 9 and 10 are superseded by ADR 0008 and await a `v2`.**
+
+   Case 8 `delayed_round_settlement` pins `ASSET:TIG_PAYOUT_CUSTODY` as the
+   §8.3 debit — an account ADR 0008 replaces with `ASSET:TIG_REWARD_WALLET` —
+   and reaches `ASSETS_SETTLED` from TIG's payment alone, which
+   `accounting.md` §4 rule 8 and §12.1 now forbid without §8.3a's member leg
+   completing from its own finalized token event. `v1` carries no such event.
+
+   Cases 9 and 10 pin the automatic per-round payout model:
+   `LIABILITY:ROUND_PAYOUT_PENDING`, "no member withdrawal request", and the
+   intent key
+   `(network, round, member_id, payout_generation)`. ADR 0008 replaced that
+   with one member balance and member-initiated withdrawal, so `accounting.md`
+   §8.4 now credits `LIABILITY:MEMBER_BALANCE` and §8.5/§12.3 own the
+   withdrawal intent. The custody asset names changed too:
+   `ASSET:TIG_PAYOUT_CUSTODY` and `ASSET:SECURITY_DEPOSIT_CUSTODY` are one
+   `ASSET:TIG_MEMBER_CUSTODY`, with `ASSET:TIG_REWARD_WALLET` for the
+   benchmarker wallet TIG pays into.
+
+   What all three still assert correctly is *attribution and allocation*.
+   What is superseded is the custody account names, the funding batch's
+   destination, the settlement precondition, and the intent's shape. `v1` is
+   immutable, so the corrections go in a `v2` (recorded on issue #31); until
+   then no implementation may take cases 8, 9 or 10 as the current model.
+   Cases 1-7 are unaffected.
+
 1. **`canonical_encode` byte layout is not yet specified.**
    `docs/mining_system.md` §7.1 and `docs/accounting.md` §6 define BLAKE3
    derivations over `canonical_encode([...])`, but no document fixes the byte

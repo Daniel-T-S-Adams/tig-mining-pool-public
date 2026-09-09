@@ -4,12 +4,13 @@
 
 use pool_domain::Network;
 use pool_test_support::TempDb;
+use pool_workflow::WriteAttemptLedger;
 use pool_workflow::workflow::{
     self, ConfirmedBenchmark, ConfirmedFraud, ConfirmedPrecommit, ConfirmedProof, Owner,
     POOL_BOOTSTRAP_OWNER, Submitted, WorkflowError, WorkflowState,
 };
 use serde_json::json;
-use sqlx::Row;
+use sqlx::{Connection, Row};
 
 const NET: Network = Network::Testnet;
 
@@ -34,6 +35,9 @@ fn precommit(benchmark: &str, block: i64) -> ConfirmedPrecommit {
     ConfirmedPrecommit {
         benchmark_id: benchmark.to_string(),
         block_confirmed: block,
+        // TIG's own record of when the benchmark began; §8's deadlines are
+        // ages from here, and it is a few blocks before confirmation.
+        block_started: block - 2,
         // TIG chose the track; the pool proposed every active one.
         track_id: "t002".to_string(),
         settings: json!({
@@ -844,5 +848,684 @@ async fn verification_closes_the_interval_without_ending_the_workflow() {
     assert_eq!(
         w.terminal_reason, None,
         "a live workflow carries no terminal reason"
+    );
+}
+#[tokio::test]
+async fn a_workflow_expires_at_the_guardrail_and_records_why() {
+    // F5. §8: "mark unfinished local workflow expired at age >= 120 blocks",
+    // measured from TIG's `block_started`.
+    let Some(db) = TempDb::migrated("wf_expiry").await else {
+        return;
+    };
+    let pool = db.pool_as("pool_controller").await;
+    let guardrails = pool_workflow::Guardrails::from_config_json(include_str!(
+        "../../../config/tig_integration.json"
+    ))
+    .unwrap();
+
+    let w = decided(&pool, "w1").await;
+    let w = workflow::confirm_precommit(&pool, NET, "w1", w.revision, &precommit("bench_a", 100))
+        .await
+        .unwrap();
+    let started = w.block_started.expect("TIG told us when it began");
+    assert_eq!(started, 98);
+
+    // One block short of the guardrail: nothing happens.
+    let almost = started + i64::from(guardrails.workflow_expiry_age_blocks) - 1;
+    assert!(
+        workflow::expire_if_due(&pool, &guardrails, NET, "w1", almost)
+            .await
+            .unwrap()
+            .is_none(),
+        "a workflow inside its guardrail is left alone"
+    );
+
+    let due = started + i64::from(guardrails.workflow_expiry_age_blocks);
+    let expired = workflow::expire_if_due(&pool, &guardrails, NET, "w1", due)
+        .await
+        .unwrap()
+        .expect("this one is due");
+    assert_eq!(expired.state, WorkflowState::Expired);
+    assert_eq!(expired.unverified_to_block, Some(due));
+
+    let reason = expired.terminal_reason.unwrap();
+    assert!(
+        reason.contains("120"),
+        "the reason names the guardrail: {reason}"
+    );
+    // F4b: a pool-side deadline, attributed to nobody.
+    assert!(!reason.to_ascii_lowercase().contains("member"), "{reason}");
+
+    // Sweeping again is a no-op rather than a second transition.
+    assert!(
+        workflow::expire_if_due(&pool, &guardrails, NET, "w1", due + 50)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn the_deadline_sweep_does_not_expire_a_workflow_whose_proof_tig_confirmed() {
+    // §8 expires an "unfinished local workflow", and its own accounting says
+    // what finished means: the ten-block reserve before the deadline is "for
+    // pool-owned commitment, sampling, proof construction, submission, and
+    // confirmation". At PROOF_CONFIRMED all of that is done and only TIG's
+    // verification remains — which §7 gives TIG, not the pool's clock.
+    //
+    // Expiring here would rewrite work whose precommit, benchmark and proof
+    // TIG all confirmed into a local failure labelled "without confirmation",
+    // make its artifacts deletable as terminal, and turn the verification that
+    // follows into a discrepancy needing an operator.
+    let Some(db) = TempDb::migrated("wf_proof_confirmed").await else {
+        return;
+    };
+    let pool = db.pool_as("pool_controller").await;
+    let guardrails = pool_workflow::Guardrails::from_config_json(include_str!(
+        "../../../config/tig_integration.json"
+    ))
+    .unwrap();
+
+    let w = decided(&pool, "w1").await;
+    let w = workflow::confirm_precommit(&pool, NET, "w1", w.revision, &precommit("bench_a", 100))
+        .await
+        .unwrap();
+    let started = w.block_started.unwrap();
+    let w = workflow::confirm_benchmark(
+        &pool,
+        NET,
+        "w1",
+        w.revision,
+        &ConfirmedBenchmark {
+            benchmark_id: "bench_a".to_string(),
+            block_confirmed: 110,
+            stopped: false,
+        },
+    )
+    .await
+    .unwrap();
+    let w = workflow::confirm_proof(
+        &pool,
+        NET,
+        "w1",
+        w.revision,
+        &ConfirmedProof {
+            benchmark_id: "bench_a".to_string(),
+            block_confirmed: 115,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(w.state, WorkflowState::ProofConfirmed);
+
+    let long_past = started + i64::from(guardrails.workflow_expiry_age_blocks) + 99;
+    assert!(
+        workflow::expire_if_due(&pool, &guardrails, NET, "w1", long_past)
+            .await
+            .unwrap()
+            .is_none(),
+        "a confirmed proof is not unfinished work"
+    );
+    let after = workflow::find(&pool, NET, "w1").await.unwrap().unwrap();
+    assert_eq!(after.state, WorkflowState::ProofConfirmed);
+    assert_eq!(after.terminal_reason, None);
+}
+
+#[tokio::test]
+async fn an_unsettled_benchmark_write_holds_the_deadline_off_too() {
+    // §7.3 and §12 describe an attempt left "pending or unknown" by a gateway
+    // crash. That is a fact about a request, not about which endpoint it went
+    // to, so a benchmark or proof write stranded that way withholds expiry
+    // exactly as a precommit does. Expiring past one strands the ambiguity on
+    // a terminal row that §10 step 1 never reloads, leaving that write's lane
+    // closed with nothing scheduled to settle it.
+    let Some(db) = TempDb::migrated("wf_unsettled_benchmark").await else {
+        return;
+    };
+    let pool = db.pool_as("pool_controller").await;
+    let ledger = pool_workflow::PostgresAttemptLedger::new(db.pool_as("pool_gateway").await);
+    let guardrails = pool_workflow::Guardrails::from_config_json(include_str!(
+        "../../../config/tig_integration.json"
+    ))
+    .unwrap();
+
+    let w = decided(&pool, "w1").await;
+    let w = workflow::confirm_precommit(&pool, NET, "w1", w.revision, &precommit("bench_a", 100))
+        .await
+        .unwrap();
+    let started = w.block_started.unwrap();
+    let long_past = started + i64::from(guardrails.workflow_expiry_age_blocks) + 99;
+
+    let intent_id: String = sqlx::query_scalar(
+        "INSERT INTO pool.tig_write_intent
+             (network, workflow_id, write_kind, generation, payload_digest, benchmark_id)
+         VALUES ('testnet', 'w1', 'benchmark', 1,
+                 decode(repeat('ab', 32), 'hex'), 'bench_a')
+         RETURNING intent_id::text",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let attempt = ledger.begin(&intent_id).await.unwrap();
+
+    assert!(
+        workflow::expire_if_due(&pool, &guardrails, NET, "w1", long_past)
+            .await
+            .unwrap()
+            .is_none(),
+        "an unanswered benchmark write is not settled by a timeout"
+    );
+
+    ledger
+        .resolve(
+            &attempt.attempt_id,
+            pool_workflow::AttemptOutcome::Rejected,
+            Some(400),
+            Some("refused"),
+        )
+        .await
+        .unwrap();
+    let expired = workflow::expire_if_due(&pool, &guardrails, NET, "w1", long_past)
+        .await
+        .unwrap()
+        .expect("settled, so the deadline applies");
+    assert_eq!(expired.state, WorkflowState::Expired);
+}
+
+#[tokio::test]
+async fn a_precommit_that_never_confirmed_still_expires() {
+    // The capacity leak this closes. §8 measures an unfinished workflow from
+    // TIG's `block_started`, which exists only once the precommit confirms —
+    // so a workflow whose precommit never confirmed has no such value. That
+    // does not make it immortal: §6.1's interval opened when it was created,
+    // `admit_precommit` counts open intervals, and nothing else would ever
+    // close it. Enough of them wedge admission.
+    //
+    // It is measured from the decision anchor against the same guardrail,
+    // which is sound on §8's own terms: a precommit's `settings.block_id` must
+    // be TIG's latest or second-latest block when processed, so one that has
+    // not confirmed after the whole expiry window cannot confirm afterwards.
+    let Some(db) = TempDb::migrated("wf_noage").await else {
+        return;
+    };
+    let pool = db.pool_as("pool_controller").await;
+    let guardrails = pool_workflow::Guardrails::from_config_json(include_str!(
+        "../../../config/tig_integration.json"
+    ))
+    .unwrap();
+
+    let w = decided(&pool, "w1").await;
+    assert_eq!(w.block_started, None);
+    let anchor = w.unverified_from_block;
+
+    // Inside the window, nothing happens.
+    let almost = anchor + i64::from(guardrails.workflow_expiry_age_blocks) - 1;
+    assert!(
+        workflow::expire_if_due(&pool, &guardrails, NET, "w1", almost)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    let due = anchor + i64::from(guardrails.workflow_expiry_age_blocks);
+    let expired = workflow::expire_if_due(&pool, &guardrails, NET, "w1", due)
+        .await
+        .unwrap()
+        .expect("a precommit that never confirmed is dead by §8's own rule");
+    assert_eq!(expired.state, WorkflowState::Expired);
+    assert_eq!(
+        expired.unverified_to_block,
+        Some(due),
+        "the interval closes, which is what frees the slot"
+    );
+    assert_eq!(
+        expired.terminal_reason.as_deref(),
+        Some(pool_workflow::workflow::EXPIRY_REASON_NO_PRECOMMIT),
+        "a distinct code: never obtaining a benchmark is not losing one"
+    );
+}
+
+#[tokio::test]
+async fn an_unsettled_precommit_is_never_expired_by_the_clock() {
+    // §10: an ambiguous write is settled by reconciliation or an operator,
+    // never by a local timeout — the gateway "never blindly resubmits an
+    // ambiguous precommit". Expiring here would make the pool's clock the
+    // authority over a write that may well have reached TIG, and E4's tuple
+    // search would later map its confirmation onto a terminal workflow.
+    let Some(db) = TempDb::migrated("wf_unsettled").await else {
+        return;
+    };
+    let pool = db.pool_as("pool_controller").await;
+    let gateway = db.pool_as("pool_gateway").await;
+    let guardrails = pool_workflow::Guardrails::from_config_json(include_str!(
+        "../../../config/tig_integration.json"
+    ))
+    .unwrap();
+
+    let ambiguous = decided(&pool, "w_ambiguous").await;
+    let pending = decided(&pool, "w_pending").await;
+    let settled = decided(&pool, "w_settled").await;
+    let untransmitted = decided(&pool, "w_untransmitted").await;
+    let long_past =
+        ambiguous.unverified_from_block + i64::from(guardrails.workflow_expiry_age_blocks) + 99;
+
+    let intent_of = |workflow: &str, state: &str| {
+        let pool = pool.clone();
+        let workflow = workflow.to_string();
+        let state = state.to_string();
+        async move {
+            sqlx::query_scalar::<_, String>(
+                "INSERT INTO pool.tig_write_intent
+                     (network, workflow_id, write_kind, generation, payload_digest, state)
+                 VALUES ('testnet', $1, 'precommit', 1,
+                         decode(repeat('ab', 32), 'hex'), $2)
+                 RETURNING intent_id::text",
+            )
+            .bind(workflow)
+            .bind(state)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+
+    // §10's lane admits one unresolved precommit at a time, network-wide, so
+    // these run in sequence: each case frees the lane before the next claims
+    // it.
+    let ledger = pool_workflow::PostgresAttemptLedger::new(gateway);
+
+    // A write TIG refused is settled, so the deadline applies.
+    let settled_intent = intent_of("w_settled", "PREPARED").await;
+    let attempt = ledger.begin(&settled_intent).await.unwrap();
+    ledger
+        .resolve(
+            &attempt.attempt_id,
+            pool_workflow::AttemptOutcome::Rejected,
+            Some(400),
+            Some("refused"),
+        )
+        .await
+        .unwrap();
+    let expired = workflow::expire_if_due(&pool, &guardrails, NET, "w_settled", long_past)
+        .await
+        .unwrap()
+        .expect("a settled write no longer holds the deadline off");
+    assert_eq!(expired.state, WorkflowState::Expired);
+
+    // An ambiguous write holds it off. Reached the way production reaches it —
+    // `resolve` records the ambiguity on the attempt and moves the intent to
+    // OUTCOME_UNKNOWN in one transaction — rather than by writing the intent
+    // state directly, because the two are not independent facts and a test
+    // that sets one by hand can assert a hold the real path never produces.
+    let ambiguous_intent = intent_of("w_ambiguous", "PREPARED").await;
+    let ambiguous_attempt = ledger.begin(&ambiguous_intent).await.unwrap();
+    ledger
+        .resolve(
+            &ambiguous_attempt.attempt_id,
+            pool_workflow::AttemptOutcome::Ambiguous,
+            None,
+            Some("no usable answer"),
+        )
+        .await
+        .unwrap();
+    assert!(
+        workflow::expire_if_due(&pool, &guardrails, NET, "w_ambiguous", long_past)
+            .await
+            .unwrap()
+            .is_none(),
+        "an ambiguous write is not settled by a timeout"
+    );
+
+    // And §10's reconciliation releases it. This is the half that decides
+    // whether the hold is a deadline or a latch: `reconcile` settles the
+    // attempt and does *not* move the intent, so a predicate reading the
+    // intent's OUTCOME_UNKNOWN would keep this workflow — and §6.1's
+    // unverified interval — open for the life of the database, once, forever,
+    // for any precommit that had ever gone ambiguous.
+    ledger
+        .reconcile(
+            &ambiguous_attempt.attempt_id,
+            pool_workflow::AttemptOutcome::Rejected,
+        )
+        .await
+        .unwrap();
+    let expired = workflow::expire_if_due(&pool, &guardrails, NET, "w_ambiguous", long_past)
+        .await
+        .unwrap()
+        .expect("reconciliation settled the write; the deadline applies again");
+    assert_eq!(expired.state, WorkflowState::Expired);
+
+    // An attempt begun and never answered is unsettled too — §12's "attempt
+    // stays pending or unknown" after a gateway crash.
+    let pending_intent = intent_of("w_pending", "PREPARED").await;
+    ledger.begin(&pending_intent).await.unwrap();
+    assert!(
+        workflow::expire_if_due(&pool, &guardrails, NET, "w_pending", long_past)
+            .await
+            .unwrap()
+            .is_none(),
+        "a begun-but-unanswered attempt is unsettled too"
+    );
+
+    // The other direction, and the one that decides whether this predicate is
+    // a deadline or a wedge. `admit_precommit` creates the workflow and its
+    // PREPARED intent in one transaction (`architecture.md` §7.2), so *every*
+    // production workflow carries a precommit intent from birth. If a
+    // never-transmitted intent counted as unsettled, no workflow could ever
+    // expire and §6.1's interval would never close — the exact capacity leak
+    // this sweep exists to close, reinstated by the guard meant to protect it.
+    //
+    // §7.3 has the gateway record an attempt *before* the request leaves, so
+    // a PREPARED intent with no attempt row is positive evidence that nothing
+    // was sent. It claims no lane, so it needs no turn in the sequence.
+    intent_of("w_untransmitted", "PREPARED").await;
+    let expired = workflow::expire_if_due(&pool, &guardrails, NET, "w_untransmitted", long_past)
+        .await
+        .unwrap()
+        .expect("a precommit that was never sent holds nothing off");
+    assert_eq!(expired.state, WorkflowState::Expired);
+
+    let _ = (ambiguous, pending, settled, untransmitted);
+}
+
+#[tokio::test]
+async fn a_confirmed_row_without_a_start_block_is_still_labelled_as_stalled() {
+    // The age basis and the reason code answer different questions. A row
+    // written before `block_started` existed is *confirmed* — it has a
+    // benchmark — but has no start block, so it is aged from the decision
+    // anchor while still being labelled as a benchmark that stalled. Keying
+    // the code to `block_started` would file it under "never obtained a
+    // precommit" and mislabel §10.2's metric dimension.
+    let Some(db) = TempDb::migrated("wf_legacy_reason").await else {
+        return;
+    };
+    let pool = db.pool_as("pool_controller").await;
+    let guardrails = pool_workflow::Guardrails::from_config_json(include_str!(
+        "../../../config/tig_integration.json"
+    ))
+    .unwrap();
+    let mut owner = sqlx::PgConnection::connect_with(&db.as_superuser())
+        .await
+        .unwrap();
+
+    sqlx::query("ALTER TABLE pool.workflow DISABLE TRIGGER workflow_insert_block_started")
+        .execute(&mut owner)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO pool.workflow
+             (network, workflow_id, state, owner_kind, owner_id,
+              unverified_from_block, benchmark_id, confirmed_track_id,
+              confirmed_settings, precommit_confirmed_block)
+         VALUES ('testnet', 'legacy', 'BENCHMARK_SUBMITTED', 'POOL_BOOTSTRAP',
+                 'pool-bootstrap', 90, 'bench_legacy', 't002', '{}'::jsonb, 100)",
+    )
+    .execute(&mut owner)
+    .await
+    .unwrap();
+    sqlx::query("ALTER TABLE pool.workflow ENABLE TRIGGER workflow_insert_block_started")
+        .execute(&mut owner)
+        .await
+        .unwrap();
+
+    let due = 90 + i64::from(guardrails.workflow_expiry_age_blocks);
+    let expired = workflow::expire_if_due(&pool, &guardrails, NET, "legacy", due)
+        .await
+        .unwrap()
+        .expect("aged from the decision anchor, since it has no start block");
+    assert_eq!(
+        expired.terminal_reason.as_deref(),
+        Some(pool_workflow::workflow::EXPIRY_REASON_UNCONFIRMED),
+        "it has a benchmark; it stalled, it did not fail to get one"
+    );
+}
+
+#[tokio::test]
+async fn the_expiry_reason_is_a_bounded_code() {
+    // `architecture.md` §10.2 uses the terminal reason as a metric dimension
+    // and forbids unbounded ones; §6 asks for a "reason code". A string
+    // embedding the observed age would be a new dimension value per workflow.
+    let Some(db) = TempDb::migrated("wf_reason_code").await else {
+        return;
+    };
+    let pool = db.pool_as("pool_controller").await;
+    let guardrails = pool_workflow::Guardrails::from_config_json(include_str!(
+        "../../../config/tig_integration.json"
+    ))
+    .unwrap();
+
+    let w = decided(&pool, "w1").await;
+    let w = workflow::confirm_precommit(&pool, NET, "w1", w.revision, &precommit("bench_a", 100))
+        .await
+        .unwrap();
+    let started = w.block_started.unwrap();
+
+    let expired = workflow::expire_if_due(
+        &pool,
+        &guardrails,
+        NET,
+        "w1",
+        started + i64::from(guardrails.workflow_expiry_age_blocks) + 37,
+    )
+    .await
+    .unwrap()
+    .expect("past the guardrail");
+
+    let reason = expired.terminal_reason.unwrap();
+    assert_eq!(
+        reason,
+        pool_workflow::workflow::EXPIRY_REASON_UNCONFIRMED,
+        "the fixture's code, and nothing per-workflow in it"
+    );
+    assert!(
+        !reason.contains("37"),
+        "the observed age belongs on the event, not in the dimension: {reason}"
+    );
+}
+
+#[tokio::test]
+async fn the_start_block_cannot_be_moved() {
+    // A workflow whose start could move is a workflow whose deadlines could be
+    // reset — the one edit §8's guardrails cannot survive.
+    let Some(db) = TempDb::migrated("wf_started").await else {
+        return;
+    };
+    let pool = db.pool_as("pool_controller").await;
+    let w = decided(&pool, "w1").await;
+    workflow::confirm_precommit(&pool, NET, "w1", w.revision, &precommit("bench_a", 100))
+        .await
+        .unwrap();
+
+    let error = sqlx::query(
+        "UPDATE pool.workflow SET block_started = 100000, revision = revision + 1
+         WHERE workflow_id = 'w1'",
+    )
+    .execute(&pool)
+    .await
+    .expect_err("block_started is immutable once TIG has set it");
+    assert!(
+        error.to_string().contains("block_started is immutable"),
+        "unexpected error: {error}"
+    );
+}
+
+#[tokio::test]
+async fn the_deadline_sweep_does_not_expire_a_verified_workflow() {
+    // §4.5's ladder continues past VERIFIED to ACTIVE, so VERIFIED is not
+    // terminal — but §8's guardrail expires *unfinished* work, and a benchmark
+    // TIG has verified is not unfinished. Guarding only on `is_terminal` would
+    // let the pool's clock overwrite TIG's verification, which is exactly what
+    // `expire`'s own doc says it must never do.
+    let Some(db) = TempDb::migrated("wf_verified_not_expired").await else {
+        return;
+    };
+    let pool = db.pool_as("pool_controller").await;
+    let guardrails = pool_workflow::Guardrails::from_config_json(include_str!(
+        "../../../config/tig_integration.json"
+    ))
+    .unwrap();
+
+    let w = decided(&pool, "w1").await;
+    let w = workflow::confirm_precommit(&pool, NET, "w1", w.revision, &precommit("bench_a", 100))
+        .await
+        .unwrap();
+    let started = w.block_started.unwrap();
+    let w = workflow::confirm_benchmark(
+        &pool,
+        NET,
+        "w1",
+        w.revision,
+        &ConfirmedBenchmark {
+            benchmark_id: "bench_a".to_string(),
+            block_confirmed: 110,
+            stopped: false,
+        },
+    )
+    .await
+    .unwrap();
+    let w = workflow::confirm_proof(
+        &pool,
+        NET,
+        "w1",
+        w.revision,
+        &ConfirmedProof {
+            benchmark_id: "bench_a".to_string(),
+            block_confirmed: 120,
+        },
+    )
+    .await
+    .unwrap();
+    let w = workflow::confirm_verified(&pool, NET, "w1", w.revision, "bench_a", 130)
+        .await
+        .unwrap();
+    assert_eq!(w.state, WorkflowState::Verified);
+    assert!(!w.state.is_terminal());
+
+    // Far past the guardrail.
+    let long_after = started + i64::from(guardrails.workflow_expiry_age_blocks) + 500;
+    assert!(
+        workflow::expire_if_due(&pool, &guardrails, NET, "w1", long_after)
+            .await
+            .unwrap()
+            .is_none(),
+        "a verified benchmark is not unfinished work"
+    );
+    let stored = workflow::find(&pool, NET, "w1").await.unwrap().unwrap();
+    assert_eq!(stored.state, WorkflowState::Verified);
+    assert_eq!(stored.revision, w.revision, "nothing was written");
+}
+
+#[tokio::test]
+async fn a_row_predating_the_block_started_column_can_still_transition() {
+    // 0007 adds `block_started` to a table 0006 already shipped, so a
+    // developer's database can hold a workflow that confirmed a precommit
+    // before the column existed. A table CHECK — even `NOT VALID` — is
+    // re-evaluated against the whole row on every UPDATE, so such a row would
+    // pass the migration and then fail its next transition, with no repair
+    // path in a forward-only scheme. The rule binds when the confirmation is
+    // recorded instead.
+    let Some(db) = TempDb::migrated("wf_legacy_row").await else {
+        return;
+    };
+    let pool = db.pool_as("pool_controller").await;
+    let mut owner = sqlx::PgConnection::connect_with(&db.as_superuser())
+        .await
+        .unwrap();
+
+    // The pre-0007 shape: confirmed, with no block_started. The INSERT trigger
+    // refuses this now, so the row is created the way a pre-0007 database
+    // holds one — the trigger disabled for this statement, which is what
+    // "predates the migration" means.
+    sqlx::query("ALTER TABLE pool.workflow DISABLE TRIGGER workflow_insert_block_started")
+        .execute(&mut owner)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO pool.workflow
+             (network, workflow_id, state, owner_kind, owner_id,
+              unverified_from_block, benchmark_id, confirmed_track_id,
+              confirmed_settings, precommit_confirmed_block)
+         VALUES ('testnet', 'legacy', 'PRECOMMIT_CONFIRMED', 'POOL_BOOTSTRAP',
+                 'pool-bootstrap', 90, 'bench_legacy', 't002', '{}'::jsonb, 100)",
+    )
+    .execute(&mut owner)
+    .await
+    .expect("a row in the pre-0007 shape");
+    sqlx::query("ALTER TABLE pool.workflow ENABLE TRIGGER workflow_insert_block_started")
+        .execute(&mut owner)
+        .await
+        .unwrap();
+
+    let w = workflow::find(&pool, NET, "legacy").await.unwrap().unwrap();
+    assert_eq!(w.block_started, None);
+
+    let w = workflow::confirm_benchmark(
+        &pool,
+        NET,
+        "legacy",
+        w.revision,
+        &ConfirmedBenchmark {
+            benchmark_id: "bench_legacy".to_string(),
+            block_confirmed: 110,
+            stopped: false,
+        },
+    )
+    .await
+    .expect("a legacy row keeps transitioning");
+    assert_eq!(w.state, WorkflowState::BenchmarkConfirmed);
+}
+
+#[tokio::test]
+async fn an_inserted_row_must_bring_its_start_block_too() {
+    // The UPDATE trigger reads OLD, so it cannot see a row created wrong in
+    // the first place. Without an INSERT guard, a direct insert naming
+    // `confirmed_track_id` with no `block_started` would be accepted and §8's
+    // deadlines would have nothing to measure that workflow from.
+    let Some(db) = TempDb::migrated("wf_insert_start").await else {
+        return;
+    };
+    let pool = db.pool_as("pool_controller").await;
+
+    let error = sqlx::query(
+        "INSERT INTO pool.workflow
+             (network, workflow_id, state, owner_kind, owner_id,
+              unverified_from_block, benchmark_id, confirmed_track_id,
+              confirmed_settings, precommit_confirmed_block)
+         VALUES ('testnet', 'w1', 'PRECOMMIT_CONFIRMED', 'POOL_BOOTSTRAP',
+                 'pool-bootstrap', 90, 'bench_a', 't002', '{}'::jsonb, 100)",
+    )
+    .execute(&pool)
+    .await
+    .expect_err("a confirmed row carries its start block");
+    assert!(
+        error.to_string().contains("must carry block_started"),
+        "unexpected error: {error}"
+    );
+}
+
+#[tokio::test]
+async fn a_confirmation_must_bring_its_start_block() {
+    // The other half of the same rule: a *new* confirmation cannot be recorded
+    // without `block_started`, or §8's deadlines would have nothing to measure
+    // the workflow's age from.
+    let Some(db) = TempDb::migrated("wf_confirm_needs_start").await else {
+        return;
+    };
+    let pool = db.pool_as("pool_controller").await;
+    decided(&pool, "w1").await;
+
+    let error = sqlx::query(
+        "UPDATE pool.workflow
+         SET state = 'PRECOMMIT_CONFIRMED', revision = revision + 1,
+             benchmark_id = 'bench_a', confirmed_track_id = 't002',
+             confirmed_settings = '{}'::jsonb, precommit_confirmed_block = 100
+         WHERE workflow_id = 'w1'",
+    )
+    .execute(&pool)
+    .await
+    .expect_err("a confirmation carries the start block");
+    assert!(
+        error.to_string().contains("must carry block_started"),
+        "unexpected error: {error}"
     );
 }

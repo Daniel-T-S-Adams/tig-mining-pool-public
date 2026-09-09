@@ -1554,6 +1554,7 @@ version = "0.1.0"
 dependencies = [
  "pool-domain",
  "pool-test-support",
+ "serde",
  "serde_json",
  "sqlx",
  "thiserror",

@@ -401,6 +401,57 @@ mark unfinished local workflow expired at age >= 120 blocks
 construct and submit a proof immediately after confirmed sampled nonces appear
 ```
 
+These ages are measured from TIG's `details.block_started`, which exists only
+once a precommit confirms. A workflow whose precommit **never** confirmed is
+expired against the same guardrail measured from the anchor block of its
+**latest** precommit decision instead. That is not a second policy: the first
+rule above makes a precommit's `settings.block_id` reference TIG's latest or
+second-latest block when processed, so a precommit still unconfirmed a whole
+expiry window after the anchor it was built on cannot confirm afterwards.
+Without it the workflow would never close `mining_system.md` §6.1's unverified
+interval, and §7.6's recount — which reads open intervals — would hold that
+capacity for the lifetime of the database.
+
+The *latest* decision, not the workflow's own start: a new precommit
+generation is decided against a fresh anchor, while §6.1's interval keeps
+measuring capacity from when the workflow first consumed it. Ageing a later
+generation from the first one's anchor would expire a precommit that had only
+just been sent, against a block TIG will still accept.
+
+The guardrail applies only while the workflow is **unfinished local work**.
+Once TIG has confirmed the proof, the pool has done everything the ten-block
+reserve below budgets for and the only remaining event is TIG's own
+verification, which §7 makes TIG's to decide. A confirmed proof that never
+verifies therefore holds §6.1's interval open until it does; that is a
+condition to alert on, not one a local deadline can resolve, because expiring
+it would neither remove the benchmark from TIG nor stop a later verification
+landing on a workflow the pool had already called dead.
+
+Expiry is a deadline, never a resolution. A write that was **sent and not
+answered** is settled by §10's reconciliation or by an operator, not by the
+pool's clock: the expiry is withheld while any of the workflow's write
+attempts is unresolved — no recorded outcome, or `AMBIGUOUS` and not yet
+settled by reconciliation — because a local timeout must not become the
+authority over a write that may have reached TIG. Any write kind, not only a
+precommit: an attempt left pending by a gateway crash is a fact about a
+request, and expiring past one strands the ambiguity on a terminal workflow
+that §10 step 1 never reloads.
+
+The condition is read from the **attempt** ledger, not from the intent's
+`OUTCOME_UNKNOWN`. The intent state is written alongside the ambiguous attempt
+and reconciliation settles the attempt, so an intent that once went unknown
+says so permanently; keying the deadline to it would hold the workflow — and
+its capacity — open for the life of the database. It is also evaluated as part
+of the write that ends the workflow rather than read beforehand, because a
+write attempt begins on a table the expiring transaction cannot lock.
+
+The two outcomes are recorded under distinct terminal reason codes, which
+`architecture.md` §10.2 reads as a bounded metric dimension:
+`workflow_age_120_without_confirmation` for a benchmark that began and stalled,
+and `workflow_expired_without_precommit` for one that never began. The observed
+age and the guardrail value go on the expiry event as structured fields rather
+than into the code.
+
 The ten-block interval from package deadline to local expiry is reserved for
 pool-owned commitment, sampling, proof construction, submission, and
 confirmation. These are spike safeguards, not permanent constants. Production

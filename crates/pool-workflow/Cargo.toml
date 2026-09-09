@@ -11,6 +11,7 @@ pool-domain = { path = "../pool-domain" }
 # The decision record's draw map, settings and reserve inputs are jsonb, and
 # the pool's own settings keep the types it chose them at (mining_system.md
 # §6.6, tig_integration.md §4).
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sqlx = { version = "0.9", default-features = false, features = [
     "json",

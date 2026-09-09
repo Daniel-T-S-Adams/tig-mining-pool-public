@@ -170,6 +170,39 @@ impl WorkflowState {
                 | WorkflowState::Failed
         )
     }
+
+    /// Whether §8's guardrail has anything to measure: work the **pool** still
+    /// owes.
+    ///
+    /// `tig_integration.md` §8 expires an "unfinished local workflow" at 120
+    /// blocks, and its own accounting says what finished means: the ten-block
+    /// reserve before that deadline is "for pool-owned commitment, sampling,
+    /// proof construction, submission, and confirmation". The reserve ends at
+    /// proof *confirmation*. Past that the pool has done everything the
+    /// guardrail budgets for and the only remaining event is TIG's — which §7
+    /// makes TIG's to decide, not the pool's clock.
+    ///
+    /// So `ProofConfirmed` and `Verified` are outside it, as terminal states
+    /// are. Expiring a `PROOF_CONFIRMED` workflow would rewrite work whose
+    /// precommit, benchmark and proof TIG has all confirmed into a local
+    /// failure, label it "without confirmation" when everything was confirmed,
+    /// make its heavy artifacts deletable as terminal (`mining_system.md` §9,
+    /// §10 invariant 17), and turn the verification that follows into a
+    /// discrepancy needing an operator.
+    ///
+    /// The cost is stated rather than hidden: a proof TIG confirms and never
+    /// verifies holds §6.1's unverified interval open, because only
+    /// verification or a terminal state closes it. That is a TIG-side
+    /// condition to alert on, not one a local timeout can resolve — expiring
+    /// it would not remove the benchmark from TIG, and a verification arriving
+    /// afterwards would land on a terminal row.
+    pub fn is_unfinished_local_work(self) -> bool {
+        !self.is_terminal()
+            && !matches!(
+                self,
+                WorkflowState::ProofConfirmed | WorkflowState::Verified
+            )
+    }
 }
 
 /// One workflow row.
@@ -188,6 +221,9 @@ pub struct Workflow {
     pub confirmed_track_id: Option<String>,
     pub confirmed_settings: Option<serde_json::Value>,
     pub precommit_confirmed_block: Option<i64>,
+    /// TIG's `details.block_started`, once the precommit confirms. §8's
+    /// deadlines are ages from here.
+    pub block_started: Option<i64>,
     pub terminal_reason: Option<String>,
 }
 
@@ -200,6 +236,10 @@ pub struct Workflow {
 pub struct ConfirmedPrecommit {
     pub benchmark_id: String,
     pub block_confirmed: i64,
+    /// TIG's `details.block_started`. Every guardrail in `tig_integration.md`
+    /// §8 is an age measured from this, and it is TIG's value rather than one
+    /// the pool proposed.
+    pub block_started: i64,
     /// The track TIG selected, which the pool did not choose.
     pub track_id: String,
     /// The settings TIG recorded. These **replace** the proposed ones (F2).
@@ -233,6 +273,18 @@ pub struct ConfirmedFraud {
 pub enum WorkflowError {
     #[error("workflow store unavailable: {0}")]
     Unavailable(String),
+    /// A TIG write for this workflow was still in flight when the write that
+    /// would have ended it reached the database.
+    ///
+    /// Not a failure. §8's deadline is periodic and the next pass reads the
+    /// attempt the race hid; ending the workflow anyway would strand an
+    /// ambiguity on a terminal row that §10 step 1 never reloads, leaving the
+    /// network-wide precommit lane closed with nothing scheduled to settle it.
+    #[error("{network} workflow {workflow_id} has a TIG write in flight")]
+    WriteInFlight {
+        network: Network,
+        workflow_id: String,
+    },
     #[error("{network} workflow {workflow_id} does not exist")]
     NotFound {
         network: Network,
@@ -329,7 +381,7 @@ pub async fn create(
          RETURNING workflow_id, network, state, revision, owner_kind, owner_id,
                    benchmark_id, unverified_from_block, unverified_to_block,
                    confirmed_track_id, confirmed_settings,
-                   precommit_confirmed_block, terminal_reason",
+                   precommit_confirmed_block, block_started, terminal_reason",
     )
     .bind(workflow_id)
     .bind(network.as_str())
@@ -351,7 +403,7 @@ pub async fn find(
         "SELECT workflow_id, network, state, revision, owner_kind, owner_id,
                 benchmark_id, unverified_from_block, unverified_to_block,
                 confirmed_track_id, confirmed_settings,
-                precommit_confirmed_block, terminal_reason
+                precommit_confirmed_block, block_started, terminal_reason
          FROM pool.workflow WHERE network = $1 AND workflow_id = $2",
     )
     .bind(network.as_str())
@@ -382,6 +434,7 @@ fn row_to_workflow(row: &sqlx::postgres::PgRow) -> Result<Workflow, WorkflowErro
         precommit_confirmed_block: row
             .try_get("precommit_confirmed_block")
             .map_err(unavailable)?,
+        block_started: row.try_get("block_started").map_err(unavailable)?,
         terminal_reason: row.try_get("terminal_reason").map_err(unavailable)?,
     })
 }
@@ -480,6 +533,7 @@ pub async fn confirm_precommit(
             }
             Ok(Fields {
                 benchmark_id: Some(evidence.benchmark_id.clone()),
+                block_started: Some(evidence.block_started),
                 confirmed: Some((
                     evidence.track_id.clone(),
                     evidence.settings.clone(),
@@ -714,13 +768,63 @@ pub async fn expire(
     reason: &str,
     at_block: i64,
 ) -> Result<Workflow, WorkflowError> {
+    expire_inner(
+        pool,
+        network,
+        workflow_id,
+        at_revision,
+        reason,
+        at_block,
+        false,
+    )
+    .await
+}
+
+/// [`expire`], refused if a TIG write for the workflow is unsettled when the
+/// update lands.
+///
+/// The deadline sweep's entry point. Separate from [`expire`] because the
+/// guard belongs to §8's *clock-driven* expiry: an operator ending a workflow
+/// deliberately is making the judgement the guard exists to keep a timer from
+/// making.
+async fn expire_unless_a_write_is_in_flight(
+    pool: &PgPool,
+    network: Network,
+    workflow_id: &str,
+    at_revision: i32,
+    reason: &str,
+    at_block: i64,
+) -> Result<Workflow, WorkflowError> {
+    expire_inner(
+        pool,
+        network,
+        workflow_id,
+        at_revision,
+        reason,
+        at_block,
+        true,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn expire_inner(
+    pool: &PgPool,
+    network: Network,
+    workflow_id: &str,
+    at_revision: i32,
+    reason: &str,
+    at_block: i64,
+    require_no_write_in_flight: bool,
+) -> Result<Workflow, WorkflowError> {
     reject_member_fault(reason)?;
-    transition(
+    transition_guarded(
         pool,
         network,
         workflow_id,
         at_revision,
         WorkflowState::Expired,
+        require_no_write_in_flight,
         |current| {
             // A TIG-confirmed terminal state, or an expiry already recorded.
             // The pool's deadline never overrules TIG's record and never
@@ -782,6 +886,7 @@ fn expect_benchmark(
 #[derive(Debug, Default)]
 struct Fields {
     benchmark_id: Option<String>,
+    block_started: Option<i64>,
     confirmed: Option<(String, serde_json::Value, i64)>,
     unverified_to_block: Option<i64>,
     terminal_reason: Option<String>,
@@ -797,6 +902,32 @@ async fn transition(
     to: WorkflowState,
     decide: impl FnOnce(&Workflow) -> Result<Fields, WorkflowError>,
 ) -> Result<Workflow, WorkflowError> {
+    transition_guarded(pool, network, workflow_id, at_revision, to, false, decide).await
+}
+
+/// [`transition`], optionally refusing to write while a TIG write is in
+/// flight.
+///
+/// The condition is evaluated by the database *as part of the UPDATE* rather
+/// than read first and acted on after. That is not caution, it is the only
+/// place it can go: `PostgresAttemptLedger::begin` inserts into
+/// `tig_write_attempt` and touches no row in `pool.workflow`, so the row lock
+/// this function already holds does not serialize against it and neither
+/// would an earlier read in the same transaction. Asking inside the write
+/// makes the database evaluate both against one snapshot.
+///
+/// Only expiry asks for it. Every other transition is driven by confirmed TIG
+/// evidence, which is a fact about what already happened and cannot be made
+/// wrong by a write starting now.
+async fn transition_guarded(
+    pool: &PgPool,
+    network: Network,
+    workflow_id: &str,
+    at_revision: i32,
+    to: WorkflowState,
+    require_no_write_in_flight: bool,
+    decide: impl FnOnce(&Workflow) -> Result<Fields, WorkflowError>,
+) -> Result<Workflow, WorkflowError> {
     let mut tx = pool.begin().await.map_err(unavailable)?;
 
     // FOR UPDATE, so the guard reads what the update will write against.
@@ -804,7 +935,7 @@ async fn transition(
         "SELECT workflow_id, network, state, revision, owner_kind, owner_id,
                 benchmark_id, unverified_from_block, unverified_to_block,
                 confirmed_track_id, confirmed_settings,
-                precommit_confirmed_block, terminal_reason
+                precommit_confirmed_block, block_started, terminal_reason
          FROM pool.workflow
          WHERE network = $1 AND workflow_id = $2
          FOR UPDATE",
@@ -846,7 +977,10 @@ async fn transition(
         None => (None, None, None),
     };
 
-    let updated = sqlx::query(
+    // §7.3/§10: a local decision must not overtake a write whose fate is
+    // unknown. The condition is spliced in rather than restated so that the
+    // rule has one definition; it is a crate constant, not caller input.
+    let update = concat!(
         "UPDATE pool.workflow SET
              state = $3,
              revision = revision + 1,
@@ -854,6 +988,7 @@ async fn transition(
              confirmed_track_id = COALESCE($5, confirmed_track_id),
              confirmed_settings = COALESCE($6, confirmed_settings),
              precommit_confirmed_block = COALESCE($7, precommit_confirmed_block),
+             block_started = COALESCE($11, block_started),
              -- §6.1 closes the interval at the *earlier* of TIG verification
              -- or a terminal state, and nothing reopens it: COALESCE keeps the
              -- first close, so a later transition cannot move it. §7.6's
@@ -862,36 +997,207 @@ async fn transition(
              unverified_to_block = COALESCE(unverified_to_block, $8),
              terminal_reason = COALESCE($9, terminal_reason)
          WHERE network = $1 AND workflow_id = $2 AND revision = $10
+           AND (NOT $12::boolean OR NOT ",
+        crate::attempt::unsettled_write_exists!(),
+        ")
          RETURNING workflow_id, network, state, revision, owner_kind, owner_id,
                    benchmark_id, unverified_from_block, unverified_to_block,
                    confirmed_track_id, confirmed_settings,
-                   precommit_confirmed_block, terminal_reason",
-    )
-    .bind(network.as_str())
-    .bind(workflow_id)
-    .bind(to.as_str())
-    .bind(fields.benchmark_id)
-    .bind(track)
-    .bind(settings)
-    .bind(confirmed_block)
-    .bind(fields.unverified_to_block)
-    .bind(fields.terminal_reason)
-    .bind(at_revision)
-    .fetch_one(&mut *tx)
-    .await
-    // A permanent conflict, not an outage: another workflow already owns this
-    // benchmark. Reported distinctly so a caller does not retry it forever.
-    .map_err(|e| match &e {
-        sqlx::Error::Database(db) if db.constraint() == Some("workflow_one_per_benchmark") => {
-            WorkflowError::BenchmarkAlreadyClaimed {
-                network,
-                benchmark_id: fields_benchmark.unwrap_or_default(),
+                   precommit_confirmed_block, block_started, terminal_reason",
+    );
+
+    let updated = sqlx::query(update)
+        .bind(network.as_str())
+        .bind(workflow_id)
+        .bind(to.as_str())
+        .bind(fields.benchmark_id)
+        .bind(track)
+        .bind(settings)
+        .bind(confirmed_block)
+        .bind(fields.unverified_to_block)
+        .bind(fields.terminal_reason)
+        .bind(at_revision)
+        .bind(fields.block_started)
+        .bind(require_no_write_in_flight)
+        .fetch_optional(&mut *tx)
+        .await
+        // A permanent conflict, not an outage: another workflow already owns this
+        // benchmark. Reported distinctly so a caller does not retry it forever.
+        .map_err(|e| match &e {
+            sqlx::Error::Database(db) if db.constraint() == Some("workflow_one_per_benchmark") => {
+                WorkflowError::BenchmarkAlreadyClaimed {
+                    network,
+                    benchmark_id: fields_benchmark.unwrap_or_default(),
+                }
             }
-        }
-        _ => unavailable(e),
-    })?;
+            _ => unavailable(e),
+        })?;
+
+    // Nothing matched. The row is held FOR UPDATE and its revision was checked
+    // under that lock, so `revision = $10` cannot have stopped matching — the
+    // only other condition is the in-flight guard, and it can only have gone
+    // from false to true.
+    let Some(updated) = updated else {
+        return Err(WorkflowError::WriteInFlight {
+            network,
+            workflow_id: workflow_id.to_string(),
+        });
+    };
 
     let updated = row_to_workflow(&updated)?;
     tx.commit().await.map_err(unavailable)?;
     Ok(updated)
 }
+
+/// F5: expire a workflow that has run past §8's guardrail, recording the
+/// terminal reason.
+///
+/// Returns the workflow unchanged when it is not due, so a caller can sweep
+/// every live workflow without deciding first — the deadline rule lives here
+/// rather than in each caller that happens to remember it.
+///
+/// **Two ages, one guardrail.** §8 measures an unfinished workflow from TIG's
+/// `block_started`, which exists only once the precommit confirms. A workflow
+/// whose precommit never confirmed has no such value — but it is not therefore
+/// immortal, and treating it as such is what would wedge admission: §6.1's
+/// interval opened when it was created, `admit_precommit` counts open
+/// intervals, and nothing else would ever close it.
+///
+/// So a workflow with no `block_started` is measured from
+/// `unverified_from_block`, the decision's anchor height, against the same
+/// guardrail. That is sound on §8's own terms rather than a new constant: a
+/// precommit's `settings.block_id` must be TIG's latest or second-latest block
+/// when processed, so one that has not confirmed after the whole expiry window
+/// cannot confirm afterwards.
+pub async fn expire_if_due(
+    pool: &PgPool,
+    guardrails: &crate::deadlines::Guardrails,
+    network: Network,
+    workflow_id: &str,
+    current_block: i64,
+) -> Result<Option<Workflow>, WorkflowError> {
+    let Some(current) = find(pool, network, workflow_id).await? else {
+        return Err(WorkflowError::NotFound {
+            network,
+            workflow_id: workflow_id.to_string(),
+        });
+    };
+    // §8's guardrail measures unfinished *local* work, and which states are
+    // that is `WorkflowState`'s to say — not a list repeated here, which is
+    // how `ProofConfirmed` came to be missing from it.
+    if !current.state.is_unfinished_local_work() {
+        return Ok(None);
+    }
+
+    // The age basis is whether TIG told us when the benchmark began; the
+    // reason code is whether the precommit *confirmed*. They are not the same
+    // question: a row written before `block_started` existed can be confirmed
+    // and still have no start block, and calling that "without precommit"
+    // would mislabel §10.2's metric dimension.
+    //
+    // With no `block_started`, §8's substitute basis is the anchor of the
+    // *latest* precommit decision, not the workflow's own
+    // `unverified_from_block`. Those two are the same only for a first
+    // generation: `admit_precommit` issues a new generation against a fresh
+    // anchor for a workflow still at DECIDED, and deliberately does not move
+    // `unverified_from_block`, because §6.1's interval measures capacity from
+    // when the workflow started consuming it and a retry does not restart
+    // that. Ageing a second generation from the first one's anchor would
+    // expire a precommit that had only just been sent, against a block_id TIG
+    // will still accept — the pool's clock pre-empting a live confirmed
+    // benchmark, which §7 gives TIG alone.
+    let from_block = match current.block_started {
+        Some(started) => started,
+        None => latest_decision_anchor(pool, network, workflow_id)
+            .await?
+            .unwrap_or(current.unverified_from_block),
+    };
+    let reason_code = if current.confirmed_track_id.is_some() {
+        EXPIRY_REASON_UNCONFIRMED
+    } else {
+        EXPIRY_REASON_NO_PRECOMMIT
+    };
+
+    let remaining = guardrails.standing(from_block, current_block);
+    if remaining.standing != crate::deadlines::Standing::Expired {
+        return Ok(None);
+    }
+
+    // A write that was sent and never answered is settled by reconciliation,
+    // not by the pool's clock. §10 says the gateway "never blindly resubmits
+    // an ambiguous precommit" and §7.3 leaves an ambiguous outcome for §10 to
+    // reconcile; expiring past one would make a local timeout the authority
+    // over a write that may well have reached TIG, and the E4 tuple search
+    // would later map its confirmation onto a workflow already terminal.
+    //
+    // There is no check for it here. The condition is part of the expiring
+    // UPDATE (`attempt::UNSETTLED_WRITE_EXISTS`), because the gateway's
+    // `begin` touches no row this transaction could lock and anything read
+    // beforehand may be stale by the time the write lands. Asking once, in the
+    // write, is both the correct place and the only place.
+    match expire_unless_a_write_is_in_flight(
+        pool,
+        network,
+        workflow_id,
+        current.revision,
+        reason_code,
+        current_block,
+    )
+    .await
+    {
+        Ok(w) => Ok(Some(w)),
+        // A write began after the read above and before the update. Not an
+        // error: the sweep is periodic, and the next pass sees the attempt.
+        Err(WorkflowError::WriteInFlight { .. }) => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// The anchor height of the workflow's latest precommit decision.
+///
+/// `None` when the workflow has no decision row at all — the bootstrap path
+/// creates a workflow directly, and a caller must fall back rather than treat
+/// a missing decision as height zero, which would expire it on its first
+/// sweep.
+async fn latest_decision_anchor(
+    pool: &PgPool,
+    network: Network,
+    workflow_id: &str,
+) -> Result<Option<i64>, WorkflowError> {
+    sqlx::query_scalar(
+        "SELECT anchor_height
+           FROM pool.precommit_decision
+          WHERE network = $1 AND workflow_id = $2
+          ORDER BY generation DESC
+          LIMIT 1",
+    )
+    .bind(network.as_str())
+    .bind(workflow_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(unavailable)
+}
+
+/// §8's guardrail passed with no confirming TIG evidence.
+///
+/// A **fixed code**, not a sentence. `architecture.md` §10.2 uses the terminal
+/// reason as a metric dimension and forbids unbounded ones, and §6 asks for a
+/// "reason code" — a string embedding the observed age would be a new
+/// dimension value per workflow. The age and the guardrail belong on the
+/// expiry event as structured fields, where they are bounded by nothing.
+///
+/// This is the code `fixtures/queue-lifecycle/v1` pins.
+pub const EXPIRY_REASON_UNCONFIRMED: &str = "workflow_age_120_without_confirmation";
+
+/// The same guardrail, for a workflow whose precommit never confirmed at all.
+///
+/// Distinct from [`EXPIRY_REASON_UNCONFIRMED`] because the two are different
+/// operational situations — one lost a benchmark mid-flight, the other never
+/// obtained one — and a single code would make them indistinguishable in the
+/// §10.2 metric that reads this field.
+///
+/// The number is deliberately absent, unlike the fixture-pinned code above.
+/// §8 calls the guardrail a spike safeguard that production will replace, so a
+/// code naming `120` would go stale the moment it is retuned; the value
+/// belongs on the expiry event as a structured field.
+pub const EXPIRY_REASON_NO_PRECOMMIT: &str = "workflow_expired_without_precommit";

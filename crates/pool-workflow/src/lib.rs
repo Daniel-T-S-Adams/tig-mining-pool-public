@@ -6,6 +6,7 @@
 //! ledger, which records that a request was sent before it is sent.
 
 pub mod attempt;
+pub mod deadlines;
 pub mod decision;
 pub mod intent;
 pub mod lease;
@@ -14,6 +15,7 @@ pub mod workflow;
 pub use attempt::{
     AttemptError, AttemptOutcome, PostgresAttemptLedger, WriteAttempt, WriteAttemptLedger,
 };
+pub use deadlines::{GuardrailError, Guardrails, Remaining, Standing};
 pub use decision::{
     AdmissionError, Admitted, AnchorSnapshot, NewDecision, PRECOMMIT_ADMISSION_LOCK, RecordedDraw,
     RecordedTie, admit_precommit,

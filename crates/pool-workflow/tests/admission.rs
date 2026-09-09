@@ -49,6 +49,24 @@ fn decision(workflow: &str, generation: i32) -> NewDecision {
     decision_with_tie(workflow, generation, None)
 }
 
+/// The same decision, anchored to a different block.
+fn decision_at(
+    workflow: &str,
+    generation: i32,
+    block_id: &str,
+    digest: [u8; 32],
+    height: i64,
+) -> NewDecision {
+    NewDecision {
+        anchor: AnchorSnapshot {
+            block_id: block_id.to_string(),
+            content_digest: digest,
+            height,
+        },
+        ..decision(workflow, generation)
+    }
+}
+
 fn decision_with_tie(workflow: &str, generation: i32, tie: Option<RecordedTie>) -> NewDecision {
     let seed = challenge_tie_seed(Network::Testnet, ANCHOR);
     let mut draw_ranks = serde_json::Map::new();
@@ -886,7 +904,8 @@ async fn a_concurrent_confirmation_cannot_be_overtaken_by_a_new_generation() {
         "UPDATE pool.workflow
          SET state = 'PRECOMMIT_CONFIRMED', revision = revision + 1,
              benchmark_id = 'bench_a', confirmed_track_id = 't002',
-             confirmed_settings = '{}'::jsonb, precommit_confirmed_block = 100
+             confirmed_settings = '{}'::jsonb, precommit_confirmed_block = 100,
+             block_started = 98
          WHERE workflow_id = 'w1'",
     )
     .execute(&mut holder)
@@ -917,4 +936,93 @@ async fn count(pool: &sqlx::PgPool, table: &str) -> i64 {
         other => panic!("unknown table {other}"),
     };
     sqlx::query(sql).fetch_one(pool).await.unwrap().get("n")
+}
+
+#[tokio::test]
+async fn a_second_generation_is_aged_from_its_own_anchor() {
+    // §8 measures a workflow with no `block_started` from its decision's
+    // anchor, and "its decision" means the latest one. `admit_precommit`
+    // issues a new generation against a fresh anchor for a workflow still at
+    // DECIDED and deliberately leaves `unverified_from_block` alone —
+    // §6.1's interval measures capacity from when the workflow started
+    // consuming it, and a retry does not restart that.
+    //
+    // So the two diverge from generation 2 onward. Ageing from
+    // `unverified_from_block` would expire a precommit that had only just been
+    // sent, against a `settings.block_id` TIG will still accept: the pool's
+    // clock pre-empting a live confirmed benchmark, which §7 gives TIG alone,
+    // and closing §6.1's interval on a workflow that is still consuming
+    // capacity — under-counting `pool_unverified` in the direction
+    // `mining_system.md` §10 invariants 22-23 forbid.
+    let Some(db) = TempDb::migrated("admit_regen_age").await else {
+        return;
+    };
+    let pool = with_anchor(&db).await;
+    let guardrails = pool_workflow::Guardrails::from_config_json(include_str!(
+        "../../../config/tig_integration.json"
+    ))
+    .unwrap();
+    let window = i64::from(guardrails.workflow_expiry_age_blocks);
+
+    admit_precommit(&pool, &decision("w1", 1), 4).await.unwrap();
+    let first = pool_workflow::workflow::find(&pool, Network::Testnet, "w1")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.unverified_from_block, 100_080);
+
+    // A later block, and a second generation decided against it. D2e requires
+    // the newest anchor the database holds, so this is also the only anchor
+    // generation 2 could have used.
+    const SECOND: &str = "block_100180";
+    const SECOND_DIGEST: [u8; 32] = [0xab; 32];
+    persist_snapshot(&pool, SECOND, SECOND_DIGEST, 100_180).await;
+    admit_precommit(
+        &pool,
+        &decision_at("w1", 2, SECOND, SECOND_DIGEST, 100_180),
+        4,
+    )
+    .await
+    .unwrap();
+
+    let after = pool_workflow::workflow::find(&pool, Network::Testnet, "w1")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        after.unverified_from_block, 100_080,
+        "the capacity interval still starts where the workflow did"
+    );
+
+    // Due by the first anchor, not by the second. The sweep must read the
+    // second.
+    assert!(
+        pool_workflow::workflow::expire_if_due(
+            &pool,
+            &guardrails,
+            Network::Testnet,
+            "w1",
+            100_080 + window,
+        )
+        .await
+        .unwrap()
+        .is_none(),
+        "generation 2 was decided 100 blocks later and is not yet due"
+    );
+
+    let expired = pool_workflow::workflow::expire_if_due(
+        &pool,
+        &guardrails,
+        Network::Testnet,
+        "w1",
+        100_180 + window,
+    )
+    .await
+    .unwrap()
+    .expect("a whole window past the latest decision's anchor");
+    assert_eq!(
+        expired.state,
+        pool_workflow::WorkflowState::Expired,
+        "the deadline still exists; it is measured from the right block"
+    );
 }

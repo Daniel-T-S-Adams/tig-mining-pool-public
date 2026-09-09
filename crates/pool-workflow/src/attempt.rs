@@ -87,6 +87,63 @@ impl WriteAttempt {
     }
 }
 
+/// "This workflow has a TIG write whose fate is unknown", as SQL.
+///
+/// A correlated `EXISTS` over `$1` (network) and `$2` (workflow_id), meant to
+/// be spliced into a larger statement. It is a fragment rather than a function
+/// because the only correct place to ask it is *inside* the write it guards:
+/// `begin` inserts into `tig_write_attempt` and touches no row in
+/// `pool.workflow`, so a caller that read the answer first and acted on it
+/// after would be acting on a fact the database may have changed in between,
+/// and no lock available to that caller closes the gap. Asking it as part of
+/// the UPDATE makes the database evaluate both against one snapshot.
+///
+/// One definition for one rule. A second copy — a predicate read beforehand,
+/// say — would be a rule stated twice, free to drift, and this module has
+/// already had that bug.
+///
+/// **Every write kind.** §7.3 and §12 describe a gateway that dies before or
+/// after a response and leaves an attempt "pending or unknown" — a fact about
+/// a request, not about which endpoint it went to. A benchmark or proof write
+/// stranded that way is as unsettled as a precommit, and a caller that ended
+/// the workflow past it would leave the ambiguity on a terminal row that §10
+/// step 1 never reloads, closing that lane with nothing scheduled to settle
+/// it.
+///
+/// It reads **attempts only**, deliberately. `tig_write_intent.state` carries
+/// `OUTCOME_UNKNOWN`, which looks like the same fact, but it is written by
+/// `resolve` in the same transaction that marks the attempt `AMBIGUOUS` — a
+/// second copy of the attempt's own state rather than independent evidence —
+/// and `reconcile` settles only the attempt. So the intent keeps saying
+/// `OUTCOME_UNKNOWN` after §10 has established what happened, and a condition
+/// that read it would hold a workflow open for the life of the database once
+/// any of its writes had gone ambiguous.
+///
+/// It is an `EXISTS` over attempts rather than a join that admits a null
+/// outcome: `begin` writes the attempt row *before* the request leaves (see
+/// this module's header), so zero attempt rows is positive evidence that
+/// nothing reached TIG — the opposite of unsettled. A `LEFT JOIN … outcome IS
+/// NULL` says the same thing about a workflow that never transmitted, and
+/// `admit_precommit` gives every workflow an intent from birth.
+///
+/// A macro rather than a `const` so callers can `concat!` it into a statement
+/// that is still a literal. sqlx 0.9 refuses a runtime-built query string
+/// without an explicit `AssertSqlSafe`, and asserting safety is a worse answer
+/// than not building one: this way the composed SQL is fixed at compile time
+/// and there is nothing to audit.
+macro_rules! unsettled_write_exists {
+    () => {
+        "EXISTS (
+             SELECT 1
+               FROM pool.tig_write_intent i
+               JOIN pool.tig_write_attempt a ON a.intent_id = i.intent_id
+              WHERE i.network = $1 AND i.workflow_id = $2
+                AND (a.outcome IS NULL OR a.outcome = 'AMBIGUOUS')
+         )"
+    };
+}
+pub(crate) use unsettled_write_exists;
+
 #[derive(Debug, thiserror::Error)]
 pub enum AttemptError {
     #[error("attempt ledger unavailable: {0}")]

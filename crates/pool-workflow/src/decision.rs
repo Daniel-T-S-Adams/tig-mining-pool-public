@@ -123,6 +123,24 @@ pub struct Admitted {
 
 #[derive(Debug, thiserror::Error)]
 pub enum AdmissionError {
+    /// A precommit for this workflow already left the gateway.
+    ///
+    /// The workflow is still `DECIDED` because §7 advances it only from a
+    /// confirmed *read*, and the read has not happened — or the response that
+    /// carried the assigned `benchmark_id` was lost. Either way TIG may hold a
+    /// benchmark for this decision already, so a second generation would pay a
+    /// second fee and create a second benchmark for one decision, breaking
+    /// §10's permanent one-benchmark-per-workflow mapping.
+    ///
+    /// The way out is §10's tuple search over the exact submitted settings
+    /// (criterion E4), which `restart::reconcile_after_restart` reports as
+    /// `NeedsAttention::PrecommitSearchOwed`. Until that lands, this workflow
+    /// needs an operator.
+    #[error("{network} workflow {workflow_id} already has a precommit at TIG")]
+    PrecommitAlreadyTransmitted {
+        network: Network,
+        workflow_id: String,
+    },
     #[error("decision store unavailable: {0}")]
     Unavailable(String),
     /// D2a: the pool never creates a precommit at or above the limit.
@@ -348,8 +366,21 @@ pub async fn admit_precommit(
         // generation's confirmation, leaving a TIG write the pool could never
         // record. That reconciliation is E4's and D3's; until it lands, only a
         // workflow that has sent nothing may take another generation.
-        // A workflow still at DECIDED has sent nothing, so §7.3's new
-        // generation is safe.
+        // DECIDED is necessary but not sufficient. It is where a workflow
+        // sits when a precommit was sent and the response was lost: §6.1
+        // returns the assigned benchmark_id in that response, nothing durable
+        // holds it, and the state advances only from a confirmed *read*. So a
+        // DECIDED workflow may have a precommit already at TIG, indexed under
+        // a benchmark id the pool cannot name, and admitting a second
+        // generation for it would pay a second fee and create a second
+        // benchmark for one decision — §10's permanent one-benchmark mapping
+        // broken by the pool itself.
+        //
+        // The attempt ledger is the evidence, because `begin` records the
+        // attempt before the request leaves. Nothing sent, nothing to fear;
+        // anything sent, and this workflow is owed E4's tuple search, which
+        // `restart::reconcile_after_restart` already reports as
+        // `PrecommitSearchOwed`.
         Some(state)
             if crate::workflow::WorkflowState::parse_state(state)
                 == Some(crate::workflow::WorkflowState::Decided) => {}
@@ -409,19 +440,26 @@ pub async fn admit_precommit(
     };
     let decision_id: String = decision_row.try_get("decision_id").map_err(unavailable)?;
 
-    let intent_row = sqlx::query(
+    let intent_row = sqlx::query(concat!(
         "INSERT INTO pool.tig_write_intent
-             (network, workflow_id, write_kind, generation, benchmark_id,
-              payload_digest, payload_artifact_id)
-         VALUES ($1, $2, 'precommit', $3, NULL, $4, NULL)
-         RETURNING intent_id::text AS intent_id, network, workflow_id, write_kind,
-                   generation, benchmark_id, payload_digest, payload_artifact_id, state",
-    )
+                 (network, workflow_id, write_kind, generation, benchmark_id,
+                  payload_digest, payload_artifact_id)
+             SELECT $1, $2, 'precommit', $3, NULL, $4, NULL
+              WHERE NOT ",
+        // §10: a precommit that reached TIG makes a second generation a
+        // second benchmark for one decision. Asked inside the INSERT
+        // because the gateway's `begin` writes to a table this
+        // transaction holds no lock on, so an attempt starting between a
+        // read and this write would not be seen by it.
+        crate::attempt::transmitted_precommit_exists!(),
+        " RETURNING intent_id::text AS intent_id, network, workflow_id, write_kind,
+                       generation, benchmark_id, payload_digest, payload_artifact_id, state",
+    ))
     .bind(decision.network.as_str())
     .bind(&decision.workflow_id)
     .bind(decision.generation)
     .bind(decision.payload_digest.as_slice())
-    .fetch_one(&mut *tx)
+    .fetch_optional(&mut *tx)
     .await
     // §7.3 treats this key as a conflict, not an availability problem.
     // Reporting it as Unavailable would invite a caller to retry a permanent
@@ -438,6 +476,17 @@ pub async fn admit_precommit(
         }
         _ => unavailable(e),
     })?;
+
+    // The guard in the INSERT matched nothing to insert. The workflow is
+    // DECIDED — checked under its row lock a few statements above, which this
+    // transaction still holds — so the only condition that can have refused
+    // the row is the transmitted-precommit test.
+    let Some(intent_row) = intent_row else {
+        return Err(AdmissionError::PrecommitAlreadyTransmitted {
+            network: decision.network,
+            workflow_id: decision.workflow_id.clone(),
+        });
+    };
 
     let intent = WriteIntent {
         intent_id: intent_row.try_get("intent_id").map_err(unavailable)?,

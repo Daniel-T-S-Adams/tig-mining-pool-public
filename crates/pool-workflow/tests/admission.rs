@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use pool_domain::{Network, challenge_tie_seed, draw_rank};
 use pool_test_support::TempDb;
+use pool_workflow::WriteAttemptLedger;
 use pool_workflow::{
     AdmissionError, AnchorSnapshot, IntentState, NewDecision, RecordedDraw, RecordedTie, WriteKind,
     admit_precommit,
@@ -1025,4 +1026,56 @@ async fn a_second_generation_is_aged_from_its_own_anchor() {
         pool_workflow::WorkflowState::Expired,
         "the deadline still exists; it is measured from the right block"
     );
+}
+
+#[tokio::test]
+async fn a_workflow_whose_precommit_reached_tig_cannot_take_another_generation() {
+    // §7 advances a workflow only from a confirmed *read*, so DECIDED is
+    // exactly where one sits when its precommit was sent and the response was
+    // lost — §6.1 returns the assigned benchmark_id in that response and
+    // nothing durable holds it. Reading DECIDED as "has sent nothing" would
+    // pay a second fee and create a second benchmark for one decision,
+    // breaking §10's permanent one-benchmark-per-workflow mapping with the
+    // pool's own write.
+    //
+    // The attempt row is the evidence: `begin` records it before the request
+    // leaves.
+    let Some(db) = TempDb::migrated("admit_transmitted").await else {
+        return;
+    };
+    let pool = with_anchor(&db).await;
+    let ledger = pool_workflow::PostgresAttemptLedger::new(db.pool_as("pool_gateway").await);
+
+    let admitted = admit_precommit(&pool, &decision("w1", 1), 4).await.unwrap();
+    let attempt = ledger.begin(&admitted.intent.intent_id).await.unwrap();
+    ledger
+        .resolve(
+            &attempt.attempt_id,
+            pool_workflow::AttemptOutcome::Accepted,
+            Some(200),
+            Some("accepted"),
+        )
+        .await
+        .unwrap();
+
+    let error = admit_precommit(&pool, &decision("w1", 2), 4)
+        .await
+        .expect_err("its first precommit is already at TIG");
+    assert!(
+        matches!(error, AdmissionError::PrecommitAlreadyTransmitted { .. }),
+        "unexpected error: {error:?}"
+    );
+    assert_eq!(
+        count(&pool, "pool.precommit_decision").await,
+        1,
+        "and nothing was recorded for the generation it refused"
+    );
+    assert_eq!(count(&pool, "pool.tig_write_intent").await, 1);
+
+    // A workflow that never transmitted is unaffected: the guard is about the
+    // write, not about the state.
+    admit_precommit(&pool, &decision("w2", 1), 4).await.unwrap();
+    admit_precommit(&pool, &decision("w2", 2), 4)
+        .await
+        .expect("nothing was sent for w2, so §7.3's new generation is safe");
 }

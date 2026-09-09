@@ -117,9 +117,12 @@ pub enum NeedsAttention {
     /// reads exactly that.
     ///
     /// So it is reported. Left silent it is worse than an open question: the
-    /// interval never closes, `count_unverified` keeps counting the slot
-    /// against `internal_pool_unverified_limit`, and §8's deadline eventually
-    /// records EXPIRED for a benchmark TIG verified.
+    /// interval never closes and `count_unverified` keeps counting the slot
+    /// against `internal_pool_unverified_limit` until an operator resolves it.
+    /// The deadline does not eventually clear it either —
+    /// `WorkflowState::is_unfinished_local_work` puts `ProofConfirmed`
+    /// outside §8's guardrail, which is correct and is also why nothing else
+    /// would ever notice.
     VerificationMissed {
         workflow_id: String,
         benchmark_id: String,
@@ -140,6 +143,53 @@ pub struct RestartReport {
     pub advanced: Vec<Reconciled>,
     pub unchanged: Vec<String>,
     pub needs_attention: Vec<NeedsAttention>,
+}
+
+impl RestartReport {
+    /// Whether the controller must not claim work on this run.
+    ///
+    /// §10's seven steps run **before the controller claims work**, and the
+    /// point of that ordering is that claiming acts on local state already
+    /// checked against TIG. A workflow this pass could not check is exactly
+    /// the state §7 exists to prevent acting on — so `Ok(report)` is not by
+    /// itself permission to proceed, and a caller reading only the `Result`
+    /// would have taken it as such.
+    ///
+    /// Two of the five buckets block, and both for the same reason: they name
+    /// a workflow whose true state the pool does not have. `Failed` is one the
+    /// pass never finished checking. `Contradicted` is one where the pool's
+    /// record and TIG's disagree, which §10 answers with operator resolution
+    /// rather than more work.
+    ///
+    /// The other three do not, because each names a workflow whose state *is*
+    /// known:
+    ///
+    /// - `OutsideWindow` — a benchmark aged past §8's 120-block window. §7
+    ///   calls that ordinary, and blocking on it would stop the pool every
+    ///   time a workflow got old.
+    /// - `PrecommitSearchOwed` — work E4 will do, on a workflow whose write
+    ///   this pass identified precisely. It does not block because the danger
+    ///   it names is specific to *that* workflow, and `admit_precommit`
+    ///   refuses it by name: a `DECIDED` workflow whose precommit already
+    ///   reached TIG cannot take another generation
+    ///   (`AdmissionError::PrecommitAlreadyTransmitted`). Blocking every
+    ///   claim instead would stop the pool over one workflow that is already
+    ///   individually safe.
+    /// - `VerificationMissed` — TIG verified a benchmark in a block the pool
+    ///   was down for. It costs a slot: §6.1's interval stays open until an
+    ///   operator resolves it. But the accounting is *correct* while it does —
+    ///   `count_unverified` counts that open interval, so `admit_precommit`
+    ///   sees one fewer slot rather than over-admitting. Refusing to claim any
+    ///   work would turn a capacity reduction the pool is already handling
+    ///   into a full stop.
+    pub fn blocks_claiming(&self) -> bool {
+        self.needs_attention.iter().any(|item| {
+            matches!(
+                item,
+                NeedsAttention::Failed { .. } | NeedsAttention::Contradicted { .. }
+            )
+        })
+    }
 }
 
 /// §10 steps 1, 4 and 5: load every nonterminal workflow and advance it
@@ -436,6 +486,14 @@ async fn nonterminal(pool: &PgPool, network: Network) -> Result<Vec<Workflow>, W
 ///
 /// Returns the heights recorded. An observation one above the last height is
 /// no gap and records nothing.
+///
+/// Recording is the controller reconciler's, per `architecture.md` §6.
+/// *Resolving* one is not a second operation with a second owner: it is §6's
+/// existing "apply an administrative override", which carries a pending
+/// command row, an actor and a reason. `migrations/0010` holds the actor and
+/// reason columns and freezes them once written; the command row that should
+/// gate them does not exist yet, so until it does the column grant is the only
+/// thing standing between the controller and an unattested resolution.
 ///
 /// Takes an executor rather than the pool so the caller can commit these rows
 /// in the same transaction that accepts the snapshot which revealed them.

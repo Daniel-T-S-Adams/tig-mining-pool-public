@@ -147,3 +147,35 @@ treats these fixtures as normative.
    third expiry flavor (e.g. never assigned because the member vanished before
    assignment) is chargeable is left to `member_attack_model.md` attribution
    and is not fixed by these fixtures.
+
+## Where the implementation knowingly diverges
+
+These are not open questions about the protocol. They are places where a
+shipped slice cannot reach the fixture's expected outcome, recorded here so
+the fixture stays load-bearing instead of being quietly worked around.
+
+1. **`restart_recovery_reconciles_three_workflows`, wf_2008 reaching
+   `ACTIVE`** — the case expects `PROOF_SUBMITTED -> PROOF_CONFIRMED ->
+   ACTIVE`, the last step taken from `block.data.active_ids.benchmark`
+   (`tig_integration.md` §7: "This set is authoritative"). Slice 1 reaches
+   `PROOF_CONFIRMED` and stops.
+
+   Two reasons, and the second is the load-bearing one. `mining_system.md`
+   §4.5's ladder runs `PROOF_CONFIRMED -> VERIFYING -> ACTIVE`, and slice 1's
+   twelve workflow states end at `VERIFIED` — there is no `ACTIVE` row to
+   write. More importantly, the nearest state slice 1 *could* write is wrong:
+   `confirm_verified` closes `mining_system.md` §6.1's unverified interval
+   **at a block**, `confirmed_ids.verified` is per-block, and a verification
+   that happened while the controller was down is not recoverable from any
+   later read. Closing the interval at the current block instead would date it
+   after the fact for every block in between, which is exactly what §7.6's
+   per-block recount reads.
+
+   The restart pass therefore reports the case as
+   `NeedsAttention::VerificationMissed` rather than advancing it, and
+   `crates/pool-workflow/tests/restart.rs` asserts that outcome against this
+   fixture's shape. The consequence is that such a workflow keeps §6.1's
+   interval open, holding a slot against `internal_pool_unverified_limit`,
+   until an operator resolves it. Closing it properly needs either an `ACTIVE`
+   state or a way to recover the verification block, and neither is in slice
+   1's scope.

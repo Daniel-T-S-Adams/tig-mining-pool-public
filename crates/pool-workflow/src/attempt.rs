@@ -176,24 +176,44 @@ pub async fn has_transmitted_precommit_write(
     network: &str,
     workflow_id: &str,
 ) -> Result<bool, sqlx::Error> {
-    let found: Option<i32> = sqlx::query_scalar(
-        "SELECT 1
-           FROM pool.tig_write_intent i
-          WHERE i.network = $1 AND i.workflow_id = $2
-            AND i.write_kind = 'precommit'
-            AND EXISTS (
-                 SELECT 1 FROM pool.tig_write_attempt a
-                  WHERE a.intent_id = i.intent_id
-                    AND (a.outcome IS NULL OR a.outcome IN ('AMBIGUOUS', 'ACCEPTED'))
-                )
-          LIMIT 1",
-    )
-    .bind(network)
-    .bind(workflow_id)
-    .fetch_optional(pool)
-    .await?;
+    let found: Option<i32> =
+        sqlx::query_scalar(concat!("SELECT 1 WHERE ", transmitted_precommit_exists!()))
+            .bind(network)
+            .bind(workflow_id)
+            .fetch_optional(pool)
+            .await?;
     Ok(found.is_some())
 }
+
+/// The same question as [`has_transmitted_precommit_write`], as SQL.
+///
+/// A correlated `EXISTS` over `$1` (network) and `$2` (workflow_id). It exists
+/// as a fragment for the same reason `unsettled_write_exists!` does: a caller
+/// deciding whether it may write must ask *inside* that write.
+/// `PostgresAttemptLedger::begin` inserts into `tig_write_attempt` and touches
+/// no row a workflow or decision transaction holds a lock on, so an attempt
+/// starting between a read and the write is invisible to anything read
+/// beforehand.
+///
+/// `decision::admit_precommit` uses it that way, and the function above reads
+/// the same text, so the two cannot answer differently.
+macro_rules! transmitted_precommit_exists {
+    () => {
+        "EXISTS (
+             SELECT 1
+               FROM pool.tig_write_intent i
+              WHERE i.network = $1 AND i.workflow_id = $2
+                AND i.write_kind = 'precommit'
+                AND EXISTS (
+                     SELECT 1 FROM pool.tig_write_attempt a
+                      WHERE a.intent_id = i.intent_id
+                        AND (a.outcome IS NULL
+                             OR a.outcome IN ('AMBIGUOUS', 'ACCEPTED'))
+                    )
+         )"
+    };
+}
+pub(crate) use transmitted_precommit_exists;
 
 #[derive(Debug, thiserror::Error)]
 pub enum AttemptError {

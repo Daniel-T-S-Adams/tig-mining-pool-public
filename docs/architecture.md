@@ -358,6 +358,7 @@ transition.
 | Create or cancel a TIG write intent | Controller | Unique workflow, write kind, generation, and payload hash |
 | Transmit a TIG write and record attempt | TIG Gateway | Intent ID; serialized precommit lane; benchmark write uniqueness |
 | Advance confirmed TIG lifecycle | Controller reconciler | Confirmed TIG evidence and monotonic workflow revision |
+| Record a block data gap | Controller reconciler | Network and height, one row per missing height |
 | Commit upload bytes/ranges to quarantine | Pool API | Upload ID, offset, length, and chunk checksum |
 | Create/resume/finalize upload session | Pool API | Package ID, upload ID, declaration hash, and committed size |
 | Create structural-ingestion job | Pool API | One job generation per finalized package ID |

@@ -11,6 +11,7 @@ use pool_workflow::workflow::{
 };
 use pool_workflow::{AttemptOutcome, PostgresAttemptLedger, WriteAttemptLedger};
 use serde_json::json;
+use sqlx::Connection;
 
 const NET: Network = Network::Testnet;
 
@@ -60,10 +61,11 @@ fn window(at_block: i64) -> ConfirmedWindow {
 
 #[tokio::test]
 async fn a_restart_advances_each_workflow_as_far_as_its_evidence_goes() {
-    // §10 steps 1, 4 and 5. Three workflows at different points, one pass, and
-    // each lands where its own confirmed evidence puts it — which is the
+    // §10 steps 1, 4 and 5. Four workflows at different points, one pass, and
+    // each lands where its own confirmed evidence puts it — the
     // `restart_recovery_reconciles_three_workflows` shape from
-    // `fixtures/queue-lifecycle/v1`.
+    // `fixtures/queue-lifecycle/v1`, including the one place slice 1 cannot
+    // reach the fixture's answer (w4, below).
     let Some(db) = TempDb::migrated("restart_three").await else {
         return;
     };
@@ -72,6 +74,7 @@ async fn a_restart_advances_each_workflow_as_far_as_its_evidence_goes() {
     owning(&pool, "w1", "bench_a").await;
     owning(&pool, "w2", "bench_b").await;
     owning(&pool, "w3", "bench_c").await;
+    owning(&pool, "w4", "bench_d").await;
 
     let mut w = window(200);
     // w1: benchmark confirmed only.
@@ -109,12 +112,52 @@ async fn a_restart_advances_each_workflow_as_far_as_its_evidence_goes() {
             stopped: true,
         },
     );
+    // w4 is the fixture's wf_2008 exactly: a confirmed proof and membership of
+    // `active_ids.benchmark`, with no `confirmed_ids.verified` entry — the
+    // verification happened in a block this pass never read.
+    //
+    // The fixture expects PROOF_SUBMITTED -> PROOF_CONFIRMED -> ACTIVE. Slice
+    // 1 reaches the first of those and stops: §4.5's ladder puts VERIFYING and
+    // ACTIVE past VERIFIED, and this enum's twelve states end at VERIFIED, so
+    // ACTIVE is not a state the pool can record yet. Advancing to VERIFIED
+    // instead would be worse than stopping — `confirm_verified` closes §6.1's
+    // interval *at a block*, and the block that verified this benchmark is
+    // gone, so it would be closed after the fact for every block in between
+    // and §7.6's per-block recount reads exactly that. The divergence is
+    // recorded in `fixtures/queue-lifecycle/v1/README.md`.
+    w.benchmarks.insert(
+        "bench_d".to_string(),
+        ConfirmedBenchmark {
+            benchmark_id: "bench_d".to_string(),
+            block_confirmed: 113,
+            stopped: false,
+        },
+    );
+    w.proofs.insert(
+        "bench_d".to_string(),
+        ConfirmedProof {
+            benchmark_id: "bench_d".to_string(),
+            block_confirmed: 123,
+        },
+    );
+    w.active.push("bench_d".to_string());
 
     let report = restart::reconcile_after_restart(&pool, NET, &w)
         .await
         .unwrap();
-    assert_eq!(report.advanced.len(), 3, "{report:?}");
-    assert!(report.needs_attention.is_empty(), "{report:?}");
+    assert_eq!(report.advanced.len(), 4, "{report:?}");
+    assert_eq!(
+        report.needs_attention,
+        vec![NeedsAttention::VerificationMissed {
+            workflow_id: "w4".to_string(),
+            benchmark_id: "bench_d".to_string(),
+        }],
+        "the fixture's ACTIVE is reported, not invented: {report:?}"
+    );
+    assert!(
+        !report.blocks_claiming(),
+        "a missed verification is work to resolve, not a reason to stop: {report:?}"
+    );
 
     let state = |id: &str| {
         let pool = pool.clone();
@@ -130,6 +173,11 @@ async fn a_restart_advances_each_workflow_as_far_as_its_evidence_goes() {
     assert_eq!(state("w1").await, WorkflowState::BenchmarkConfirmed);
     assert_eq!(state("w2").await, WorkflowState::Verified);
     assert_eq!(state("w3").await, WorkflowState::Stopped);
+    assert_eq!(
+        state("w4").await,
+        WorkflowState::ProofConfirmed,
+        "as far as slice 1's ladder goes; the fixture's ACTIVE is out of scope"
+    );
 }
 
 #[tokio::test]
@@ -405,6 +453,69 @@ async fn a_contradiction_after_an_advance_is_reported_as_advanced() {
     assert!(
         after.revision > before.revision,
         "the row moved, so the report must say so"
+    );
+}
+
+#[tokio::test]
+async fn a_workflow_the_pass_could_not_check_stops_the_controller() {
+    // §10's seven steps run *before the controller claims work*, and the point
+    // of that ordering is that claiming acts on state already checked against
+    // TIG. A workflow this pass could not finish checking is exactly what §7
+    // exists to stop the controller acting on — so `Ok(report)` is not by
+    // itself permission to proceed, and a caller reading only the `Result`
+    // would have taken it as one.
+    //
+    // Collecting the failure rather than propagating it is still right: the
+    // operator being told to stop needs to know what else the run found. It is
+    // the *classification* that has to say "stop", not the shape of the
+    // return.
+    let Some(db) = TempDb::migrated("restart_failed_blocks").await else {
+        return;
+    };
+    let pool = db.pool_as("pool_controller").await;
+    let mut owner = sqlx::PgConnection::connect_with(&db.as_superuser())
+        .await
+        .unwrap();
+    owning(&pool, "w1", "bench_a").await;
+
+    let mut win = window(200);
+    win.benchmarks.insert(
+        "bench_a".to_string(),
+        ConfirmedBenchmark {
+            benchmark_id: "bench_a".to_string(),
+            block_confirmed: 110,
+            stopped: false,
+        },
+    );
+
+    // A database failure in the middle of the pass, arranged the only way a
+    // test can arrange one deterministically: the controller keeps its read
+    // grant, so the workflow loads and then cannot be advanced.
+    sqlx::query("REVOKE UPDATE ON pool.workflow FROM pool_controller")
+        .execute(&mut owner)
+        .await
+        .unwrap();
+
+    let report = restart::reconcile_after_restart(&pool, NET, &win)
+        .await
+        .expect("the run reports rather than aborting");
+
+    sqlx::query("GRANT UPDATE ON pool.workflow TO pool_controller")
+        .execute(&mut owner)
+        .await
+        .unwrap();
+
+    assert!(report.advanced.is_empty(), "{report:?}");
+    assert!(
+        matches!(
+            report.needs_attention.as_slice(),
+            [NeedsAttention::Failed { workflow_id, .. }] if workflow_id == "w1"
+        ),
+        "{report:?}"
+    );
+    assert!(
+        report.blocks_claiming(),
+        "a workflow the pass never checked is not advisory: {report:?}"
     );
 }
 

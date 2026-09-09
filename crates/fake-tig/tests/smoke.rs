@@ -439,3 +439,281 @@ async fn serves_real_loopback_socket() {
         "serves the fixture anchor"
     );
 }
+
+const PLAYER: &str = "0xp00l00000000000000000000000000000000000";
+
+/// Drive one benchmark from precommit to a confirmed proof, returning its id.
+///
+/// The steps are the happy path's; only the assertions differ, so this exists
+/// to get to the interesting state rather than to re-test getting there.
+async fn to_confirmed_proof(app: &Router) -> String {
+    let (_, block) = call(app, "GET", "/get-block?include_data=true", None, None).await;
+    let block_id = block["block"]["id"].as_str().unwrap().to_owned();
+    let (_, resp) = call(
+        app,
+        "POST",
+        "/submit-precommit",
+        Some(DEFAULT_API_KEY),
+        Some(precommit_body(&block_id)),
+    )
+    .await;
+    let bench_id = resp["benchmark_id"].as_str().unwrap().to_owned();
+
+    advance(app, 1).await;
+    let quality: Vec<i64> = (0..80).collect();
+    call(
+        app,
+        "POST",
+        "/submit-benchmark",
+        Some(DEFAULT_API_KEY),
+        Some(json!({
+            "benchmark_id": bench_id, "stopped": false,
+            "merkle_root": "ab".repeat(32), "solution_quality": quality
+        })),
+    )
+    .await;
+
+    advance(app, 1).await;
+    let (_, block) = call(app, "GET", "/get-block?include_data=true", None, None).await;
+    let block_id = block["block"]["id"].as_str().unwrap().to_owned();
+    let (_, benches) = call(
+        app,
+        "GET",
+        &format!("/get-benchmarks?block_id={block_id}&player_id={PLAYER}"),
+        None,
+        None,
+    )
+    .await;
+    let mine = benches["benchmarks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["id"] == json!(bench_id))
+        .expect("our benchmark");
+    let sampled: Vec<u64> = mine["details"]["sampled_nonces"]
+        .as_array()
+        .expect("sampled nonces published")
+        .iter()
+        .map(|v| v.as_u64().unwrap())
+        .collect();
+    let proofs: Vec<Value> = sampled
+        .iter()
+        .map(|n| {
+            json!({
+                "leaf": { "nonce": n, "runtime_signature": 7, "fuel_consumed": 100,
+                          "solution": "sol", "cpu_arch": "arm64" },
+                "branch": "00"
+            })
+        })
+        .collect();
+    call(
+        app,
+        "POST",
+        "/submit-proof",
+        Some(DEFAULT_API_KEY),
+        Some(json!({ "benchmark_id": bench_id, "merkle_proofs": proofs })),
+    )
+    .await;
+    advance(app, 1).await;
+    bench_id
+}
+
+#[tokio::test]
+async fn tig_can_rule_a_benchmark_verified() {
+    // Issue #93. `tig_integration.md` §7's "Verification event" is a benchmark
+    // id in `block.data.confirmed_ids.verified`. Nothing a client submits
+    // causes it — it is TIG's ruling — so it needs a control of its own, the
+    // same way `/_fake/advance-block` moves a chain no client moves.
+    //
+    // Without it the pool's VERIFIED transition cannot be reached from a
+    // server at all, so a lifecycle drive would stop at PROOF_CONFIRMED and
+    // `mining_system.md` §6.1's unverified interval would never close in it.
+    let app = test_router();
+    let bench_id = to_confirmed_proof(&app).await;
+
+    let (status, _) = call(
+        &app,
+        "POST",
+        "/_fake/verify",
+        None,
+        Some(json!({ "benchmark_id": bench_id })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (_, block) = call(&app, "GET", "/get-block?include_data=true", None, None).await;
+    let verified = block["block"]["data"]["confirmed_ids"]["verified"]
+        .as_array()
+        .expect("confirmed_ids.verified is published");
+    assert_eq!(verified, &vec![json!(bench_id)]);
+    assert_eq!(block["block"]["details"]["num_confirmed"]["verified"], 1);
+
+    // It is a fact about one block, not a standing flag: §7 reads the set from
+    // the block that published it, which is why a pool that was down for that
+    // block cannot recover the event from a later read.
+    advance(&app, 1).await;
+    let (_, block) = call(&app, "GET", "/get-block?include_data=true", None, None).await;
+    assert!(
+        block["block"]["data"]["confirmed_ids"]["verified"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "the event belongs to the block that carried it"
+    );
+}
+
+#[tokio::test]
+async fn verification_is_refused_before_there_is_a_proof_to_verify() {
+    // §4.5's ladder runs PROOF_CONFIRMED -> VERIFYING -> ACTIVE. A fake that
+    // produced a verification before a confirmed proof would let a test assert
+    // the pool handles an order the chain never produces, while missing the
+    // one it does.
+    let app = test_router();
+    let (_, block) = call(&app, "GET", "/get-block?include_data=true", None, None).await;
+    let block_id = block["block"]["id"].as_str().unwrap().to_owned();
+    let (_, resp) = call(
+        &app,
+        "POST",
+        "/submit-precommit",
+        Some(DEFAULT_API_KEY),
+        Some(precommit_body(&block_id)),
+    )
+    .await;
+    let bench_id = resp["benchmark_id"].as_str().unwrap().to_owned();
+    advance(&app, 1).await;
+
+    let (status, err) = call(
+        &app,
+        "POST",
+        "/_fake/verify",
+        None,
+        Some(json!({ "benchmark_id": bench_id })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{err}");
+
+    let (status, err) = call(
+        &app,
+        "POST",
+        "/_fake/verify",
+        None,
+        Some(json!({ "benchmark_id": "no_such_benchmark" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{err}");
+}
+
+#[tokio::test]
+async fn tig_can_rule_a_benchmark_fraudulent() {
+    // §7: "Matching entry in `get-benchmarks.frauds` with non-null
+    // `state.block_confirmed`". Read from `frauds`, not from the block, which
+    // is why this is not simply another confirmed_ids set.
+    //
+    // Fraud is what `mining_system.md`'s method verification exists to catch,
+    // and the pool cannot cause it — so, like verification, it needs a control
+    // rather than arriving as a side effect of a write.
+    let app = test_router();
+    let bench_id = to_confirmed_proof(&app).await;
+
+    let (status, _) = call(
+        &app,
+        "POST",
+        "/_fake/fraud",
+        None,
+        Some(json!({ "benchmark_id": bench_id })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (_, block) = call(&app, "GET", "/get-block?include_data=true", None, None).await;
+    let block_id = block["block"]["id"].as_str().unwrap().to_owned();
+    let (_, benches) = call(
+        &app,
+        "GET",
+        &format!("/get-benchmarks?block_id={block_id}&player_id={PLAYER}"),
+        None,
+        None,
+    )
+    .await;
+    let entry = benches["frauds"]
+        .as_array()
+        .expect("frauds is an array")
+        .iter()
+        .find(|f| f["benchmark_id"] == json!(bench_id))
+        .expect("the ruling appears in get-benchmarks.frauds");
+    assert!(
+        !entry["state"]["block_confirmed"].is_null(),
+        "§7 keys fraud confirmation on a non-null state.block_confirmed: {entry}"
+    );
+
+    // The per-benchmark read serves the same record, from the same place, so
+    // the two endpoints cannot describe one ruling differently.
+    let (_, data) = call(
+        &app,
+        "GET",
+        &format!("/get-benchmark-data?benchmark_id={bench_id}"),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(data["fraud"], *entry);
+
+    // An unruled benchmark still reads null, so the field distinguishes.
+    let clean = to_confirmed_proof(&app).await;
+    let (_, data) = call(
+        &app,
+        "GET",
+        &format!("/get-benchmark-data?benchmark_id={clean}"),
+        None,
+        None,
+    )
+    .await;
+    assert!(data["fraud"].is_null());
+}
+
+#[tokio::test]
+async fn one_benchmark_is_not_both_verified_and_fraudulent() {
+    // The two rulings are alternatives, and a fake that allowed both would
+    // hand the pool evidence for two terminal outcomes at once — a state the
+    // chain does not produce, and one whose "correct" handling nobody has
+    // specified.
+    let app = test_router();
+
+    let verified = to_confirmed_proof(&app).await;
+    call(
+        &app,
+        "POST",
+        "/_fake/verify",
+        None,
+        Some(json!({ "benchmark_id": verified })),
+    )
+    .await;
+    let (status, _) = call(
+        &app,
+        "POST",
+        "/_fake/fraud",
+        None,
+        Some(json!({ "benchmark_id": verified })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let fraudulent = to_confirmed_proof(&app).await;
+    call(
+        &app,
+        "POST",
+        "/_fake/fraud",
+        None,
+        Some(json!({ "benchmark_id": fraudulent })),
+    )
+    .await;
+    let (status, _) = call(
+        &app,
+        "POST",
+        "/_fake/verify",
+        None,
+        Some(json!({ "benchmark_id": fraudulent })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}

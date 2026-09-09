@@ -88,6 +88,16 @@ struct Bench {
     proof: Option<ProofSubmission>,
     active_from: Option<u32>,
     active_until: Option<u32>,
+    /// Height at which TIG published the verification event
+    /// (`tig_integration.md` §7: id in `block.data.confirmed_ids.verified`).
+    ///
+    /// A ruling the pool cannot cause, so nothing a client submits sets it —
+    /// only `/_fake/verify` does, the same way `/_fake/advance-block` moves a
+    /// chain no client controls.
+    verified: Option<u32>,
+    /// Height at which TIG ruled the benchmark fraudulent (§7: entry in
+    /// `get-benchmarks.frauds` with non-null `state.block_confirmed`).
+    fraud: Option<u32>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -345,6 +355,24 @@ impl World {
         (precommits, benchmarks, proofs)
     }
 
+    /// Ids TIG ruled on at this height. §7 reads each from its own place —
+    /// verification from `block.data.confirmed_ids.verified`, fraud from a
+    /// `get-benchmarks.frauds` entry — so they are kept apart here too rather
+    /// than folded into one "ruled" set.
+    fn ruled_at(&self, height: u32) -> (Vec<String>, Vec<String>) {
+        let mut verified = Vec::new();
+        let mut frauds = Vec::new();
+        for bench in self.benchmarks.values() {
+            if bench.verified == Some(height) {
+                verified.push(bench.id.clone());
+            }
+            if bench.fraud == Some(height) {
+                frauds.push(bench.id.clone());
+            }
+        }
+        (verified, frauds)
+    }
+
     fn active_benchmark_ids(&self) -> Vec<String> {
         self.benchmarks
             .values()
@@ -375,6 +403,11 @@ impl World {
         block["data"]["confirmed_ids"]["precommit"] = json!(precommits);
         block["data"]["confirmed_ids"]["benchmark"] = json!(benchmarks);
         block["data"]["confirmed_ids"]["proof"] = json!(proofs);
+        let (verified, frauds) = self.ruled_at(self.height);
+        block["details"]["num_confirmed"]["verified"] = json!(verified.len());
+        block["details"]["num_confirmed"]["fraud"] = json!(frauds.len());
+        block["data"]["confirmed_ids"]["verified"] = json!(verified);
+        block["data"]["confirmed_ids"]["fraud"] = json!(frauds);
         let active = self.active_benchmark_ids();
         block["details"]["num_active"]["benchmark"] = json!(active.len());
         block["data"]["active_ids"]["benchmark"] = json!(active);
@@ -403,6 +436,7 @@ impl World {
         let mut precommits = Vec::new();
         let mut benchmarks = Vec::new();
         let mut proofs = Vec::new();
+        let mut frauds = Vec::new();
         for bench in self.benchmarks.values() {
             precommits.push(self.precommit_json(bench));
             if let Some(sub) = &bench.submission {
@@ -431,12 +465,28 @@ impl World {
                     "state": { "block_confirmed": proof.confirmed },
                 }));
             }
+            // §7: "Matching entry in `get-benchmarks.frauds` with non-null
+            // `state.block_confirmed`". Those two fields are what the mapping
+            // names and all this emits.
+            //
+            // The live record almost certainly carries more — an allegation,
+            // a reason — but `fixtures/tig/v1/get-benchmarks.json` pins only
+            // an empty `frauds: []`, so there is nothing to copy and the rest
+            // would be invention. A fake that guessed extra fields would
+            // teach the pool to read fields TIG may not send. Issue #31's
+            // fixtures v2 is where a real shape gets pinned.
+            if let Some(confirmed) = bench.fraud {
+                frauds.push(json!({
+                    "benchmark_id": bench.id,
+                    "state": { "block_confirmed": confirmed },
+                }));
+            }
         }
         json!({
             "precommits": precommits,
             "benchmarks": benchmarks,
             "proofs": proofs,
-            "frauds": [],
+            "frauds": frauds,
         })
     }
 
@@ -670,7 +720,9 @@ async fn get_benchmark_data(
         "precommit": w.precommit_json(bench),
         "benchmark": find("benchmarks", "id"),
         "proof": find("proofs", "benchmark_id"),
-        "fraud": null,
+        // Through the same `frauds` collection `get-benchmarks` serves, so
+        // the two endpoints cannot describe one ruling differently.
+        "fraud": find("frauds", "benchmark_id"),
     })))
 }
 
@@ -850,6 +902,8 @@ async fn submit_precommit(
         proof: None,
         active_from: None,
         active_until: None,
+        verified: None,
+        fraud: None,
     };
     w.benchmarks.insert(id.clone(), bench);
 
@@ -1077,6 +1131,70 @@ async fn fake_inject(State(world): State<SharedWorld>, Json(body): Json<Value>) 
     Ok(Json(json!({ "ok": true })))
 }
 
+/// Publish the verification event for a benchmark
+/// (`tig_integration.md` §7: id in `block.data.confirmed_ids.verified`).
+///
+/// A `/_fake/` control rather than something a client submission causes,
+/// because verification is TIG's ruling and the pool has no way to ask for it
+/// — the same reason `/_fake/advance-block` exists for a chain no client
+/// moves.
+///
+/// Refuses a benchmark whose proof is not confirmed. §4.5's ladder runs
+/// `PROOF_CONFIRMED -> VERIFYING -> ACTIVE`, so a verification before a
+/// confirmed proof is a state the real chain does not produce, and a fake that
+/// produced it would let a test assert the pool handles something that cannot
+/// happen while missing what does.
+async fn fake_verify(State(world): State<SharedWorld>, Json(body): Json<Value>) -> ApiResult {
+    let id = str_field(&body, "benchmark_id")?.to_owned();
+    let mut w = lock(&world);
+    let height = w.height;
+    let bench = w
+        .benchmarks
+        .get_mut(&id)
+        .ok_or_else(|| ApiError::bad_request(format!("no benchmark {id}")))?;
+    if bench.proof.as_ref().and_then(|p| p.confirmed).is_none() {
+        return Err(ApiError::bad_request(format!(
+            "benchmark {id} has no confirmed proof; §4.5 verifies after PROOF_CONFIRMED"
+        )));
+    }
+    if bench.fraud.is_some() {
+        return Err(ApiError::bad_request(format!(
+            "benchmark {id} was ruled fraudulent; it does not also verify"
+        )));
+    }
+    bench.verified = Some(height);
+    Ok(Json(
+        json!({ "ok": true, "benchmark_id": id, "height": height }),
+    ))
+}
+
+/// Rule a benchmark fraudulent (§7: an entry in `get-benchmarks.frauds` with
+/// non-null `state.block_confirmed`).
+///
+/// Also a TIG ruling, and also one the pool cannot cause — which is exactly
+/// why `mining_system.md` treats it as the outcome method verification exists
+/// to catch. A benchmark must exist; nothing else is required, because fraud
+/// can follow a confirmed benchmark or a confirmed proof and the fixture case
+/// `fraud_confirmed_after_proof` is the latter.
+async fn fake_fraud(State(world): State<SharedWorld>, Json(body): Json<Value>) -> ApiResult {
+    let id = str_field(&body, "benchmark_id")?.to_owned();
+    let mut w = lock(&world);
+    let height = w.height;
+    let bench = w
+        .benchmarks
+        .get_mut(&id)
+        .ok_or_else(|| ApiError::bad_request(format!("no benchmark {id}")))?;
+    if bench.verified.is_some() {
+        return Err(ApiError::bad_request(format!(
+            "benchmark {id} already verified; a ruling is not retracted here"
+        )));
+    }
+    bench.fraud = Some(height);
+    Ok(Json(
+        json!({ "ok": true, "benchmark_id": id, "height": height }),
+    ))
+}
+
 async fn fake_state(State(world): State<SharedWorld>) -> ApiResult {
     let w = lock(&world);
     Ok(Json(json!({
@@ -1110,6 +1228,8 @@ pub fn router(world: SharedWorld) -> Router {
         .route("/submit-proof", post(submit_proof))
         .route("/_fake/advance-block", post(fake_advance))
         .route("/_fake/inject", post(fake_inject))
+        .route("/_fake/verify", post(fake_verify))
+        .route("/_fake/fraud", post(fake_fraud))
         .route("/_fake/state", get(fake_state))
         .with_state(world)
 }

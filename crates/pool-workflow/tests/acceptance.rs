@@ -325,3 +325,53 @@ async fn a_precondition_can_be_written_inside_the_caller_s_transaction() {
         assert_eq!(left, 0, "{table} outlived the transaction that wrote it");
     }
 }
+
+#[tokio::test]
+async fn a_racing_identical_record_is_retryable_not_a_conflict() {
+    // The one branch that cannot be reached by calling the function twice, and
+    // the one whose classification matters: another transaction inserted the
+    // same row and has not yet been seen.
+    //
+    // `ON CONFLICT DO NOTHING` waits for that transaction, skips when it
+    // commits, and the sibling SELECT then reads with the statement's own
+    // older snapshot — which predates the commit. So the row exists and this
+    // statement cannot see it. Calling that a conflict would tell the caller
+    // its contents disagreed, when they were never compared, and that a retry
+    // is pointless when a retry is exactly what succeeds.
+    //
+    // Deterministic rather than timed: the second call blocks on the first
+    // transaction's speculative insertion lock, so committing is what releases
+    // it.
+    let Some(db) = TempDb::migrated("accept_race").await else {
+        return;
+    };
+    let pool = db.pool_as("pool_controller").await;
+    pool_test_support::seed_workflows(&pool, "testnet", &["w1"]).await;
+
+    let mut holder = pool.begin().await.unwrap();
+    record_acceptance(&mut *holder, &acceptance("w1", "bench_a"))
+        .await
+        .unwrap();
+
+    let racer = pool.clone();
+    let attempt =
+        tokio::spawn(async move { record_acceptance(&racer, &acceptance("w1", "bench_a")).await });
+
+    // Let it reach the lock, then release it by committing.
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    holder.commit().await.unwrap();
+
+    let error = attempt
+        .await
+        .unwrap()
+        .expect_err("the committed row is not visible to that statement");
+    assert!(
+        matches!(error, pool_workflow::AcceptanceError::Unavailable(_)),
+        "a race is retryable, not a content conflict: {error:?}"
+    );
+
+    // And the retry the error invites does succeed.
+    record_acceptance(&pool, &acceptance("w1", "bench_a"))
+        .await
+        .expect("a fresh statement sees the committed row");
+}

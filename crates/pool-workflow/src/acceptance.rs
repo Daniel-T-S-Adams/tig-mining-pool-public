@@ -145,12 +145,24 @@ where
             workflow_id: accepted.workflow_id.clone(),
             what: "package acceptance",
         }),
-        // Nothing inserted and nothing there: only reachable if the row were
-        // deleted concurrently, which no granted role can do
-        // (`migrations/0011` withholds DELETE). Reported as an outage rather
-        // than a conflict, because the caller's contents were never compared.
+        // Nothing inserted and nothing visible. This is the racing identical
+        // insert: `ON CONFLICT DO NOTHING` waits for the other transaction,
+        // skips when it commits, and the sibling `SELECT` then reads with the
+        // statement's own older snapshot, which predates that commit. So the
+        // row exists and this statement cannot see it.
+        //
+        // `ON CONFLICT DO UPDATE` would return the row and answer properly,
+        // and is deliberately unavailable: it needs UPDATE, which
+        // `migrations/0011` withholds because these rows are the immutable
+        // evidence that a write was permitted. Keeping them immutable is
+        // worth a retry.
+        //
+        // Reported as an outage rather than a conflict, because the caller's
+        // contents were never compared — and it is the honest classification:
+        // a retry sees the committed row and succeeds, which a conflict would
+        // have told the caller not to attempt.
         (false, None) => Err(AcceptanceError::Unavailable(
-            "package acceptance neither inserted nor found".to_string(),
+            "package acceptance neither inserted nor visible; retry".to_string(),
         )),
     }
 }
@@ -201,8 +213,9 @@ where
             workflow_id: payload.workflow_id.clone(),
             what: "canonical payload",
         }),
+        // The racing identical insert; see `record_acceptance`.
         (false, None) => Err(AcceptanceError::Unavailable(
-            "canonical payload neither inserted nor found".to_string(),
+            "canonical payload neither inserted nor visible; retry".to_string(),
         )),
     }
 }

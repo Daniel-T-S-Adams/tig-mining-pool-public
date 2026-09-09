@@ -10,7 +10,13 @@
 //! anchor; sampled nonces derive from the benchmark ID.
 //!
 //! Admin surface (not part of TIG): `POST /_fake/advance-block`,
-//! `POST /_fake/inject`, `GET /_fake/state`.
+//! `POST /_fake/inject`, `POST /_fake/verify`, `POST /_fake/fraud`,
+//! `GET /_fake/state`.
+//!
+//! `verify` and `fraud` exist because `tig_integration.md` §7 maps two
+//! lifecycle facts to rulings TIG makes and a client cannot cause. Like every
+//! other confirmation here, a ruling is asked for now and published by the
+//! next block: a block already served never changes what it said.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -98,6 +104,18 @@ struct Bench {
     /// Height at which TIG ruled the benchmark fraudulent (§7: entry in
     /// `get-benchmarks.frauds` with non-null `state.block_confirmed`).
     fraud: Option<u32>,
+    /// A ruling asked for and not yet published.
+    ///
+    /// Both controls record a request and `advance_block` publishes it, the
+    /// way every other confirmation in this fake already works. Stamping the
+    /// *current* height instead rewrote a block that had already been served
+    /// under the same id: two reads of block B would disagree, which is a
+    /// thing no chain does and which would let a test satisfy §9's
+    /// block-consistency check while the reads it compared were inconsistent.
+    /// It also made the event invisible to a driver that read the block before
+    /// asking for the ruling.
+    verify_pending: bool,
+    fraud_pending: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -284,6 +302,16 @@ impl World {
         let mut sampling: Vec<(String, String, u64)> = Vec::new();
         let mut activation: Vec<(String, String, u32)> = Vec::new();
         for bench in self.benchmarks.values_mut() {
+            // A ruling asked for since the last block is published by this
+            // one. Same discipline as every confirmation below: a block's
+            // contents are settled when it is minted, so an id already served
+            // never changes what it said.
+            if std::mem::take(&mut bench.verify_pending) {
+                bench.verified = Some(height);
+            }
+            if std::mem::take(&mut bench.fraud_pending) {
+                bench.fraud = Some(height);
+            }
             if bench.precommit_confirmed.is_none() && height >= bench.block_started + delay {
                 bench.precommit_confirmed = Some(height);
             }
@@ -904,6 +932,8 @@ async fn submit_precommit(
         active_until: None,
         verified: None,
         fraud: None,
+        verify_pending: false,
+        fraud_pending: false,
     };
     w.benchmarks.insert(id.clone(), bench);
 
@@ -1157,14 +1187,18 @@ async fn fake_verify(State(world): State<SharedWorld>, Json(body): Json<Value>) 
             "benchmark {id} has no confirmed proof; §4.5 verifies after PROOF_CONFIRMED"
         )));
     }
-    if bench.fraud.is_some() {
+    // The one ordering that is refused, and unlike the reverse it has an
+    // authority: §4.5 lists FRAUDULENT as a terminal branch, and a chain does
+    // not leave one. Fraud *after* verification is permitted — see
+    // `fake_fraud`.
+    if bench.fraud.is_some() || bench.fraud_pending {
         return Err(ApiError::bad_request(format!(
-            "benchmark {id} was ruled fraudulent; it does not also verify"
+            "benchmark {id} was ruled fraudulent, which §4.5 makes terminal"
         )));
     }
-    bench.verified = Some(height);
+    bench.verify_pending = true;
     Ok(Json(
-        json!({ "ok": true, "benchmark_id": id, "height": height }),
+        json!({ "ok": true, "benchmark_id": id, "published_at": height + 1 }),
     ))
 }
 
@@ -1173,9 +1207,24 @@ async fn fake_verify(State(world): State<SharedWorld>, Json(body): Json<Value>) 
 ///
 /// Also a TIG ruling, and also one the pool cannot cause — which is exactly
 /// why `mining_system.md` treats it as the outcome method verification exists
-/// to catch. A benchmark must exist; nothing else is required, because fraud
-/// can follow a confirmed benchmark or a confirmed proof and the fixture case
-/// `fraud_confirmed_after_proof` is the latter.
+/// to catch.
+///
+/// A benchmark must exist, and **nothing else is required**. In particular a
+/// verified benchmark can still be ruled fraudulent: §7 lists "Fraud
+/// confirmed" and "Verification event" as independent evidence with no
+/// ordering or exclusivity between them, `workflow::confirm_fraud` is
+/// documented as reachable from any non-terminal state that owns a benchmark
+/// (and `Verified` is deliberately non-terminal), and `restart.rs` applies
+/// fraud *before* the forward steps precisely because one §10 window can carry
+/// the same benchmark id in `frauds` and in `verified`. The fixture case
+/// `fraud_confirmed_after_proof` starts at VERIFYING.
+///
+/// An earlier version of this refused it, on the reasoning that a fake should
+/// not produce states the chain does not. That reasoning is right and was
+/// applied without checking: nothing says the chain does not produce this, two
+/// documents and the pool's own code say it does, and the refusal made the
+/// VERIFIED -> FRAUDULENT path undriveable from a server while a test pinned
+/// the false rule in place.
 async fn fake_fraud(State(world): State<SharedWorld>, Json(body): Json<Value>) -> ApiResult {
     let id = str_field(&body, "benchmark_id")?.to_owned();
     let mut w = lock(&world);
@@ -1184,14 +1233,9 @@ async fn fake_fraud(State(world): State<SharedWorld>, Json(body): Json<Value>) -
         .benchmarks
         .get_mut(&id)
         .ok_or_else(|| ApiError::bad_request(format!("no benchmark {id}")))?;
-    if bench.verified.is_some() {
-        return Err(ApiError::bad_request(format!(
-            "benchmark {id} already verified; a ruling is not retracted here"
-        )));
-    }
-    bench.fraud = Some(height);
+    bench.fraud_pending = true;
     Ok(Json(
-        json!({ "ok": true, "benchmark_id": id, "height": height }),
+        json!({ "ok": true, "benchmark_id": id, "published_at": height + 1 }),
     ))
 }
 

@@ -541,6 +541,18 @@ async fn tig_can_rule_a_benchmark_verified() {
     .await;
     assert_eq!(status, StatusCode::OK);
 
+    // The block already served does not change what it said. Asking for a
+    // ruling does not rewrite history; the next block publishes it.
+    let (_, same) = call(&app, "GET", "/get-block?include_data=true", None, None).await;
+    assert!(
+        same["block"]["data"]["confirmed_ids"]["verified"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "a published block is fixed: two reads of one id must agree"
+    );
+
+    advance(&app, 1).await;
     let (_, block) = call(&app, "GET", "/get-block?include_data=true", None, None).await;
     let verified = block["block"]["data"]["confirmed_ids"]["verified"]
         .as_array()
@@ -624,6 +636,7 @@ async fn tig_can_rule_a_benchmark_fraudulent() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
+    advance(&app, 1).await;
 
     let (_, block) = call(&app, "GET", "/get-block?include_data=true", None, None).await;
     let block_id = block["block"]["id"].as_str().unwrap().to_owned();
@@ -672,39 +685,77 @@ async fn tig_can_rule_a_benchmark_fraudulent() {
 }
 
 #[tokio::test]
-async fn one_benchmark_is_not_both_verified_and_fraudulent() {
-    // The two rulings are alternatives, and a fake that allowed both would
-    // hand the pool evidence for two terminal outcomes at once — a state the
-    // chain does not produce, and one whose "correct" handling nobody has
-    // specified.
+async fn a_verified_benchmark_can_still_be_ruled_fraudulent() {
+    // §7 lists "Fraud confirmed" and "Verification event" as independent
+    // evidence, with no ordering or exclusivity between them. The pool
+    // implements that: `workflow::confirm_fraud` is reachable from any
+    // non-terminal state that owns a benchmark, `Verified` is deliberately
+    // non-terminal, and `restart.rs` applies fraud *before* the forward steps
+    // precisely because one §10 window can carry the same benchmark id in
+    // `frauds` and in `verified`.
+    //
+    // An earlier version of this fake refused it and a test pinned the
+    // refusal, which made the VERIFIED -> FRAUDULENT path undriveable from a
+    // server — the fixture case `fraud_confirmed_after_proof` starts at
+    // VERIFYING, so that is the path the fixture asks for.
     let app = test_router();
+    let bench_id = to_confirmed_proof(&app).await;
 
-    let verified = to_confirmed_proof(&app).await;
     call(
         &app,
         "POST",
         "/_fake/verify",
         None,
-        Some(json!({ "benchmark_id": verified })),
+        Some(json!({ "benchmark_id": bench_id })),
     )
     .await;
-    let (status, _) = call(
+    advance(&app, 1).await;
+
+    let (status, err) = call(
         &app,
         "POST",
         "/_fake/fraud",
         None,
-        Some(json!({ "benchmark_id": verified })),
+        Some(json!({ "benchmark_id": bench_id })),
     )
     .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(status, StatusCode::OK, "{err}");
+    advance(&app, 1).await;
 
-    let fraudulent = to_confirmed_proof(&app).await;
+    let (_, block) = call(&app, "GET", "/get-block?include_data=true", None, None).await;
+    let block_id = block["block"]["id"].as_str().unwrap().to_owned();
+    let (_, benches) = call(
+        &app,
+        "GET",
+        &format!("/get-benchmarks?block_id={block_id}&player_id={PLAYER}"),
+        None,
+        None,
+    )
+    .await;
+    assert!(
+        benches["frauds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["benchmark_id"] == json!(bench_id)),
+        "a verified benchmark can still be ruled fraudulent"
+    );
+}
+
+#[tokio::test]
+async fn a_fraudulent_benchmark_does_not_then_verify() {
+    // The one ordering that is refused, and unlike the reverse it has an
+    // authority: `mining_system.md` §4.5 lists FRAUDULENT as a terminal
+    // branch, and a chain does not leave one.
+    let app = test_router();
+    let bench_id = to_confirmed_proof(&app).await;
+
     call(
         &app,
         "POST",
         "/_fake/fraud",
         None,
-        Some(json!({ "benchmark_id": fraudulent })),
+        Some(json!({ "benchmark_id": bench_id })),
     )
     .await;
     let (status, _) = call(
@@ -712,7 +763,22 @@ async fn one_benchmark_is_not_both_verified_and_fraudulent() {
         "POST",
         "/_fake/verify",
         None,
-        Some(json!({ "benchmark_id": fraudulent })),
+        Some(json!({ "benchmark_id": bench_id })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "refused while the ruling is still pending, not only once published"
+    );
+
+    advance(&app, 1).await;
+    let (status, _) = call(
+        &app,
+        "POST",
+        "/_fake/verify",
+        None,
+        Some(json!({ "benchmark_id": bench_id })),
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);

@@ -1486,14 +1486,19 @@ dependencies = [
 name = "pool-controller"
 version = "0.1.0"
 dependencies = [
+ "axum",
+ "fake-tig",
+ "http-body-util",
  "pool-config",
  "pool-controller",
  "pool-domain",
  "pool-test-support",
  "pool-workflow",
+ "serde_json",
  "sqlx",
  "thiserror",
  "tokio",
+ "tower",
 ]
 
 [[package]]

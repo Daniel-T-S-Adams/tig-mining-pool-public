@@ -22,6 +22,7 @@ stub-acceptance = []
 pool-config = { path = "../pool-config" }
 pool-domain = { path = "../pool-domain" }
 pool-workflow = { path = "../pool-workflow" }
+serde_json = "1"
 sqlx = { version = "0.9", default-features = false, features = [
     "postgres",
     "runtime-tokio",
@@ -30,10 +31,17 @@ sqlx = { version = "0.9", default-features = false, features = [
 thiserror = "2"
 
 [dev-dependencies]
+# The window builder is only worth what it agrees with. Constructed JSON and
+# the pinned fixtures check the shapes it expects; driving a real server checks
+# that those are the shapes anything actually serves.
+axum = "0.8"
+fake-tig = { path = "../fake-tig" }
+http-body-util = "0.1"
 pool-controller = { path = ".", features = ["stub-acceptance"] }
 pool-test-support = { path = "../pool-test-support" }
 sqlx = { version = "0.9", features = ["migrate"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tower = { version = "0.5", features = ["util"] }
 
 [lints]
 workspace = true

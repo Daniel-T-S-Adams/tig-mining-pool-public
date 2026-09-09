@@ -49,10 +49,19 @@ db-up:
 # `make check` because the job provides POOL_TEST_SUPERUSER_URL, and the
 # workflow runs the A4 scan as its own step; locally the cargo tests skip
 # unless pointed at a database, which this target does.
+#
+# `--workspace`, not one package. Every database-backed test in the
+# repository skips itself when POOL_TEST_SUPERUSER_URL is unset, so a plain
+# `make check` reports a green suite while running none of them. Naming a
+# single package here left the migrations, the workflow state machine and
+# the restart pass with no local target that runs them at all — passing
+# locally and only being tested on the CI machine. POOL_REQUIRE_DB_TESTS=1
+# turns the skip into a failure, so this target cannot quietly become the
+# same thing again.
 db-test: db-up provisioning-selftest db-scan
 	POOL_TEST_SUPERUSER_URL="postgres://postgres@127.0.0.1:5433/postgres" \
 	POOL_REQUIRE_DB_TESTS=1 \
-	cargo test -p pool-admin
+	cargo test --workspace
 
 # Proves the psql \set quoting convention provisioning depends on: a
 # password containing a quote or a backslash must round-trip verbatim, or the

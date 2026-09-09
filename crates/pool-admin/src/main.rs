@@ -119,8 +119,18 @@ async fn migrate(config: &Config, dry_run: bool) -> Result<(), String> {
 
     // Two connections: one holds the operation lock for the duration, the
     // other does the work.
+    //
+    // The acquire timeout is set explicitly because sqlx retries a refused
+    // connection until it expires, and its default is thirty seconds. A1 says
+    // a job that cannot reach its database must fail closed; doing so half a
+    // minute late is a worse answer than doing so promptly, and the retry
+    // decision belongs to whatever invoked this — which cannot make it until
+    // this process returns.
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(2)
+        .acquire_timeout(std::time::Duration::from_millis(u64::from(
+            config.database.connect_timeout_ms,
+        )))
         .connect(&url)
         .await
         .map_err(|e| format!("cannot connect to database: {e}"))?;

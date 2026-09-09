@@ -126,19 +126,36 @@ fn every_log_line_carries_service_deployment_and_network() {
 }
 
 #[test]
-fn an_unreachable_database_exits_non_zero() {
+fn an_unreachable_database_exits_non_zero_promptly() {
     // A1: fail closed. A migration job that cannot reach its database must
     // not report success.
+    //
+    // And must say so while someone is still watching. sqlx retries a refused
+    // connection until its pool acquire timeout, whose default is thirty
+    // seconds, so this took thirty seconds before `connect_timeout_ms`
+    // existed — an in-process retry loop nobody chose. Whether to retry is
+    // the invoking deploy step's decision and it cannot make it until this
+    // process returns.
+    //
+    // The bound is loose on purpose: it is here to catch a silent return to
+    // the library default, not to measure the timeout. A slow machine has
+    // room; thirty seconds does not fit.
     let scratch = Scratch::new("unreachable");
+    let started = std::time::Instant::now();
     let output = Command::new(BIN)
         .arg("--config")
         .arg(scratch.unreachable_config())
         .arg("migrate")
         .output()
         .expect("binary runs");
+    let elapsed = started.elapsed();
     assert!(
         !output.status.success(),
         "migrate must exit non-zero when the database is unreachable"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(20),
+        "took {elapsed:?}: the acquire timeout is not being applied"
     );
 }
 

@@ -75,10 +75,28 @@ pub struct DatabaseConfig {
     /// Statement timeout applied to every session, in milliseconds.
     #[serde(default = "default_statement_timeout_ms")]
     pub statement_timeout_ms: u32,
+    /// How long to keep trying to obtain a connection before giving up, in
+    /// milliseconds.
+    ///
+    /// sqlx retries a refused connection until its pool acquire timeout, so
+    /// without this the effective answer is that library's default of thirty
+    /// seconds — an in-process retry loop nobody chose and nobody can see. A1
+    /// says a job that cannot reach its database must fail closed, and failing
+    /// closed half a minute late is a worse answer than failing closed
+    /// promptly: whether to retry is the invoking deploy step's decision, and
+    /// it can only make it once this process has returned.
+    #[serde(default = "default_connect_timeout_ms")]
+    pub connect_timeout_ms: u32,
 }
 
 fn default_statement_timeout_ms() -> u32 {
     30_000
+}
+
+/// Long enough to cross a slow resolver or a proxy, short enough that a
+/// refused connection is reported while an operator is still watching.
+fn default_connect_timeout_ms() -> u32 {
+    5_000
 }
 
 /// The log format.
@@ -226,6 +244,13 @@ impl Config {
             return Err(invalid(
                 "database.statement_timeout_ms must not be 0: an unbounded statement can hold a \
                  lock indefinitely"
+                    .into(),
+            ));
+        }
+        if self.database.connect_timeout_ms == 0 {
+            return Err(invalid(
+                "database.connect_timeout_ms must not be 0: a zero timeout cannot succeed, so \
+                 the process would fail closed whatever the database was doing"
                     .into(),
             ));
         }

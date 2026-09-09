@@ -388,3 +388,27 @@ fn config_debug_output_carries_no_password() {
         "config Debug output must not contain the password"
     );
 }
+
+#[test]
+fn the_connect_timeout_defaults_and_cannot_be_zero() {
+    // A config that omits it still gets a bound — the point is that *some*
+    // explicit value reaches the pool, because sqlx's own default is thirty
+    // seconds of invisible retrying.
+    let scratch = Scratch::new("connect-timeout");
+    let path = scratch.write(&valid_toml(&scratch.password_file()));
+    let config = Config::load(&path, Binary::PoolAdminMigrate).expect("loads");
+    assert!(
+        config.database.connect_timeout_ms > 0 && config.database.connect_timeout_ms < 30_000,
+        "the default must be a real bound, tighter than the library's: {}",
+        config.database.connect_timeout_ms
+    );
+
+    // Zero cannot succeed, so it would fail closed whatever the database was
+    // doing — a configuration that looks like a timeout and behaves like an
+    // outage.
+    let toml = valid_toml(&scratch.password_file())
+        .replace("statement_timeout_ms = 30000", "connect_timeout_ms = 0");
+    let path = scratch.write(&toml);
+    let err = Config::load(&path, Binary::PoolAdminMigrate).expect_err("zero is not a timeout");
+    assert_invalid(err, "connect_timeout_ms must not be 0");
+}

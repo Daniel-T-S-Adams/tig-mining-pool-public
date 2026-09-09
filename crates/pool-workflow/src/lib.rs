@@ -5,6 +5,7 @@
 //! write impossible rather than unlikely — and the gateway's write-attempt
 //! ledger, which records that a request was sent before it is sent.
 
+pub mod acceptance;
 pub mod attempt;
 pub mod deadlines;
 pub mod decision;
@@ -13,6 +14,10 @@ pub mod lease;
 pub mod restart;
 pub mod workflow;
 
+pub use acceptance::{
+    AcceptanceError, CanonicalPayload, PackageAcceptance, record_acceptance,
+    record_canonical_payload,
+};
 pub use attempt::{
     AttemptError, AttemptOutcome, PostgresAttemptLedger, WriteAttempt, WriteAttemptLedger,
     has_transmitted_precommit_write,

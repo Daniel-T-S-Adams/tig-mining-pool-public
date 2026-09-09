@@ -193,6 +193,10 @@ async fn an_accepted_attempt_with_no_confirmation_advances_nothing() {
     assert_eq!(w.state, WorkflowState::PrecommitConfirmed);
 
     // A real accepted attempt: TIG answered 200 and the ledger says so.
+    // §13 invariant 4 first — 0011 refuses a benchmark write with no durable
+    // acceptance, and this test's subject is what an *accepted attempt* does
+    // to a workflow, not what precedes the intent.
+    pool_test_support::seed_acceptances(&pool, "testnet", &[("w1", "bench_a")]).await;
     let intent_id: String = sqlx::query_scalar(
         "INSERT INTO pool.tig_write_intent
              (network, workflow_id, write_kind, generation, benchmark_id, payload_digest)

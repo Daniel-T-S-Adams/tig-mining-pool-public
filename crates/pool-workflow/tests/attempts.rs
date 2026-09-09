@@ -19,7 +19,45 @@ fn intent(workflow: &str, kind: WriteKind, benchmark: Option<&str>) -> NewIntent
         generation: 1,
         benchmark_id: benchmark.map(str::to_string),
         payload_digest: [0xab; 32],
-        payload_artifact_id: None,
+        // §13 invariant 5: a proof write names the canonical payload it sends.
+        // `seed_preconditions` records the matching row.
+        payload_artifact_id: (kind == WriteKind::Proof)
+            .then(|| format!("artifact/{workflow}/proof")),
+    }
+}
+
+/// Record whatever `migrations/0011` requires behind this intent.
+///
+/// These tests are about the attempt lane, not about acceptance. The
+/// preconditions still have to hold — 0011 makes them structural for every
+/// writer — so they are established here rather than asserted here.
+async fn seed_preconditions(pool: &sqlx::PgPool, new: &NewIntent) {
+    let Some(benchmark_id) = new.benchmark_id.as_deref() else {
+        return;
+    };
+    match new.write_kind {
+        WriteKind::Benchmark => {
+            pool_test_support::seed_acceptances(
+                pool,
+                "testnet",
+                &[(new.workflow_id.as_str(), benchmark_id)],
+            )
+            .await;
+        }
+        WriteKind::Proof => {
+            pool_test_support::seed_canonical_payload(
+                pool,
+                "testnet",
+                new.payload_artifact_id
+                    .as_deref()
+                    .expect("a proof names one"),
+                &new.workflow_id,
+                benchmark_id,
+                new.payload_digest,
+            )
+            .await;
+        }
+        WriteKind::Precommit => {}
     }
 }
 
@@ -721,6 +759,15 @@ async fn two_writes_for_one_benchmark_cannot_be_in_flight() {
     let intents = PostgresIntentRepository::new(db.pool_as("pool_controller").await);
     let ledger = PostgresAttemptLedger::new(db.pool_as("pool_gateway").await);
 
+    let controller = db.pool_as("pool_controller").await;
+    for new in [
+        intent("w1", WriteKind::Benchmark, Some("bench-a")),
+        intent("w2", WriteKind::Proof, Some("bench-a")),
+        intent("w3", WriteKind::Benchmark, Some("bench-b")),
+    ] {
+        seed_preconditions(&controller, &new).await;
+    }
+
     let bench = intents
         .create(intent("w1", WriteKind::Benchmark, Some("bench-a")))
         .await
@@ -780,10 +827,9 @@ async fn the_lane_columns_come_from_the_intent_not_the_caller() {
     .await;
     let intents = PostgresIntentRepository::new(db.pool_as("pool_controller").await);
     let gateway = db.pool_as("pool_gateway").await;
-    let recorded = intents
-        .create(intent("w1", WriteKind::Benchmark, Some("bench-a")))
-        .await
-        .unwrap();
+    let new = intent("w1", WriteKind::Benchmark, Some("bench-a"));
+    seed_preconditions(&db.pool_as("pool_controller").await, &new).await;
+    let recorded = intents.create(new).await.unwrap();
 
     // Try to insert an attempt claiming a different benchmark entirely.
     sqlx::query(

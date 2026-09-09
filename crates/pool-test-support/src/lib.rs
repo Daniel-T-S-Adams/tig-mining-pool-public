@@ -66,6 +66,63 @@ pub async fn seed_workflows_owned_by_member(pool: &PgPool, network: &str, workfl
     seed(pool, network, workflow_ids, "MEMBER", "member_fixture").await;
 }
 
+/// Satisfy `architecture.md` §13 invariant 4 for these (workflow, benchmark)
+/// pairs.
+///
+/// `migrations/0011` refuses a benchmark write intent without a durable
+/// package acceptance, which is the point — but a test about the intent *key*
+/// rules or the attempt lane is not a test about acceptance, and making each
+/// of them build the precondition by hand would bury its subject. The bytes
+/// are a fixture; the row's existence is what the invariant is about.
+pub async fn seed_acceptances(pool: &PgPool, network: &str, pairs: &[(&str, &str)]) {
+    for (workflow_id, benchmark_id) in pairs {
+        sqlx::query(
+            "INSERT INTO pool.package_acceptance
+                 (network, workflow_id, benchmark_id, package_sha256)
+             VALUES ($1, $2, $3, decode(repeat('7a', 32), 'hex'))
+             ON CONFLICT (network, workflow_id, benchmark_id) DO NOTHING",
+        )
+        .bind(network)
+        .bind(workflow_id)
+        .bind(benchmark_id)
+        .execute(pool)
+        .await
+        .expect("seeding a package acceptance");
+    }
+}
+
+/// The same for invariant 5: a canonical payload a proof intent may cite.
+///
+/// Returns nothing — the caller already knows the artifact id, because it has
+/// to put the same one on the intent. `payload_digest` must match the intent's
+/// too, so it is a parameter rather than a fixture constant: 0011 requires the
+/// two to agree, and a helper that quietly chose its own would make every
+/// proof-intent test pass for the wrong reason.
+pub async fn seed_canonical_payload(
+    pool: &PgPool,
+    network: &str,
+    artifact_id: &str,
+    workflow_id: &str,
+    benchmark_id: &str,
+    payload_digest: [u8; 32],
+) {
+    sqlx::query(
+        "INSERT INTO pool.canonical_payload
+             (network, artifact_id, workflow_id, benchmark_id,
+              sample_digest, payload_digest)
+         VALUES ($1, $2, $3, $4, decode(repeat('5c', 32), 'hex'), $5)
+         ON CONFLICT (network, artifact_id) DO NOTHING",
+    )
+    .bind(network)
+    .bind(artifact_id)
+    .bind(workflow_id)
+    .bind(benchmark_id)
+    .bind(payload_digest.as_slice())
+    .execute(pool)
+    .await
+    .expect("seeding a canonical payload");
+}
+
 async fn seed(pool: &PgPool, network: &str, ids: &[&str], kind: &str, owner: &str) {
     for id in ids {
         sqlx::query(

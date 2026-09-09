@@ -167,6 +167,15 @@ async fn a_generation_cannot_be_reused_across_a_different_benchmark() {
         &["w1", "w2", "w3", "author", "rearm", "terminal"],
     )
     .await;
+    // §13 invariant 4: 0011 refuses a benchmark write with no durable
+    // acceptance behind it. Both benchmarks below are accepted, so what this
+    // test measures is still the intent *key* rule and not the precondition.
+    pool_test_support::seed_acceptances(
+        &db.pool_as("pool_controller").await,
+        "testnet",
+        &[("w1", "bench-a"), ("w1", "bench-b")],
+    )
+    .await;
     let repo = PostgresIntentRepository::new(db.pool_as("pool_controller").await);
 
     repo.create(benchmark("w1", 1, "bench-a", 0xab))

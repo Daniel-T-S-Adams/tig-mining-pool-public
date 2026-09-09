@@ -10,10 +10,12 @@ pub mod deadlines;
 pub mod decision;
 pub mod intent;
 pub mod lease;
+pub mod restart;
 pub mod workflow;
 
 pub use attempt::{
     AttemptError, AttemptOutcome, PostgresAttemptLedger, WriteAttempt, WriteAttemptLedger,
+    has_transmitted_precommit_write,
 };
 pub use deadlines::{GuardrailError, Guardrails, Remaining, Standing};
 pub use decision::{
@@ -25,6 +27,10 @@ pub use intent::{
     WriteIntent, WriteKind,
 };
 pub use lease::{Lease, LeaseError, LeaseKind};
+pub use restart::{
+    ConfirmedWindow, NeedsAttention, Reconciled, RestartReport, open_block_gaps,
+    reconcile_after_restart, record_block_gap,
+};
 pub use workflow::{
     ConfirmedBenchmark, ConfirmedFraud, ConfirmedPrecommit, ConfirmedProof, Owner,
     POOL_BOOTSTRAP_OWNER, Submitted, Workflow, WorkflowError, WorkflowState,

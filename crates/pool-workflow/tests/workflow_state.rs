@@ -1529,3 +1529,46 @@ async fn a_confirmation_must_bring_its_start_block() {
         "unexpected error: {error}"
     );
 }
+
+#[test]
+fn all_states_round_trip_and_match_the_schema() {
+    // `WorkflowState::ALL` exists so callers derive sets from the enum instead
+    // of repeating a list that drifts — the restart pass's terminal list had
+    // already drifted, still naming FRAUD after the state became FRAUDULENT.
+    //
+    // But ALL is hand-written, so nothing stops a new variant being omitted.
+    // This is what keeps it honest: every entry round-trips, and the set
+    // equals migration 0006's `workflow_state_known` CHECK.
+    for state in WorkflowState::ALL {
+        assert_eq!(
+            pool_workflow::WorkflowState::parse_state(state.as_str()),
+            Some(state),
+            "{state:?} does not round-trip"
+        );
+    }
+
+    let migration = include_str!("../../../migrations/0006_workflow.sql");
+    let check = migration
+        .split("CONSTRAINT workflow_state_known")
+        .nth(1)
+        .expect("the CHECK exists")
+        .split(")),")
+        .next()
+        .expect("the CHECK closes");
+
+    let mut in_schema: Vec<&str> = check
+        .split('\'')
+        .filter(|piece| {
+            piece.chars().all(|c| c.is_ascii_uppercase() || c == '_') && !piece.is_empty()
+        })
+        .collect();
+    in_schema.sort_unstable();
+
+    let mut in_enum: Vec<&str> = WorkflowState::ALL.iter().map(|s| s.as_str()).collect();
+    in_enum.sort_unstable();
+
+    assert_eq!(
+        in_enum, in_schema,
+        "the enum and the schema must name the same states"
+    );
+}

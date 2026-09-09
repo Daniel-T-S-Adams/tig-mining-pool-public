@@ -144,6 +144,57 @@ macro_rules! unsettled_write_exists {
 }
 pub(crate) use unsettled_write_exists;
 
+/// Whether a precommit write for `workflow_id` ever left the gateway.
+///
+/// A different question from [`unsettled_write_exists`], and kept separate on
+/// purpose. That one asks whether a write's fate is unknown, so the pool's
+/// clock must not decide it. This one asks whether a write reached TIG at
+/// all, so §10's tuple search is owed for its result.
+///
+/// The two diverge exactly on an ACCEPTED attempt. TIG answered, so nothing
+/// is unsettled — but §6.1 returns the assigned `benchmark_id` in that
+/// response and nothing durable holds it: a precommit intent structurally
+/// cannot carry one (`migrations/0003` D1a) and an attempt's `detail` may
+/// never hold response bytes (`migrations/0004`). A crash between the
+/// response and `confirm_precommit` therefore loses the id of a benchmark
+/// TIG has already created and charged a fee for, and the only way back to it
+/// is E4's search over the exact submitted tuple. Collapsing the two
+/// questions into one predicate would either expire a workflow whose write
+/// landed, or leave the search unrequested — and `admit_precommit` would
+/// then read the workflow as having sent nothing and admit a second
+/// precommit for the same decision.
+///
+/// An attempt row is the evidence, because `begin` writes it before the
+/// request leaves. Zero attempt rows means nothing was sent.
+///
+/// `REJECTED` is excluded. TIG answered and refused, so no benchmark exists to
+/// find and the tuple search would return nothing forever — filling the
+/// stop-for-operator bucket that only works while it stays quiet. What such a
+/// workflow is owed is `fail`, not a search.
+pub async fn has_transmitted_precommit_write(
+    pool: &PgPool,
+    network: &str,
+    workflow_id: &str,
+) -> Result<bool, sqlx::Error> {
+    let found: Option<i32> = sqlx::query_scalar(
+        "SELECT 1
+           FROM pool.tig_write_intent i
+          WHERE i.network = $1 AND i.workflow_id = $2
+            AND i.write_kind = 'precommit'
+            AND EXISTS (
+                 SELECT 1 FROM pool.tig_write_attempt a
+                  WHERE a.intent_id = i.intent_id
+                    AND (a.outcome IS NULL OR a.outcome IN ('AMBIGUOUS', 'ACCEPTED'))
+                )
+          LIMIT 1",
+    )
+    .bind(network)
+    .bind(workflow_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(found.is_some())
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum AttemptError {
     #[error("attempt ledger unavailable: {0}")]

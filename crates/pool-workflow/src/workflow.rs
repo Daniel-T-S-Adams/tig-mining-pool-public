@@ -116,6 +116,28 @@ impl WorkflowState {
         }
     }
 
+    /// Every state, so callers can derive a set (the terminal ones, say)
+    /// from the enum rather than repeating a list that then drifts.
+    ///
+    /// Hand-written, so `all_states_round_trip` in the workflow tests is what
+    /// keeps it honest: a variant added without being added here would
+    /// otherwise compile, and a terminal state missing from it would make the
+    /// restart pass reload terminal workflows.
+    pub const ALL: [WorkflowState; 12] = [
+        WorkflowState::Decided,
+        WorkflowState::PrecommitSubmitted,
+        WorkflowState::PrecommitConfirmed,
+        WorkflowState::BenchmarkSubmitted,
+        WorkflowState::BenchmarkConfirmed,
+        WorkflowState::ProofSubmitted,
+        WorkflowState::ProofConfirmed,
+        WorkflowState::Verified,
+        WorkflowState::Stopped,
+        WorkflowState::Fraudulent,
+        WorkflowState::Expired,
+        WorkflowState::Failed,
+    ];
+
     /// Public so callers reading the column directly can go through the
     /// enum rather than re-encoding its state list.
     pub fn parse_state(text: &str) -> Option<Self> {

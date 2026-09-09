@@ -1,0 +1,39 @@
+[package]
+name = "pool-controller"
+description = "The pool's protocol state machine: what to write and when (docs/architecture.md §3)"
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+version = "0.1.0"
+
+[features]
+# Criterion F4c. The stub acceptance record of F4a exists so the fake-tig
+# lifecycle drive can satisfy `architecture.md` §13 invariants 4 and 5 in a
+# slice with no members and no uploads. It must not exist in a real build:
+# criterion K3 runs these binaries against live testnet, and a stub that can
+# fabricate "this package was durably accepted" has no business being
+# reachable there — not refused at runtime, absent.
+#
+# `scripts/feature-gate.sh` proves that, the same way it does for the spike
+# qualification stand-in and tig-client's testing module.
+stub-acceptance = []
+
+[dependencies]
+pool-config = { path = "../pool-config" }
+pool-domain = { path = "../pool-domain" }
+pool-workflow = { path = "../pool-workflow" }
+sqlx = { version = "0.9", default-features = false, features = [
+    "postgres",
+    "runtime-tokio",
+    "tls-rustls-ring",
+] }
+thiserror = "2"
+
+[dev-dependencies]
+pool-controller = { path = ".", features = ["stub-acceptance"] }
+pool-test-support = { path = "../pool-test-support" }
+sqlx = { version = "0.9", features = ["migrate"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true

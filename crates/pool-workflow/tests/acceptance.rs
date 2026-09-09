@@ -50,6 +50,7 @@ fn acceptance(workflow: &str, benchmark: &str) -> PackageAcceptance {
         workflow_id: workflow.to_string(),
         benchmark_id: benchmark.to_string(),
         package_sha256: [0x7a; 32],
+        stub_origin: false,
     }
 }
 
@@ -61,6 +62,7 @@ fn payload(artifact: &str, workflow: &str, benchmark: &str) -> CanonicalPayload 
         benchmark_id: benchmark.to_string(),
         sample_digest: SAMPLE,
         payload_digest: PAYLOAD,
+        stub_origin: false,
     }
 }
 

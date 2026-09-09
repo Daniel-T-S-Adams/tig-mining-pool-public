@@ -124,6 +124,100 @@ pub struct TelemetryConfig {
     pub deployment: String,
 }
 
+/// Where TIG is.
+///
+/// A separate configuration surface from `network`, and deliberately so.
+/// `network` is pinned to exactly `testnet` in this build (A2), so it cannot
+/// distinguish the real testnet API from a local `fake-tig` — and criterion
+/// F4d needs exactly that distinction, to refuse a fabricated acceptance
+/// record anywhere but against the fake. Two fields, because they answer two
+/// questions: *which chain* and *which server*.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TigConfig {
+    /// Base URL of the TIG API. No default: `architecture.md` §9 gives
+    /// `network` no production default for the same reason, and an endpoint
+    /// that falls back to something is an endpoint reached when the operator
+    /// forgot to choose one.
+    pub base_url: String,
+}
+
+impl TigConfig {
+    /// Whether this endpoint is a local `fake-tig`, for F4d's guard.
+    ///
+    /// A property of the **configuration**, not of the network at an instant.
+    /// Resolving a hostname would be the obvious reading of "resolves to the
+    /// local fake-tig target" and is the wrong one: a DNS answer can differ
+    /// between the check and the write it guards, so a guard built on one
+    /// says a thing that was true a moment ago. A loopback literal cannot
+    /// change under the process.
+    ///
+    /// `localhost` is accepted because every dev and CI config in this
+    /// repository writes it and refusing it would push people to hardcode an
+    /// address; it is a name the host resolver owns, and an operator who has
+    /// repointed it has already left the ground this guard stands on.
+    ///
+    /// Parsed with a real URL parser rather than split by hand. The hand-rolled
+    /// version read the text before the first `:` as the host, so
+    /// `http://127.0.0.1:8080@api.tig.foundation` answered *loopback* while
+    /// every HTTP client sent the request to the real API — the guard passing
+    /// in exactly the case it exists to catch. Userinfo is refused outright as
+    /// well as ignored: a TIG endpoint has no legitimate use for it, and
+    /// `architecture.md` §9 keeps credentials out of TOML.
+    pub fn is_local_fake_tig(&self) -> bool {
+        let Ok(url) = url::Url::parse(&self.base_url) else {
+            return false;
+        };
+        if !url.username().is_empty() || url.password().is_some() {
+            return false;
+        }
+        match url.host() {
+            Some(url::Host::Domain(name)) => name.eq_ignore_ascii_case("localhost"),
+            Some(url::Host::Ipv4(addr)) => addr.is_loopback(),
+            Some(url::Host::Ipv6(addr)) => addr.is_loopback(),
+            None => false,
+        }
+    }
+
+    /// The endpoint's host, with no userinfo, port or path.
+    ///
+    /// For messages. A refusal should name what the process was pointed at,
+    /// and `base_url` is the wrong thing to print: `Config::load` refuses
+    /// userinfo, but a `TigConfig` built directly need not have come through
+    /// it, and §9 keeps credentials out of logs whatever route they arrived
+    /// by. One parser, here, because two parsers is how the loopback check
+    /// came to disagree with every HTTP client.
+    pub fn host(&self) -> Option<String> {
+        url::Url::parse(&self.base_url)
+            .ok()
+            .and_then(|u| u.host_str().map(str::to_string))
+    }
+
+    /// The endpoints `config/tig_integration.json` pins, as
+    /// `(testnet, mainnet)`.
+    ///
+    /// Read from the pinned file rather than written here, so there is one
+    /// place that says where TIG is. `tig_integration.md` §2.1 says the
+    /// mainnet URL "must not be used as a fallback" and that enabling mainnet
+    /// "requires an explicit reviewed configuration change" — which a free-form
+    /// `base_url` would otherwise turn into a config edit.
+    fn pinned_endpoints() -> Result<(String, String), String> {
+        const PINNED: &str = include_str!("../../../config/tig_integration.json");
+        let value: serde_json::Value = serde_json::from_str(PINNED)
+            .map_err(|e| format!("config/tig_integration.json is not valid JSON: {e}"))?;
+        let field = |key: &str| -> Result<String, String> {
+            Ok(value
+                .get("network")
+                .and_then(|n| n.get(key))
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| format!("config/tig_integration.json has no network.{key}"))?
+                .trim_end_matches('/')
+                .to_string())
+        };
+        Ok((field("api_base_url")?, field("mainnet_api_base_url")?))
+    }
+}
+
 /// The controller's orchestration policy.
 ///
 /// `mining_system.md` §11 lists `internal_pool_unverified_limit` among the
@@ -150,6 +244,10 @@ pub struct Config {
     pub network: Network,
     pub database: DatabaseConfig,
     pub telemetry: TelemetryConfig,
+    /// Present for the binaries that talk to TIG — the controller reads and
+    /// the gateway writes — and absent for `pool-admin migrate`, which does
+    /// neither. `validate_for` enforces it in both directions.
+    pub tig: Option<TigConfig>,
     /// Present for `pool-controller` and absent for every other binary, which
     /// `validate_for` enforces in both directions.
     pub orchestration: Option<OrchestrationConfig>,
@@ -295,6 +393,89 @@ impl Config {
         }
         if self.telemetry.level.trim().is_empty() {
             return Err(invalid("telemetry.level must not be empty".into()));
+        }
+
+        // Required for the binaries that talk to TIG, refused for the one
+        // that does not. `pool-admin migrate` holding an endpoint would read
+        // as though the migration job could reach TIG, and §4 gives it one
+        // job.
+        match (binary, &self.tig) {
+            (Binary::PoolController | Binary::TigGateway, None) => {
+                return Err(invalid(format!(
+                    "{} requires [tig] with base_url; there is no default, for the same reason network has none (architecture.md §9)",
+                    binary.as_str()
+                )));
+            }
+            (Binary::PoolController | Binary::TigGateway, Some(tig)) => {
+                // Parsed enough to be an endpoint. A bare host would be read
+                // as a relative path by most clients and produce a request to
+                // somewhere unintended rather than a startup failure.
+                // The scheme, never the URL. This message runs before
+                // anything has checked for userinfo, so interpolating
+                // `base_url` here would print `ftp://user:pw@host`'s
+                // credential into a startup log — §9 and criterion A4 keep
+                // secrets out of logs whatever put them in the config.
+                if !tig.base_url.starts_with("http://") && !tig.base_url.starts_with("https://") {
+                    let scheme = tig
+                        .base_url
+                        .split("://")
+                        .next()
+                        .filter(|s| s.len() < tig.base_url.len())
+                        .unwrap_or("<none>");
+                    return Err(invalid(format!(
+                        "tig.base_url scheme \"{scheme}\" is not http or https"
+                    )));
+                }
+                let parsed = url::Url::parse(&tig.base_url)
+                    .map_err(|e| invalid(format!("tig.base_url is not a URL: {e}")))?;
+                if parsed.host().is_none() {
+                    return Err(invalid(format!(
+                        "tig.base_url names no host: \"{}\"",
+                        tig.base_url
+                    )));
+                }
+                // A TIG endpoint has no legitimate userinfo. One here would
+                // put a credential in TOML against §9 — and be echoed back in
+                // this very message — and userinfo before a real host is how
+                // a loopback check gets fooled.
+                if !parsed.username().is_empty() || parsed.password().is_some() {
+                    return Err(invalid("tig.base_url must not carry userinfo".into()));
+                }
+
+                // Where TIG is has one source of truth: the pinned
+                // `config/tig_integration.json`. Without this, `[tig]` is a
+                // second one — `tig_integration.md` §2.1 says the mainnet URL
+                // "must not be used as a fallback" and that enabling mainnet
+                // "requires an explicit reviewed configuration change", and
+                // `Network`'s own doc says no build of this slice can be
+                // pointed at mainnet by editing a config file. A free-form
+                // endpoint made that false while `network` still read
+                // "testnet".
+                let (pinned_testnet, pinned_mainnet) =
+                    TigConfig::pinned_endpoints().map_err(invalid)?;
+                let given = tig.base_url.trim_end_matches('/');
+                if given.eq_ignore_ascii_case(&pinned_mainnet) {
+                    return Err(invalid(format!(
+                        "tig.base_url is the pinned mainnet endpoint {pinned_mainnet}: \
+                         §2.1 forbids it as a fallback, and enabling mainnet is a reviewed \
+                         change, not a config edit"
+                    )));
+                }
+                if !tig.is_local_fake_tig() && given != pinned_testnet {
+                    return Err(invalid(format!(
+                        "tig.base_url must be the pinned endpoint {pinned_testnet} or a \
+                         local fake-tig, found \"{}\"",
+                        tig.base_url
+                    )));
+                }
+            }
+            (Binary::PoolAdminMigrate, Some(_)) => {
+                return Err(invalid(
+                    "pool-admin migrate must not carry [tig]: it does not talk to TIG (architecture.md §4)"
+                        .into(),
+                ));
+            }
+            (Binary::PoolAdminMigrate, None) => {}
         }
 
         // Required for the controller and refused for anyone else. Both

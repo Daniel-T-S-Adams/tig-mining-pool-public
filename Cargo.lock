@@ -1476,8 +1476,24 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "serde",
+ "serde_json",
  "thiserror",
  "toml",
+ "url",
+]
+
+[[package]]
+name = "pool-controller"
+version = "0.1.0"
+dependencies = [
+ "pool-config",
+ "pool-controller",
+ "pool-domain",
+ "pool-test-support",
+ "pool-workflow",
+ "sqlx",
+ "thiserror",
+ "tokio",
 ]
 
 [[package]]

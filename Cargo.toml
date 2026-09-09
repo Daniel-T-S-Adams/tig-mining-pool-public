@@ -4,6 +4,7 @@ members = [
     "crates/fake-tig",
     "crates/pool-admin",
     "crates/pool-config",
+    "crates/pool-controller",
     "crates/pool-decision",
     "crates/pool-domain",
     "crates/pool-identity",

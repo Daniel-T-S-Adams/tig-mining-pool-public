@@ -173,6 +173,11 @@ fn each_binary_accepts_only_its_own_role() {
         if matches!(binary, Binary::PoolController) {
             toml.push_str(ORCHESTRATION);
         }
+        // Both TIG-facing binaries require an endpoint; the migration job
+        // must not carry one.
+        if matches!(binary, Binary::PoolController | Binary::TigGateway) {
+            toml.push_str(TIG);
+        }
         let path = scratch.write(&toml);
         Config::load(&path, binary)
             .unwrap_or_else(|e| panic!("{} with role {role} must load: {e}", binary.as_str()));
@@ -184,13 +189,18 @@ fn each_binary_accepts_only_its_own_role() {
 /// production constant.
 const ORCHESTRATION: &str = "\n[orchestration]\ninternal_pool_unverified_limit = 8\n";
 
+/// The endpoint the controller and gateway both require. A local `fake-tig`
+/// here, which is also what F4d's guard reads.
+const TIG: &str = "\n[tig]\nbase_url = \"http://127.0.0.1:8080\"\n";
+
 #[test]
 fn a_controller_without_an_unverified_limit_does_not_load() {
     // No default: a compiled fallback would be a policy value reached exactly
     // when the operator forgot to set one.
     let scratch = Scratch::new("no-limit");
-    let toml = valid_toml(&scratch.password_file())
+    let mut toml = valid_toml(&scratch.password_file())
         .replace("user = \"pool_migration\"", "user = \"pool_controller\"");
+    toml.push_str(TIG);
     let path = scratch.write(&toml);
     let err = Config::load(&path, Binary::PoolController)
         .expect_err("the controller has no default limit");
@@ -202,6 +212,7 @@ fn a_zero_unverified_limit_is_rejected() {
     let scratch = Scratch::new("zero-limit");
     let mut toml = valid_toml(&scratch.password_file())
         .replace("user = \"pool_migration\"", "user = \"pool_controller\"");
+    toml.push_str(TIG);
     toml.push_str("\n[orchestration]\ninternal_pool_unverified_limit = 0\n");
     let path = scratch.write(&toml);
     let err = Config::load(&path, Binary::PoolController).expect_err("0 admits nothing");
@@ -215,6 +226,7 @@ fn another_binary_may_not_carry_the_orchestration_policy() {
     let scratch = Scratch::new("gateway-orchestration");
     let mut toml = valid_toml(&scratch.password_file())
         .replace("user = \"pool_migration\"", "user = \"pool_gateway\"");
+    toml.push_str(TIG);
     toml.push_str(ORCHESTRATION);
     let path = scratch.write(&toml);
     let err =
@@ -411,4 +423,235 @@ fn the_connect_timeout_defaults_and_cannot_be_zero() {
     let path = scratch.write(&toml);
     let err = Config::load(&path, Binary::PoolAdminMigrate).expect_err("zero is not a timeout");
     assert_invalid(err, "connect_timeout_ms must not be 0");
+}
+
+#[test]
+fn a_tig_facing_binary_requires_an_endpoint_and_the_migration_job_must_not_have_one() {
+    // Both directions. A controller or gateway with no endpoint would have to
+    // invent one at the first call; `pool-admin migrate` carrying one reads as
+    // though the migration job could reach TIG, and `architecture.md` §4 gives
+    // it exactly one job.
+    let scratch = Scratch::new("tig-presence");
+
+    for (binary, role) in [
+        (Binary::PoolController, "pool_controller"),
+        (Binary::TigGateway, "pool_gateway"),
+    ] {
+        let mut toml = valid_toml(&scratch.password_file())
+            .replace("user = \"pool_migration\"", &format!("user = \"{role}\""));
+        if matches!(binary, Binary::PoolController) {
+            toml.push_str(ORCHESTRATION);
+        }
+        let path = scratch.write(&toml);
+        let err = Config::load(&path, binary).expect_err("no endpoint");
+        assert_invalid(err, "[tig]");
+    }
+
+    let mut toml = valid_toml(&scratch.password_file());
+    toml.push_str(TIG);
+    let path = scratch.write(&toml);
+    let err =
+        Config::load(&path, Binary::PoolAdminMigrate).expect_err("migrate does not talk to TIG");
+    assert_invalid(err, "must not carry [tig]");
+}
+
+#[test]
+fn an_endpoint_that_is_not_a_url_does_not_load() {
+    // A bare host is read as a relative path by most clients, so it would
+    // produce a request to somewhere unintended rather than a startup failure.
+    let scratch = Scratch::new("tig-shape");
+    for (bad, needle) in [
+        ("api.tig.foundation", "is not http or https"),
+        ("ftp://api.tig.foundation", "is not http or https"),
+        // The URL parser reaches this one first and says it better than a
+        // hand-rolled check could.
+        ("http://", "empty host"),
+    ] {
+        let mut toml = valid_toml(&scratch.password_file())
+            .replace("user = \"pool_migration\"", "user = \"pool_gateway\"");
+        toml.push_str(&format!("\n[tig]\nbase_url = \"{bad}\"\n"));
+        let path = scratch.write(&toml);
+        let Err(err) = Config::load(&path, Binary::TigGateway) else {
+            panic!("{bad} must not load");
+        };
+        assert_invalid(err, needle);
+    }
+}
+
+#[test]
+fn the_fake_tig_test_reads_the_endpoint_and_not_the_network() {
+    // Criterion F4d. `network` is pinned to exactly "testnet" (A2), so it
+    // cannot tell the real testnet API from a local fake — which is the whole
+    // distinction the stub-acceptance guard turns on.
+    //
+    // A loopback *literal*, not a resolved name: a DNS answer can differ
+    // between the check and the write it guards, so a guard built on one
+    // states something that was true a moment ago.
+    for local in [
+        "http://127.0.0.1:8080",
+        "http://localhost:3000",
+        "http://[::1]:8080",
+        "http://127.0.0.1",
+        "http://localhost/api",
+    ] {
+        assert!(
+            pool_config::TigConfig {
+                base_url: local.to_string()
+            }
+            .is_local_fake_tig(),
+            "{local} is a local fake"
+        );
+    }
+    for remote in [
+        "https://testnet-api.tig.foundation",
+        "http://10.0.0.1:8080",
+        "https://127.0.0.1.example.com",
+        "http://not-localhost:8080",
+        "https://localhost.evil.test",
+        "",
+        // Userinfo posing as the host. Every HTTP client sends these to the
+        // domain after the `@`; a parser that reads up to the first `:` or
+        // `]` sees a loopback literal and answers yes — the guard passing in
+        // exactly the case it exists to catch.
+        "http://127.0.0.1:8080@testnet-api.tig.foundation",
+        "https://[::1]@testnet-api.tig.foundation",
+        "http://localhost@testnet-api.tig.foundation/",
+        "http://user:127.0.0.1@testnet-api.tig.foundation",
+    ] {
+        assert!(
+            !pool_config::TigConfig {
+                base_url: remote.to_string()
+            }
+            .is_local_fake_tig(),
+            "{remote} is not a local fake"
+        );
+    }
+}
+
+#[test]
+fn every_shipped_dev_config_parses_into_the_typed_shape() {
+    // The dev configs are the ones an operator runs first, and nothing checked
+    // them. `deny_unknown_fields` means a renamed or misspelled key is a hard
+    // parse failure — which is the behaviour we want, but only useful if
+    // something notices before the operator does.
+    //
+    // Parsed, not `Config::load`ed: loading reads the password file, which
+    // `scripts/dev-db.sh` generates into the untracked `secrets/` directory
+    // and CI does not have. Everything that can be checked without a secret is
+    // checked here, and that is the part that goes stale — sections, key
+    // names, and the role each binary must connect as.
+    for (file, binary, role) in [
+        (
+            include_str!("../../../config/pool-admin.dev.toml"),
+            Binary::PoolAdminMigrate,
+            "pool_migration",
+        ),
+        (
+            include_str!("../../../config/pool-controller.dev.toml"),
+            Binary::PoolController,
+            "pool_controller",
+        ),
+    ] {
+        let config: Config = toml::from_str(file)
+            .unwrap_or_else(|e| panic!("{} dev config does not parse: {e}", binary.as_str()));
+
+        assert_eq!(config.network, pool_config::Network::Testnet);
+        assert_eq!(
+            config.database.user,
+            role,
+            "{} must connect as {role}",
+            binary.as_str()
+        );
+        assert!(
+            config.database.password_file.starts_with("secrets/"),
+            "a dev config names a password file under secrets/, never a password: {:?}",
+            config.database.password_file
+        );
+
+        // The presence rules `validate_for` enforces, checked against the
+        // files that have to satisfy them.
+        match binary {
+            Binary::PoolController => {
+                let tig = config
+                    .tig
+                    .as_ref()
+                    .expect("the controller needs an endpoint");
+                assert!(
+                    tig.is_local_fake_tig(),
+                    "a dev config points at a local fake-tig, or F4d's guard refuses the stub: {}",
+                    tig.base_url
+                );
+                assert!(config.orchestration.is_some());
+            }
+            _ => {
+                assert!(config.tig.is_none(), "migrate does not talk to TIG");
+                assert!(config.orchestration.is_none());
+            }
+        }
+    }
+}
+
+#[test]
+fn the_endpoint_cannot_be_pointed_at_mainnet_or_anywhere_unpinned() {
+    // `tig_integration.md` §2.1: the mainnet URL "must not be used as a
+    // fallback", and enabling mainnet "requires an explicit reviewed
+    // configuration change". `Network`'s own doc says no build of this slice
+    // can be pointed at mainnet by editing a config file — which a free-form
+    // `[tig].base_url` made false, since A2 only constrains `network`.
+    //
+    // So where TIG is keeps one source of truth: the pinned
+    // `config/tig_integration.json`, or a local fake.
+    let scratch = Scratch::new("tig-pinned");
+    let gateway = |toml: &str| {
+        let path = scratch.write(toml);
+        Config::load(&path, Binary::TigGateway)
+    };
+    let with = |base: &str| {
+        let mut toml = valid_toml(&scratch.password_file())
+            .replace("user = \"pool_migration\"", "user = \"pool_gateway\"");
+        toml.push_str(&format!("\n[tig]\nbase_url = \"{base}\"\n"));
+        toml
+    };
+
+    let err = gateway(&with("https://mainnet-api.tig.foundation")).expect_err("mainnet");
+    assert_invalid(err, "pinned mainnet endpoint");
+
+    let err = gateway(&with("https://api.example.com")).expect_err("somewhere else entirely");
+    assert_invalid(err, "must be the pinned endpoint");
+
+    // Userinfo is refused outright, not merely treated as non-local: a TIG
+    // endpoint needs none, and one in TOML is a credential in TOML.
+    let err = gateway(&with("https://user:pw@testnet-api.tig.foundation")).expect_err("userinfo");
+    assert_invalid(err, "userinfo");
+
+    // The two that are allowed.
+    gateway(&with("https://testnet-api.tig.foundation")).expect("the pinned testnet endpoint");
+    gateway(&with("http://127.0.0.1:8080")).expect("a local fake-tig");
+}
+
+#[test]
+fn a_rejected_endpoint_never_echoes_its_userinfo() {
+    // §9 and criterion A4: no secret readable from a config file, argument,
+    // log or trace. The scheme check runs before anything has looked for
+    // userinfo, so a message that interpolated `base_url` would print the
+    // credential of a URL it was in the middle of rejecting.
+    let scratch = Scratch::new("tig-redact");
+    for bad in [
+        "ftp://user:hunter2@testnet-api.tig.foundation",
+        "https://user:hunter2@testnet-api.tig.foundation",
+        "http://user:hunter2@127.0.0.1:8080",
+    ] {
+        let mut toml = valid_toml(&scratch.password_file())
+            .replace("user = \"pool_migration\"", "user = \"pool_gateway\"");
+        toml.push_str(&format!("\n[tig]\nbase_url = \"{bad}\"\n"));
+        let path = scratch.write(&toml);
+        let Err(err) = Config::load(&path, Binary::TigGateway) else {
+            panic!("{bad} must not load");
+        };
+        let rendered = err.to_string();
+        assert!(
+            !rendered.contains("hunter2"),
+            "the refusal printed the credential it was rejecting: {rendered}"
+        );
+    }
 }

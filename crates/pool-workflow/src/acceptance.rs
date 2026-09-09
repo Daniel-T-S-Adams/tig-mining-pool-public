@@ -42,6 +42,13 @@ pub struct PackageAcceptance {
     /// in step 2 — but "acceptance happened" names nothing without saying
     /// which bytes were accepted.
     pub package_sha256: [u8; 32],
+    /// Whether this row was fabricated by F4a's stub rather than earned.
+    ///
+    /// A fact about origin, not contents, and recorded here because it can
+    /// only be recorded here: a row written without it is indistinguishable
+    /// from a real acceptance for the rest of the database's life. F4d's guard
+    /// reads it; `migrations/0012` makes it immutable.
+    pub stub_origin: bool,
 }
 
 /// A canonical proof payload built for a confirmed sample.
@@ -63,6 +70,9 @@ pub struct CanonicalPayload {
     /// `migrations/0011` requires them to agree, so an intent cannot cite this
     /// payload while transmitting different bytes.
     pub payload_digest: [u8; 32],
+    /// Whether this row was fabricated by F4a's stub. See
+    /// [`PackageAcceptance::stub_origin`].
+    pub stub_origin: bool,
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -118,13 +128,13 @@ where
     let row: (bool, Option<bool>) = sqlx::query_as(
         "WITH ins AS (
              INSERT INTO pool.package_acceptance
-                 (network, workflow_id, benchmark_id, package_sha256)
-             VALUES ($1, $2, $3, $4)
+                 (network, workflow_id, benchmark_id, package_sha256, stub_origin)
+             VALUES ($1, $2, $3, $4, $5)
              ON CONFLICT (network, workflow_id, benchmark_id) DO NOTHING
              RETURNING 1
          )
          SELECT EXISTS (SELECT 1 FROM ins),
-                (SELECT package_sha256 = $4
+                (SELECT package_sha256 = $4 AND stub_origin = $5
                    FROM pool.package_acceptance
                   WHERE network = $1 AND workflow_id = $2
                     AND benchmark_id = $3)",
@@ -133,6 +143,7 @@ where
     .bind(&accepted.workflow_id)
     .bind(&accepted.benchmark_id)
     .bind(accepted.package_sha256.as_slice())
+    .bind(accepted.stub_origin)
     .fetch_one(executor)
     .await
     .map_err(unavailable)?;
@@ -184,14 +195,15 @@ where
         "WITH ins AS (
              INSERT INTO pool.canonical_payload
                  (network, artifact_id, workflow_id, benchmark_id,
-                  sample_digest, payload_digest)
-             VALUES ($1, $2, $3, $4, $5, $6)
+                  sample_digest, payload_digest, stub_origin)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)
              ON CONFLICT (network, artifact_id) DO NOTHING
              RETURNING 1
          )
          SELECT EXISTS (SELECT 1 FROM ins),
                 (SELECT workflow_id = $3 AND benchmark_id = $4
                         AND sample_digest = $5 AND payload_digest = $6
+                        AND stub_origin = $7
                    FROM pool.canonical_payload
                   WHERE network = $1 AND artifact_id = $2)",
     )
@@ -201,6 +213,7 @@ where
     .bind(&payload.benchmark_id)
     .bind(payload.sample_digest.as_slice())
     .bind(payload.payload_digest.as_slice())
+    .bind(payload.stub_origin)
     .fetch_one(executor)
     .await
     .map_err(unavailable)?;

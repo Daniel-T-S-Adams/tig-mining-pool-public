@@ -114,3 +114,55 @@ if ! run_check; then
 fi
 
 echo "feature gate holds: tig-client's testing module is absent from a default build"
+
+# Third gate, and the one with teeth: the F4a stub acceptance record. It can
+# assert "this package was durably accepted" for a package that never existed,
+# which is the precondition `architecture.md` §13 invariant 4 exists to
+# require. Criterion K3 runs the production binaries against live testnet, so
+# this must be ABSENT from that build rather than refused inside it.
+#
+# F4d's runtime endpoint check is defence in depth behind this, not a
+# substitute: the two fail independently, and a test binary is exactly the
+# thing someone eventually points at a real endpoint.
+cat > "$probe/src/main.rs" <<'RS'
+fn main() {
+    // Behind the `stub-acceptance` feature: absent from a default build.
+    let _ = pool_controller::stub::stub_acceptance::<&sqlx::PgPool>;
+}
+RS
+
+write_controller_manifest() {
+    cat > "$probe/Cargo.toml" <<TOML
+[package]
+name = "feature-gate-probe"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+pool-controller = { path = "$root/crates/pool-controller"$1 }
+sqlx = { version = "0.9", default-features = false, features = [
+    "postgres",
+    "runtime-tokio",
+    "tls-rustls-ring",
+] }
+
+[workspace]
+TOML
+}
+
+write_controller_manifest ""
+seed_lockfile
+if run_check > /dev/null 2>&1; then
+    echo "FAIL: the stub acceptance record is reachable in a DEFAULT pool-controller build; a live-testnet binary could fabricate a durable package acceptance" >&2
+    exit 1
+fi
+
+write_controller_manifest ', features = ["stub-acceptance"]'
+seed_lockfile
+if ! run_check; then
+    echo "FAIL: the pool-controller probe did not compile even with the stub-acceptance feature; the probe itself is broken" >&2
+    exit 1
+fi
+
+echo "feature gate holds: the stub acceptance record is absent from a default pool-controller build"

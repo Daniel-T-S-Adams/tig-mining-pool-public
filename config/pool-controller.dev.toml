@@ -1,0 +1,42 @@
+# Local development configuration for `pool-controller`.
+#
+# Non-secret by construction (docs/architecture.md §9): this file names the
+# path of a password file, never a password. `scripts/dev-db.sh` generates the
+# referenced file into the untracked `secrets/` directory.
+#
+# Usage:
+#   ./scripts/dev-db.sh
+#   cargo run -p pool-admin -- --config config/pool-admin.dev.toml migrate
+
+network = "testnet"
+
+[database]
+host = "127.0.0.1"
+port = 5433
+name = "pool_dev"
+# The controller's own least-privilege role. `validate_for` refuses a config
+# that names another, so a controller cannot be handed DDL by editing a file.
+user = "pool_controller"
+password_file = "secrets/db-controller-password"
+statement_timeout_ms = 30000
+
+[telemetry]
+format = "json"
+level = "info"
+deployment = "local-dev"
+
+[tig]
+# A local `fake-tig`, which is also what criterion F4d's guard reads: the stub
+# acceptance record is refused unless this resolves to a loopback address.
+# Pointing this at the real API disables the stub, which is the intent — the
+# check is on the endpoint and not on `network`, because `network` is pinned
+# to "testnet" either way and could not tell the two apart.
+base_url = "http://127.0.0.1:8080"
+
+[orchestration]
+# `mining_system.md` §11 lists this among the values "required before full
+# product implementation", as versioned policy with no settled number. This is
+# a local development placeholder, not a proposed value: production takes it
+# from reviewed policy, and there is deliberately no compiled default to fall
+# back to.
+internal_pool_unverified_limit = 4

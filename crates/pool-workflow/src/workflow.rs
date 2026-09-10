@@ -72,6 +72,12 @@ impl Owner {
 /// `PACKAGING`, the `PACKAGE_*` ladder, `PROOF_BUILDING`, `PROOF_READY`,
 /// `VERIFYING`, `ACTIVE`) are absent because slice 1 has neither members nor
 /// artifacts to reach them; they arrive with their own slices.
+///
+/// `VERIFIED` is not among them and is not a rename of one. §4.5 distinguishes
+/// three things after a confirmed proof — the wait (`VERIFYING`), TIG recording
+/// the benchmark as verified (`VERIFIED`), and membership of the active set
+/// (`ACTIVE`) — and slice 1 records the middle one, because §6.1 keys the
+/// release of a tier's concurrency to exactly that event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkflowState {
     Decided,

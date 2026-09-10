@@ -365,6 +365,7 @@ PRECOMMIT_SUBMITTED
     -> PROOF_SUBMITTED
     -> PROOF_CONFIRMED
     -> VERIFYING
+    -> VERIFIED
     -> ACTIVE
 ```
 
@@ -376,6 +377,24 @@ EXPIRED
 FAILED
 FRAUDULENT
 ```
+
+`VERIFYING` is the wait after a confirmed proof, and `ACTIVE` is membership of
+TIG's active benchmark set — two different observations, each with its own row
+in `tig_integration.md` §7. Between them sits a third fact the ladder above
+does not name: the moment TIG *records the benchmark as verified*, which §6.1
+uses to end the unverified interval and release the tier's concurrency. The
+pool records that as **`VERIFIED`**.
+
+It is a distinct state and not a synonym for either neighbour. `VERIFYING` is
+true while the pool is still waiting and nothing has been published; `VERIFIED`
+is true once the verification event has been read; `ACTIVE` is a later and
+separate fact that TIG's active set is authoritative for. A pool that recorded
+only `VERIFYING` and `ACTIVE` would have no state to enter on the event §6.1
+keys the capacity release to, and would either hold the concurrency slot until
+activation or release it against an event it had not observed.
+
+`VERIFIED` is not terminal. §9 and §10 invariant 17 treat *active* as distinct
+from terminal, and the ladder continues past it.
 
 State transitions must be restart-safe and reconciled against confirmed TIG
 state. TIG HTTP acceptance alone is not protocol confirmation.

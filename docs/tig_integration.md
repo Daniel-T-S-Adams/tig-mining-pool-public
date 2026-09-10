@@ -866,6 +866,40 @@ fixture's `120` is a constructed value, not an observation, and now that the
 unit is known to be rounds it is visibly not a plausible live one — the pool
 reads `ReportsConfig` from the block it is acting on.
 
+**Arbitrations settle one round after the window closes.** Every report
+against a benchmark from round `R` has its arbitration outcome published by
+the end of round `R + submission_period + 1`.
+
+Both the bound and the value it is illustrated at are **owner confirmation**,
+recorded 2026-09-10: the owner states the bound as a firm protocol property,
+and states the live `submission_period` as one round, which makes the
+illustration the end of round `R + 2`. Neither is in the pinned tree. The
+paragraph below still governs the value — it is live configuration, the pool
+reads `ReportsConfig` from the block it is acting on, and the illustration is
+not a substitute for that read.
+
+This is **owner confirmation, not a pinned-source fact** — the same standing
+as the `?round=X` filter above, and recorded here for the same reason: it is
+the reading the pool implements and nothing in the pinned tree states it. It
+matters because it is the difference between a bounded and an unbounded wait.
+Without it the only safe rule is "hold until the report and its arbitration
+are terminal", which has no upper bound and which `accounting.md` §11.6 would
+have to turn into an indefinite hold on a member's collateral. With it, the
+longest a benchmark can hold that collateral is known in advance.
+
+The general form — one round after the submission window closes — is the
+natural reading of the confirmed instance and not separately confirmed. A pool
+reading a `submission_period` other than one should treat the bound as
+unverified for that configuration and hold to terminality instead, which is
+the conservative direction.
+
+**The bound is an observability expectation, not an authority.** It says when
+an answer should be readable. It never decides an outcome: §1 and §7 keep
+confirmed reads the only lifecycle authority, and `accounting.md` §11.6 and
+§11.7 accordingly treat a hold outstanding past the bound as a discrepancy to
+raise rather than a licence to release. It also covers arbitration publication
+only — §14.1's charge block may still be later.
+
 **Not cacheable.** The read is addressed by round, not by block, and a round's
 report set grows for as long as its reporting window is open — through the end
 of round `X + submission_period` — so the same URL returns different bodies

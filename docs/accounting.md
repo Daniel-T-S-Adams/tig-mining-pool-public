@@ -774,6 +774,38 @@ benchmark without a chargeable tier failure, or is frozen and charged when a
 member-attributable failure is established. This prevents the same TIG from
 collateralizing several simultaneous risks.
 
+**When that should be observable.** `tig_integration.md` §14.2 records that an
+arbitration for a benchmark from round `R` is published by the end of round
+`R + submission_period + 1` — at the owner-confirmed live value of one round,
+the end of round `R + 2`. §14.2 marks both the bound and that value as owner
+confirmation rather than pinned-source facts, and instructs holding to
+terminality for any other `submission_period`.
+
+The bound says when the answer should be **readable**, and nothing more. It is
+not a release condition and does not become one: the release condition is the
+paragraph above, unchanged, and only an observed terminal arbitration
+satisfies it. Passing the bound releases nothing, charges nothing and slashes
+nothing — it raises an operator discrepancy under §13 item 16, which stops
+rather than compensating with a guess. Fail-closed is the only safe direction
+here: releasing a method reserve on a deadline, against a slash that is still
+possible, is the pool absorbing a loss it reserved against and cannot recover
+from the member.
+
+**Practical scale.** The protocol spike measured testnet
+`blocks_per_round = 10080` (`protocol_spike_report.md` §9 item 9), which at a
+60-second target is exactly seven days. Round length is live configuration and
+may differ from that snapshot, so this is scale rather than a constant: at it,
+a benchmark created early in its round can hold its method reserve for close to
+three weeks.
+
+That is a capital-efficiency property of the product and not an implementation
+detail. A member cannot recycle one deposit from benchmark to benchmark; to
+work continuously they must hold enough collateral to cover everything still
+inside its window. The admission gate below is where that bites — new work
+needs `eligible_collateral - reserved_exposure` to cover the next reservation,
+so how *long* a reservation lives caps a member's throughput independently of
+which tier they bought.
+
 ### 11.5 Configuration changes and residual risk
 
 The pool reads `penalty_amount` every accepted block and records the exact
@@ -803,12 +835,17 @@ records one rather than deriving it.
 Two premises it rests on are **not established**, and the position is taken
 knowingly rather than derived from them:
 
-- how long an open benchmark remains exposed is unknown. §14.1 cannot exclude
-  a charge block later than the arbitration block; §14.2 now pins
-  `ReportsConfig.submission_period`'s unit as rounds, but its value is live
-  configuration and the arbitration lag beyond the reporting window is not
-  bounded by anything pinned. "Several weeks of notice exceeds the horizon"
-  still compares against a horizon nobody has measured; and
+- how long an open benchmark remains exposed is **partly** known now, and the
+  part that matters here still is not. §14.2 records, as owner confirmation
+  rather than a pinned-source fact, that an arbitration for a benchmark from
+  round `R` is published by the end of round `R + submission_period + 1`, so
+  the *reporting and arbitration* leg is bounded — §11.4 states the scale. That
+  leaves §14.1's leg open: it cannot exclude a charge block later than the
+  arbitration block, so the interval from arbitration to TIG applying a penalty
+  is still unmeasured. "Several weeks of notice exceeds the horizon" therefore
+  compares against a horizon that is now bounded at one end and open at the
+  other, which is better than unmeasured and is not enough to settle the
+  position; and
 - the notice expectation is an observation about how TIG has behaved, not a
   property of the protocol, and nothing in the pinned source guarantees it.
 
@@ -850,6 +887,30 @@ On observing a report against a member-owned benchmark, the pool freezes that
 benchmark's reserved method amount, holding it against the reported outcome
 instead of releasing it when the benchmark would otherwise stop being able to
 generate a penalty.
+
+**When the arbitration should be readable.** `tig_integration.md` §14.2
+records that an arbitration for a benchmark from round `R` is published by the
+end of round `R + submission_period + 1`. That bounds when the pool should be
+able to *read* an answer. It does not bound the freeze.
+
+A freeze is resolved by an observed terminal arbitration and by nothing else.
+Past the bound the freeze persists under the release condition below, and the
+breach is raised as an operator discrepancy under §13 item 16 — a mismatch
+stops and alerts rather than creating a compensating guess. The passage of a
+deadline never releases, charges or slashes anything.
+
+That direction is deliberate. The bound is owner confirmation and not a
+pinned-source fact, so acting on it as though it were would risk releasing a
+method reserve against a slash that is still possible — a loss the pool
+reserved against and cannot recover from the member. Holding costs the member
+liquidity and is visible and correctable; releasing early costs the pool money
+and is neither.
+
+The bound also covers **arbitration publication only**. It says nothing about
+the pool's own attribution and appeal process, which §11.6 and
+`mining_system.md` §8 govern, and nothing about when TIG applies a penalty —
+`tig_integration.md` §14.1 cannot exclude a charge block later than the
+arbitration block.
 
 The freeze keeps that amount inside `reserved_exposure` in §11.4; it does not
 also become a `frozen charge/slash amount`. The distinction is not
@@ -972,6 +1033,21 @@ earnings are the same liability, `LIABILITY:MEMBER_BALANCE:<member>`;
 collateral-eligible until it can no longer be destroyed by a method penalty.
 Until then the same TIG would be covering the penalty that could take it, so
 counting it as collateral would be counting nothing.
+
+"Can no longer be destroyed" is the same window §11.6 freezes on, so the same
+bound says when the answer should be readable: `tig_integration.md` §14.2 puts
+an arbitration for a benchmark from round `R` at the end of round
+`R + submission_period + 1` at the latest.
+
+Maturity is still reached only when every report against every contributing
+benchmark is **observed** terminal. The bound is not a maturation schedule and
+an earning does not mature by the clock — a round still unmatured past the
+bound is an alertable discrepancy under §13 item 16, exactly as an outstanding
+freeze is. What the bound gives a member is an expectation of when their
+earnings should become usable as collateral, not a guarantee that they will;
+the difference matters because maturing an earning early would let it back
+§11.4's admission gate while the penalty that could destroy it is still
+live.
 
 The condition is **per contributing benchmark**, not per earning round. A
 round's earnings mature only when *every benchmark whose qualifiers were

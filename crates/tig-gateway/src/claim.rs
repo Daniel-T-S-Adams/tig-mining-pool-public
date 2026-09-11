@@ -57,6 +57,14 @@ pub enum StopReason {
     /// while both are unsent and then sending the older one, and the answer is
     /// an operator rather than a guess about which generation TIG now holds.
     SiblingGenerationTransmitted { generation: i32 },
+    /// The submission handed in does not reproduce the payload this intent
+    /// recorded.
+    ///
+    /// §7.3 binds an intent to a canonical payload by digest. A reconstructed
+    /// submission that drifted from it would make §10's search look for a
+    /// write this intent never described, and could bind another workflow's
+    /// confirmed benchmark to it.
+    PayloadNotTheRecordedOne,
     /// The intent records `OUTCOME_UNKNOWN` and no attempt exists.
     ///
     /// §7.3 writes that state in the same transaction that marks an attempt
@@ -202,6 +210,19 @@ pub fn decide(
             },
         };
     }
+    // §7.3's binding digest, checked here and not only at the send. The
+    // search below runs over `submitted`'s exact settings, so a submission
+    // that has drifted from what this intent recorded would search for a
+    // different write — and could bind another workflow's confirmed
+    // benchmark to this one, which is the mis-attribution §10 stops for and
+    // a permanent wrong owner under §6. `transmit::send` refuses the same
+    // mismatch, but that guard protects only the path that sends.
+    let digest = crate::transmit::precommit_digest(submitted);
+    if digest != intent.payload_digest {
+        return ClaimDecision::StopForOperator {
+            reason: StopReason::PayloadNotTheRecordedOne,
+        };
+    }
     if matches!(intent.state, IntentState::Confirmed | IntentState::Rejected) {
         return ClaimDecision::Skip {
             reason: SkipReason::AlreadySettled,
@@ -252,17 +273,23 @@ pub fn decide(
             reason: StopReason::UnknownOutcomeWithNoAttempt,
         };
     }
-    if siblings.sibling_transmitted {
-        return ClaimDecision::StopForOperator {
-            reason: StopReason::SiblingGenerationTransmitted {
-                generation: intent.generation,
-            },
-        };
-    }
+    // Supersession first. Once the newest generation has been sent, the older
+    // one is still PREPARED and still claimable, and it must read as ordinary
+    // supersession on every scan — not as a stop. The stop below is for the
+    // state §7.3 forbids, an *older* generation having been sent under a
+    // newer one, and reaching it through the normal path would fill the
+    // bucket that only works while it stays quiet.
     if intent.generation < siblings.newest_generation {
         return ClaimDecision::Skip {
             reason: SkipReason::SupersededByNewerGeneration {
                 newest: siblings.newest_generation,
+            },
+        };
+    }
+    if siblings.sibling_transmitted {
+        return ClaimDecision::StopForOperator {
+            reason: StopReason::SiblingGenerationTransmitted {
+                generation: intent.generation,
             },
         };
     }

@@ -146,12 +146,24 @@ pub enum IntentError {
     /// The intent does not exist.
     #[error("no intent {intent_id}")]
     NotFound { intent_id: String },
-    /// A settled intent was asked to settle differently.
+    /// A settled intent was asked to settle to a different **outcome**.
     ///
     /// §7.3 makes `CONFIRMED` and `REJECTED` terminal. Two confirmed reads
-    /// disagreeing about one write is not something to resolve by taking the
-    /// later one — it is the discrepancy §10 stops for, the same shape
+    /// disagreeing about whether one write landed is not resolved by taking
+    /// the later one — it is the discrepancy §10 stops for, the same shape
     /// `WorkflowError::TerminalStateContradicted` reports for a workflow.
+    ///
+    /// This is the whole of what the intent ledger can refuse, and it is
+    /// narrower than it may look. A precommit intent structurally carries no
+    /// `benchmark_id` (`migrations/0003`, D1a), so re-settling `CONFIRMED`
+    /// under a *different* benchmark id is not detectable here — the ledger
+    /// records that the write landed, not which benchmark it became. Which
+    /// benchmark is the workflow's fact, bound once by
+    /// `workflow::confirm_precommit` and then immutable, with
+    /// `workflow_one_per_benchmark` refusing a second owner. Two confirmed
+    /// reads naming different benchmarks for one workflow are caught there,
+    /// as a contradicted binding, and not here. Storing the id on the intent
+    /// as well would be the same fact in two places, free to disagree.
     #[error("intent {intent_id} is already {recorded}; refusing to record {asked}")]
     AlreadySettled {
         intent_id: String,
@@ -482,6 +494,12 @@ impl TigWriteIntentRepository for PostgresIntentRepository {
         // Reading it back is what distinguishes those, and an idempotent
         // re-settle to the same outcome is a success rather than a conflict —
         // a caller that crashed after settling must be able to start again.
+        //
+        // "Same outcome" compares the state and can compare nothing more: a
+        // precommit intent stores no benchmark id, so `Confirmed` under a
+        // different id is indistinguishable here from the same settlement
+        // repeated. `IntentError::AlreadySettled` says where that case is
+        // caught instead.
         let existing: Option<String> = sqlx::query_scalar(
             "SELECT state FROM pool.tig_write_intent WHERE intent_id = $1::uuid",
         )

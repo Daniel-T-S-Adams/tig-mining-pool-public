@@ -65,7 +65,9 @@ fn intent(state: IntentState) -> WriteIntent {
         write_kind: WriteKind::Precommit,
         generation: 1,
         benchmark_id: None,
-        payload_digest: [0xab; 32],
+        // §7.3 binds the intent to its payload by digest, and `decide` checks
+        // it. The real path records exactly this value at admission.
+        payload_digest: tig_gateway::transmit::precommit_digest(&submitted()),
         payload_artifact_id: None,
         state,
     }
@@ -498,5 +500,92 @@ fn an_unreadable_record_stops_instead_of_being_skipped() {
             }
         ),
         "{decision:?}"
+    );
+}
+
+#[test]
+fn a_submission_that_is_not_the_recorded_payload_cannot_bind_a_benchmark() {
+    // §7.3 binds an intent to a canonical payload by digest, and `send`
+    // refuses a mismatch — but only on the path that sends. The reconcile
+    // path runs §10's search over the submission's exact settings, so a
+    // reconstructed submission that drifted from the recorded one would
+    // search for a write this intent never described and could bind another
+    // workflow's confirmed benchmark to it.
+    let mut drifted = submitted();
+    drifted.challenge_id = "c002".to_string();
+
+    // A confirmed precommit matching the *drifted* settings exists: without
+    // the digest check this would come back AlreadyConfirmed for a benchmark
+    // that belongs to whoever actually submitted c002.
+    let mut other = matching_precommit("bench_theirs", Some(100));
+    other["settings"]["challenge_id"] = json!("c002");
+
+    assert_eq!(
+        decide(
+            &intent(IntentState::OutcomeUnknown),
+            &[attempt(Some(AttemptOutcome::Ambiguous))],
+            LIVE,
+            ONLY,
+            &drifted,
+            &[other],
+        ),
+        ClaimDecision::StopForOperator {
+            reason: StopReason::PayloadNotTheRecordedOne
+        }
+    );
+}
+
+#[test]
+fn an_older_generation_reads_as_superseded_after_the_newest_is_sent() {
+    // The ordinary end of `two_unsent_generations_produce_one_write`: the
+    // newest was sent, the older is still PREPARED and still claimable, and
+    // it must read as supersession on every scan — not as the stop reserved
+    // for the state §7.3 forbids. A bucket that fills on the normal path is a
+    // bucket nobody reads.
+    let after_send = SiblingGenerations {
+        newest_generation: 2,
+        sibling_transmitted: true,
+    };
+    let mut older = intent(IntentState::Prepared);
+    older.generation = 1;
+    assert_eq!(
+        decide(&older, &[], LIVE, after_send, &submitted(), &[]),
+        ClaimDecision::Skip {
+            reason: SkipReason::SupersededByNewerGeneration { newest: 2 }
+        }
+    );
+}
+
+#[test]
+fn an_accepted_attempt_reconciles_rather_than_reading_as_refused() {
+    // The `Accepted` half of "unsettled", which no other test reaches. An
+    // accepted write is a paid-for benchmark whose confirmation has not been
+    // read yet; treating it as settled-and-done — or worse, as refused because
+    // it is not unresolved — would skip a write that landed and leave the
+    // benchmark id unbound.
+    assert_eq!(
+        decide(
+            &intent(IntentState::Prepared),
+            &[attempt(Some(AttemptOutcome::Accepted))],
+            LIVE,
+            ONLY,
+            &submitted(),
+            &[matching_precommit("bench_a", Some(100))],
+        ),
+        ClaimDecision::AlreadyConfirmed {
+            benchmark_id: "bench_a".to_string()
+        }
+    );
+    assert_eq!(
+        decide(
+            &intent(IntentState::Prepared),
+            &[attempt(Some(AttemptOutcome::Accepted))],
+            LIVE,
+            ONLY,
+            &submitted(),
+            &[matching_precommit("bench_a", None)],
+        ),
+        ClaimDecision::AwaitConfirmation,
+        "accepted and not yet confirmed is waited for, not skipped"
     );
 }

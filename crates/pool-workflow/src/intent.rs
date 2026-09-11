@@ -143,6 +143,21 @@ pub enum IntentError {
     },
     #[error("stored intent {intent_id} is unreadable: {reason}")]
     Corrupt { intent_id: String, reason: String },
+    /// The intent does not exist.
+    #[error("no intent {intent_id}")]
+    NotFound { intent_id: String },
+    /// A settled intent was asked to settle differently.
+    ///
+    /// §7.3 makes `CONFIRMED` and `REJECTED` terminal. Two confirmed reads
+    /// disagreeing about one write is not something to resolve by taking the
+    /// later one — it is the discrepancy §10 stops for, the same shape
+    /// `WorkflowError::TerminalStateContradicted` reports for a workflow.
+    #[error("intent {intent_id} is already {recorded}; refusing to record {asked}")]
+    AlreadySettled {
+        intent_id: String,
+        recorded: &'static str,
+        asked: &'static str,
+    },
 }
 
 /// The `TigWriteIntentRepository` port of `architecture.md` §4.
@@ -169,6 +184,77 @@ pub trait TigWriteIntentRepository {
         write_kind: WriteKind,
         generation: i32,
     ) -> impl Future<Output = Result<Option<WriteIntent>, IntentError>> + Send;
+
+    /// Intents of this kind that still owe TIG a write.
+    ///
+    /// `architecture.md` §5.1 step 5: "TIG Gateway claims that intent,
+    /// reconciles it, submits at most one unresolved precommit in the
+    /// serialized lane". This is the set that step draws from.
+    ///
+    /// `PREPARED` and `OUTCOME_UNKNOWN`, and the second is not an oversight.
+    /// §7.3 has the gateway "reconcile against confirmed TIG state" before any
+    /// retry, and an `OUTCOME_UNKNOWN` intent is exactly the one that needs
+    /// it: reconciliation is work the gateway owes, so an intent awaiting it
+    /// has to be reachable. What reconciliation must not do is *resubmit*
+    /// blindly, which is the caller's rule and not this query's.
+    ///
+    /// Ordered oldest first, so a backlog drains in the order it accrued
+    /// rather than by whatever the planner returns.
+    fn claimable(
+        &self,
+        network: Network,
+        write_kind: WriteKind,
+    ) -> impl Future<Output = Result<Vec<WriteIntent>, IntentError>> + Send;
+
+    /// Settle an intent from confirmed TIG evidence.
+    ///
+    /// §7.3: "`CONFIRMED` and `REJECTED` are set only from confirmed TIG
+    /// reads, never from a transport status." So this takes no HTTP status and
+    /// there is no way to call it with one — the caller must hold a confirmed
+    /// read, which is why the controller reconciler settles intents and the
+    /// gateway does not, even though the gateway is what sent the write.
+    ///
+    /// Until this existed nothing ever left `OUTCOME_UNKNOWN`: `resolve` set
+    /// it and `reconcile` settled only the attempt row, so the intent ledger
+    /// recorded a state it could not leave.
+    fn settle(
+        &self,
+        intent_id: &str,
+        outcome: &SettledOutcome,
+    ) -> impl Future<Output = Result<WriteIntent, IntentError>> + Send;
+}
+
+/// The two states §7.3 calls terminal for an intent, each carrying what
+/// justifies it.
+///
+/// A separate type from [`IntentState`] so `settle` cannot be handed
+/// `PREPARED` or `OUTCOME_UNKNOWN`: §7.3 says nothing returns to `PREPARED`,
+/// and moving *to* `OUTCOME_UNKNOWN` is `resolve`'s, from an ambiguous
+/// transport outcome rather than a confirmed read.
+///
+/// `Confirmed` carries the `benchmark_id` because §7.3 says these states come
+/// "only from confirmed TIG reads, never from a transport status", and a
+/// caller that has one has read it — `tig_integration.md` §6.1 returns it in a
+/// response body, but a *confirmed* id comes from `get-benchmarks`. It does
+/// not make the rule unbreakable, and it does mean a caller cannot settle an
+/// intent while holding nothing but an HTTP status, which is the mistake the
+/// rule exists to prevent. `workflow::confirm_precommit` takes its evidence
+/// the same way.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SettledOutcome {
+    /// TIG's confirmed reads show the write landed, under this benchmark id.
+    Confirmed { benchmark_id: String },
+    /// TIG's confirmed reads show it did not.
+    Rejected,
+}
+
+impl SettledOutcome {
+    pub fn as_state(&self) -> IntentState {
+        match self {
+            SettledOutcome::Confirmed { .. } => IntentState::Confirmed,
+            SettledOutcome::Rejected => IntentState::Rejected,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -339,6 +425,104 @@ impl TigWriteIntentRepository for PostgresIntentRepository {
         .await
         .map_err(unavailable)?;
 
+        row.as_ref().map(row_to_intent).transpose()
+    }
+
+    async fn claimable(
+        &self,
+        network: Network,
+        write_kind: WriteKind,
+    ) -> Result<Vec<WriteIntent>, IntentError> {
+        let rows = sqlx::query(
+            "SELECT intent_id::text AS intent_id, network, workflow_id, write_kind,
+                    generation, benchmark_id, payload_digest, payload_artifact_id, state
+             FROM pool.tig_write_intent
+             WHERE network = $1 AND write_kind = $2
+               AND state IN ('PREPARED', 'OUTCOME_UNKNOWN')
+             ORDER BY created_at, intent_id",
+        )
+        .bind(network.as_str())
+        .bind(write_kind.as_str())
+        .fetch_all(&self.pool)
+        .await
+        .map_err(unavailable)?;
+
+        rows.iter().map(row_to_intent).collect()
+    }
+
+    async fn settle(
+        &self,
+        intent_id: &str,
+        outcome: &SettledOutcome,
+    ) -> Result<WriteIntent, IntentError> {
+        // The UPDATE names the states it may move from, so a settled intent
+        // matches nothing and the disagreement is reported rather than
+        // silently applied. The trigger in `migrations/0003` refuses the
+        // retraction too; this is what turns its exception into an answer the
+        // caller can act on.
+        let row = sqlx::query(
+            "UPDATE pool.tig_write_intent
+                SET state = $2, updated_at = now()
+              WHERE intent_id = $1::uuid
+                AND state IN ('PREPARED', 'OUTCOME_UNKNOWN')
+          RETURNING intent_id::text AS intent_id, network, workflow_id, write_kind,
+                    generation, benchmark_id, payload_digest, payload_artifact_id, state",
+        )
+        .bind(intent_id)
+        .bind(outcome.as_state().as_str())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(unavailable)?;
+
+        if let Some(row) = row {
+            return row_to_intent(&row);
+        }
+
+        // Nothing moved: either the intent is gone or it is already settled.
+        // Reading it back is what distinguishes those, and an idempotent
+        // re-settle to the same outcome is a success rather than a conflict —
+        // a caller that crashed after settling must be able to start again.
+        let existing: Option<String> = sqlx::query_scalar(
+            "SELECT state FROM pool.tig_write_intent WHERE intent_id = $1::uuid",
+        )
+        .bind(intent_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(unavailable)?;
+        let Some(recorded) = existing else {
+            return Err(IntentError::NotFound {
+                intent_id: intent_id.to_string(),
+            });
+        };
+        if recorded == outcome.as_state().as_str() {
+            return self
+                .find_by_id(intent_id)
+                .await?
+                .ok_or_else(|| IntentError::NotFound {
+                    intent_id: intent_id.to_string(),
+                });
+        }
+        Err(IntentError::AlreadySettled {
+            intent_id: intent_id.to_string(),
+            recorded: IntentState::parse(&recorded)
+                .map(IntentState::as_str)
+                .unwrap_or("an unknown state"),
+            asked: outcome.as_state().as_str(),
+        })
+    }
+}
+
+impl PostgresIntentRepository {
+    async fn find_by_id(&self, intent_id: &str) -> Result<Option<WriteIntent>, IntentError> {
+        let row = sqlx::query(
+            "SELECT intent_id::text AS intent_id, network, workflow_id, write_kind,
+                    generation, benchmark_id, payload_digest, payload_artifact_id, state
+             FROM pool.tig_write_intent WHERE intent_id = $1::uuid",
+        )
+        .bind(intent_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(unavailable)?;
         row.as_ref().map(row_to_intent).transpose()
     }
 }

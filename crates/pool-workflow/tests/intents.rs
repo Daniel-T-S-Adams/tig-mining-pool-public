@@ -621,3 +621,141 @@ async fn networks_do_not_share_a_generation_space() {
         .get(0);
     assert_eq!(rows, 2);
 }
+
+#[tokio::test]
+async fn an_intent_settles_only_from_confirmed_evidence_and_only_once() {
+    // §7.3: "`CONFIRMED` and `REJECTED` are set only from confirmed TIG reads,
+    // never from a transport status", and both are terminal.
+    //
+    // Until `settle` existed, nothing ever left `OUTCOME_UNKNOWN`: `resolve`
+    // set it and `reconcile` settled only the attempt row, so the intent
+    // ledger recorded a state it could not leave.
+    let Some(db) = TempDb::migrated("intent_settle").await else {
+        return;
+    };
+    let pool = db.pool_as("pool_controller").await;
+    pool_test_support::seed_workflows(&pool, "testnet", &["w1", "w2", "w3"]).await;
+    let repo = PostgresIntentRepository::new(pool.clone());
+
+    let a = repo.create(precommit("w1", 1, 0xab)).await.unwrap();
+    assert_eq!(a.state, IntentState::Prepared);
+
+    let settled = repo
+        .settle(
+            &a.intent_id,
+            &pool_workflow::SettledOutcome::Confirmed {
+                benchmark_id: "bench_a".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(settled.state, IntentState::Confirmed);
+
+    // Idempotent for the same outcome: a caller that crashed after settling
+    // must be able to start again.
+    let again = repo
+        .settle(
+            &a.intent_id,
+            &pool_workflow::SettledOutcome::Confirmed {
+                benchmark_id: "bench_a".to_string(),
+            },
+        )
+        .await
+        .expect("the same settlement again");
+    assert_eq!(again.state, IntentState::Confirmed);
+
+    // A different one is the discrepancy §10 stops for, not a later reading
+    // that wins. Two confirmed reads disagreeing about one write is not
+    // resolved by taking the second.
+    let error = repo
+        .settle(&a.intent_id, &pool_workflow::SettledOutcome::Rejected)
+        .await
+        .expect_err("a settled intent does not resettle");
+    assert!(
+        matches!(error, IntentError::AlreadySettled { .. }),
+        "{error:?}"
+    );
+
+    let error = repo
+        .settle(
+            "00000000-0000-0000-0000-000000000000",
+            &pool_workflow::SettledOutcome::Confirmed {
+                benchmark_id: "bench_a".to_string(),
+            },
+        )
+        .await
+        .expect_err("no such intent");
+    assert!(matches!(error, IntentError::NotFound { .. }), "{error:?}");
+}
+
+#[tokio::test]
+async fn the_claimable_set_is_what_still_owes_tig_a_write() {
+    // `architecture.md` §5.1 step 5 draws from this set. It holds `PREPARED`
+    // and `OUTCOME_UNKNOWN`, and the second is deliberate: §7.3 has the
+    // gateway reconcile against confirmed TIG state before any retry, and an
+    // OUTCOME_UNKNOWN intent is precisely the one that needs it — so it has to
+    // be reachable. Not resubmitting blindly is the caller's rule, not this
+    // query's.
+    let Some(db) = TempDb::migrated("intent_claimable").await else {
+        return;
+    };
+    let pool = db.pool_as("pool_controller").await;
+    pool_test_support::seed_workflows(&pool, "testnet", &["w1", "w2", "w3", "w4"]).await;
+    let repo = PostgresIntentRepository::new(pool.clone());
+
+    let prepared = repo.create(precommit("w1", 1, 0x01)).await.unwrap();
+    let unknown = repo.create(precommit("w2", 1, 0x02)).await.unwrap();
+    let confirmed = repo.create(precommit("w3", 1, 0x03)).await.unwrap();
+    let rejected = repo.create(precommit("w4", 1, 0x04)).await.unwrap();
+
+    sqlx::query(
+        "UPDATE pool.tig_write_intent SET state = 'OUTCOME_UNKNOWN' WHERE intent_id = $1::uuid",
+    )
+    .bind(&unknown.intent_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    repo.settle(
+        &confirmed.intent_id,
+        &pool_workflow::SettledOutcome::Confirmed {
+            benchmark_id: "bench_a".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+    repo.settle(
+        &rejected.intent_id,
+        &pool_workflow::SettledOutcome::Rejected,
+    )
+    .await
+    .unwrap();
+
+    let claimable = repo
+        .claimable(Network::Testnet, WriteKind::Precommit)
+        .await
+        .unwrap();
+    let ids: Vec<&str> = claimable.iter().map(|i| i.intent_id.as_str()).collect();
+    assert!(ids.contains(&prepared.intent_id.as_str()), "{ids:?}");
+    assert!(
+        ids.contains(&unknown.intent_id.as_str()),
+        "an unknown outcome is work the gateway owes: {ids:?}"
+    );
+    assert!(!ids.contains(&confirmed.intent_id.as_str()), "{ids:?}");
+    assert!(!ids.contains(&rejected.intent_id.as_str()), "{ids:?}");
+
+    // A settled intent leaves the set, which is what stops a drained backlog
+    // from being re-drained.
+    repo.settle(
+        &prepared.intent_id,
+        &pool_workflow::SettledOutcome::Confirmed {
+            benchmark_id: "bench_a".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+    let after = repo
+        .claimable(Network::Testnet, WriteKind::Precommit)
+        .await
+        .unwrap();
+    assert_eq!(after.len(), 1, "{after:?}");
+}

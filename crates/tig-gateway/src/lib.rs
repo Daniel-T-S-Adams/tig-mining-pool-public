@@ -9,6 +9,7 @@
 //! loadable only from inside this crate — §13 check 8 still takes the
 //! *observation* that the key is correctly placed, never the key.
 
+pub mod claim;
 pub mod credential;
 pub mod readiness;
 pub mod reconcile;
@@ -16,6 +17,9 @@ pub mod transmit;
 pub mod write_gate;
 pub mod write_policy;
 
+pub use claim::{
+    ClaimDecision, OwningWorkflow, SiblingGenerations, SkipReason, StopReason, decide,
+};
 pub use credential::{CredentialError, TigApiKey};
 pub use readiness::{Check, Evidence, Failure, Pins, WriteReady, evaluate};
 pub use reconcile::{PrecommitSubmission, Reconciliation, TrackSettings, reconcile_precommit};

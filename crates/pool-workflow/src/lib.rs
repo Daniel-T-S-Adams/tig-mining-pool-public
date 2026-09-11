@@ -28,8 +28,8 @@ pub use decision::{
     RecordedTie, admit_precommit,
 };
 pub use intent::{
-    IntentError, IntentState, NewIntent, PostgresIntentRepository, TigWriteIntentRepository,
-    WriteIntent, WriteKind,
+    IntentError, IntentState, NewIntent, PostgresIntentRepository, SettledOutcome,
+    TigWriteIntentRepository, WriteIntent, WriteKind,
 };
 pub use lease::{Lease, LeaseError, LeaseKind};
 pub use restart::{

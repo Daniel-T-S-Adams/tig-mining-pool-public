@@ -18,14 +18,16 @@ use axum::http::Request;
 use fake_tig::{Config, DEFAULT_API_KEY, SharedWorld, build_world, router};
 use http_body_util::BodyExt;
 use pool_controller::bind::Bound;
-use pool_controller::ingest::{IngestError, Ingested, ingest};
+use pool_controller::ingest::{IngestError, Ingested, Ingestor};
 use pool_controller::reconciler::{Outcome, reconcile_block};
 use pool_domain::{Network, challenge_tie_seed, draw_rank};
+use pool_snapshot::active_cache::BenchmarkDataSource;
 use pool_snapshot::store::{
     BlockSnapshotStore, NotUsable, PersistedSnapshot, SnapshotRecord, StoreError,
 };
 use pool_snapshot::{
-    AnchoredRead, PostgresSnapshotStore, Snapshot, SnapshotError, SnapshotSource, TigSnapshotSource,
+    AnchoredRead, PostgresActiveBenchmarkStore, PostgresSnapshotStore, Snapshot, SnapshotError,
+    SnapshotSource, TigSnapshotSource,
 };
 use pool_test_support::TempDb;
 use pool_workflow::{
@@ -41,7 +43,6 @@ use tower::ServiceExt;
 
 const PLAYER: &str = "0xp00l00000000000000000000000000000000000";
 const NET: Network = Network::Testnet;
-const ANCHOR_DIGEST: [u8; 32] = [0xcd; 32];
 
 /// Loose enough that nothing expires unless a test drives the chain there.
 fn guardrails() -> Guardrails {
@@ -56,7 +57,13 @@ fn guardrails() -> Guardrails {
 struct FakeTig {
     app: Router,
     world: SharedWorld,
-    base: String,
+    /// One source for the test's life, as the binary keeps one for the
+    /// process's: §9 caches each read by its key for the life of a block, so
+    /// two assemblies of one block read the same `get-benchmarks` and
+    /// persist the same content. A fresh source per assembly would re-read
+    /// a latest-state endpoint and could produce a second, different
+    /// usable snapshot for the block, which the store refuses as divergent.
+    source: TigSnapshotSource,
 }
 
 async fn fake_tig() -> FakeTig {
@@ -69,23 +76,24 @@ async fn fake_tig() -> FakeTig {
     tokio::spawn(async move {
         let _ = axum::serve(listener, served).await;
     });
+    let policy = tig_client::testing::shipped_policy_for_test().unwrap();
+    let limits = ReadLimits {
+        max_backoff: Duration::from_millis(50),
+        ..tig_client::testing::pool_ceiling_for_test(&policy)
+    };
+    let client =
+        TigReadClient::new_unrestricted_for_test(format!("http://{addr}"), &policy, limits)
+            .unwrap();
     FakeTig {
         app,
         world,
-        base: format!("http://{addr}"),
+        source: TigSnapshotSource::new(client, PLAYER),
     }
 }
 
 impl FakeTig {
-    fn source(&self) -> TigSnapshotSource {
-        let policy = tig_client::testing::shipped_policy_for_test().unwrap();
-        let limits = ReadLimits {
-            max_backoff: Duration::from_millis(50),
-            ..tig_client::testing::pool_ceiling_for_test(&policy)
-        };
-        let client =
-            TigReadClient::new_unrestricted_for_test(self.base.clone(), &policy, limits).unwrap();
-        TigSnapshotSource::new(client, PLAYER)
+    fn source(&self) -> &TigSnapshotSource {
+        &self.source
     }
 
     /// The chain's current block, as the server reports it.
@@ -159,8 +167,8 @@ fn submission(anchor: &str) -> PrecommitSubmission {
     .unwrap()
 }
 
-fn decision(workflow: &str, anchor: &str, height: i64) -> NewDecision {
-    let seed = challenge_tie_seed(NET, anchor);
+fn decision(workflow: &str, anchor: &Anchor) -> NewDecision {
+    let seed = challenge_tie_seed(NET, &anchor.block_id);
     let mut draw_ranks = serde_json::Map::new();
     for c in ["c001", "c002", "c003"] {
         let rank = draw_rank(&seed, c);
@@ -179,9 +187,9 @@ fn decision(workflow: &str, anchor: &str, height: i64) -> NewDecision {
         workflow_id: workflow.to_string(),
         generation: 1,
         anchor: AnchorSnapshot {
-            block_id: anchor.to_string(),
-            content_digest: ANCHOR_DIGEST,
-            height,
+            block_id: anchor.block_id.clone(),
+            content_digest: anchor.digest,
+            height: anchor.height,
         },
         draw: RecordedDraw {
             domain: pool_domain::CHALLENGE_TIE_DOMAIN.to_string(),
@@ -195,32 +203,33 @@ fn decision(workflow: &str, anchor: &str, height: i64) -> NewDecision {
         reserve_inputs: json!({}),
         precommit_reserve: "0".to_string(),
         config_digest: [0xef; 32],
-        payload_digest: precommit_digest(&submission(anchor)),
+        payload_digest: precommit_digest(&submission(&anchor.block_id)),
     }
 }
 
-/// A usable anchor for the chain's current block, written by hand.
+/// A decision anchor at the chain's current block: the real thing, ingested.
 ///
-/// Admission requires the newest usable snapshot, and "usable" includes the
-/// active-benchmark cache, which assembly does not build yet — so an ingested
-/// snapshot cannot anchor a decision until it does. This row stands in for
-/// that cache, not for ingestion: the tests below still ingest the real
-/// thing, as a second (partial) assembly of the same block.
-async fn persist_usable_anchor(pool: &PgPool, tig: &FakeTig) -> (String, i64) {
-    let (block_id, height) = tig.tip().await;
-    let height = i64::try_from(height).unwrap();
-    sqlx::query(
-        "INSERT INTO pool.block_snapshot
-             (network, block_id, content_digest, height, reads_complete, active_cache_ready)
-         VALUES ('testnet', $1, $2, $3, true, true)",
-    )
-    .bind(&block_id)
-    .bind(ANCHOR_DIGEST.as_slice())
-    .bind(height)
-    .execute(pool)
-    .await
-    .unwrap();
-    (block_id, height)
+/// Admission requires the newest usable persisted snapshot (D2e), and with
+/// the fixture's empty active set the cache is complete on the first pass,
+/// so the ingested snapshot is usable and anchors the decisions below.
+async fn ingest_anchor(pool: &PgPool, tig: &FakeTig) -> Anchor {
+    let ingested = ingest_live(pool, tig).await;
+    assert!(
+        ingested.snapshot.for_decision().is_ok(),
+        "the fixture's active set is empty, so the first pass is usable"
+    );
+    let record = ingested.snapshot.record();
+    Anchor {
+        block_id: record.block_id.clone(),
+        height: i64::try_from(record.height).unwrap(),
+        digest: record.content_digest,
+    }
+}
+
+struct Anchor {
+    block_id: String,
+    height: i64,
+    digest: [u8; 32],
 }
 
 /// What the gateway does: record the attempt, post the exact body, record
@@ -248,9 +257,27 @@ async fn send_precommit(tig: &FakeTig, gateway: &PgPool, intent_id: &str, anchor
     resp["benchmark_id"].as_str().unwrap().to_owned()
 }
 
-async fn ingest_live(pool: &PgPool, tig: &FakeTig) -> Ingested {
+async fn ingest_with<S>(pool: &PgPool, source: &S) -> Result<Ingested, IngestError>
+where
+    S: SnapshotSource + BenchmarkDataSource,
+{
     let store = PostgresSnapshotStore::new(pool.clone());
-    ingest(pool, &store, &tig.source(), NET, 3)
+    let cache = PostgresActiveBenchmarkStore::new(pool.clone());
+    Ingestor {
+        pool,
+        store: &store,
+        cache: &cache,
+        source,
+        network: NET,
+        assembly_attempts: 3,
+        cache_budget: 10,
+    }
+    .ingest()
+    .await
+}
+
+async fn ingest_live(pool: &PgPool, tig: &FakeTig) -> Ingested {
+    ingest_with(pool, tig.source())
         .await
         .expect("ingests against fake-tig")
 }
@@ -267,19 +294,22 @@ async fn a_block_carrying_a_confirmation_advances_the_workflow_that_sent_it() {
     let controller = db.pool_as("pool_controller").await;
     let gateway = db.pool_as("pool_gateway").await;
     let tig = fake_tig().await;
-    let (anchor, height) = persist_usable_anchor(&controller, &tig).await;
+    let anchor = ingest_anchor(&controller, &tig).await;
 
     // w1 sends; w2 decided and sent nothing.
-    let a = admit_precommit(&controller, &decision("w1", &anchor, height), 4)
+    let a = admit_precommit(&controller, &decision("w1", &anchor), 4)
         .await
         .unwrap();
-    admit_precommit(&controller, &decision("w2", &anchor, height), 4)
+    admit_precommit(&controller, &decision("w2", &anchor), 4)
         .await
         .unwrap();
-    let benchmark_id = send_precommit(&tig, &gateway, &a.intent.intent_id, &anchor).await;
+    let benchmark_id = send_precommit(&tig, &gateway, &a.intent.intent_id, &anchor.block_id).await;
 
-    // The same block again: the precommit is listed but unconfirmed, and
-    // §7 says that is not evidence. Nothing moves.
+    // The same block again. §9 caches every read by its key for the life
+    // of a block, so this assembly reads the `get-benchmarks` taken before
+    // the send: the precommit is not listed yet, and the pass finds
+    // nothing. (Fresh reads would list it unconfirmed, which §7 says is
+    // not evidence either.) Nothing moves.
     let ingested = ingest_live(&controller, &tig).await;
     assert!(ingested.gaps_recorded.is_empty());
     let Outcome::Reconciled(report) =
@@ -291,7 +321,7 @@ async fn a_block_carrying_a_confirmation_advances_the_workflow_that_sent_it() {
     };
     assert_eq!(
         report.bind.outcomes,
-        vec![Bound::Pending {
+        vec![Bound::NotFound {
             workflow_id: "w1".to_string()
         }]
     );
@@ -313,7 +343,7 @@ async fn a_block_carrying_a_confirmation_advances_the_workflow_that_sent_it() {
     else {
         panic!("a complete snapshot must be reconciled");
     };
-    assert_eq!(report.height, height + 1);
+    assert_eq!(report.height, anchor.height + 1);
     assert_eq!(
         report.bind.outcomes,
         vec![Bound::Confirmed {
@@ -376,14 +406,14 @@ async fn a_workflow_the_binding_stopped_on_is_not_expired_by_the_clock() {
     let controller = db.pool_as("pool_controller").await;
     let gateway = db.pool_as("pool_gateway").await;
     let tig = fake_tig().await;
-    let (anchor, height) = persist_usable_anchor(&controller, &tig).await;
+    let anchor = ingest_anchor(&controller, &tig).await;
     let g = guardrails();
 
     for w in ["w1", "w2"] {
-        let admitted = admit_precommit(&controller, &decision(w, &anchor, height), 4)
+        let admitted = admit_precommit(&controller, &decision(w, &anchor), 4)
             .await
             .unwrap();
-        send_precommit(&tig, &gateway, &admitted.intent.intent_id, &anchor).await;
+        send_precommit(&tig, &gateway, &admitted.intent.intent_id, &anchor.block_id).await;
     }
     // Both sends confirm as separate precommits with identical settings, so
     // the search finds two candidates for each workflow.
@@ -424,8 +454,8 @@ async fn an_unsent_decision_expires_when_the_guardrail_passes_and_not_before() {
     };
     let controller = db.pool_as("pool_controller").await;
     let tig = fake_tig().await;
-    let (anchor, height) = persist_usable_anchor(&controller, &tig).await;
-    admit_precommit(&controller, &decision("w1", &anchor, height), 4)
+    let anchor = ingest_anchor(&controller, &tig).await;
+    admit_precommit(&controller, &decision("w1", &anchor), 4)
         .await
         .unwrap();
     let g = guardrails();
@@ -545,9 +575,19 @@ async fn the_gap_is_recorded_before_the_snapshot_that_revealed_it() {
         last: Some(u64::try_from(observed - 3).unwrap()),
     };
 
-    let err = ingest(&controller, &store, &tig.source(), NET, 3)
-        .await
-        .expect_err("the store refuses");
+    let cache = PostgresActiveBenchmarkStore::new(controller.clone());
+    let err = Ingestor {
+        pool: &controller,
+        store: &store,
+        cache: &cache,
+        source: tig.source(),
+        network: NET,
+        assembly_attempts: 3,
+        cache_budget: 10,
+    }
+    .ingest()
+    .await
+    .expect_err("the store refuses");
     assert!(matches!(err, IngestError::Store(_)), "{err}");
     assert_eq!(
         open_block_gaps(&controller, NET).await.unwrap(),
@@ -586,6 +626,12 @@ impl SnapshotSource for Blindfolded<'_> {
     }
 }
 
+impl BenchmarkDataSource for Blindfolded<'_> {
+    async fn get_benchmark_data(&self, benchmark_id: &str) -> Result<Value, SnapshotError> {
+        self.inner.get_benchmark_data(benchmark_id).await
+    }
+}
+
 #[tokio::test]
 async fn a_snapshot_missing_a_read_is_persisted_but_reconciles_nothing() {
     // C5 for the reconciler: a read that was not made is not evidence of
@@ -597,24 +643,22 @@ async fn a_snapshot_missing_a_read_is_persisted_but_reconciles_nothing() {
     let controller = db.pool_as("pool_controller").await;
     let gateway = db.pool_as("pool_gateway").await;
     let tig = fake_tig().await;
-    let (anchor, height) = persist_usable_anchor(&controller, &tig).await;
-    let a = admit_precommit(&controller, &decision("w1", &anchor, height), 4)
+    let anchor = ingest_anchor(&controller, &tig).await;
+    let a = admit_precommit(&controller, &decision("w1", &anchor), 4)
         .await
         .unwrap();
-    send_precommit(&tig, &gateway, &a.intent.intent_id, &anchor).await;
-    admit_precommit(&controller, &decision("w2", &anchor, height), 4)
+    send_precommit(&tig, &gateway, &a.intent.intent_id, &anchor.block_id).await;
+    admit_precommit(&controller, &decision("w2", &anchor), 4)
         .await
         .unwrap();
     let g = guardrails();
     tig.advance(g.workflow_expiry_age_blocks);
 
-    let store = PostgresSnapshotStore::new(controller.clone());
-    let live = tig.source();
     let blind = Blindfolded {
-        inner: &live,
+        inner: tig.source(),
         missing: AnchoredRead::Benchmarks,
     };
-    let ingested = ingest(&controller, &store, &blind, NET, 3)
+    let ingested = ingest_with(&controller, &blind)
         .await
         .expect("an incomplete snapshot is still accepted and persisted");
     assert!(!ingested.snapshot.record().reads_complete);

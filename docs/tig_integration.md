@@ -499,6 +499,17 @@ require is a snapshot whose reads all succeeded: a read that was not made is
 not evidence of absence, and absence is what would license expiring a
 workflow whose confirmation the missing read was carrying.
 
+Step 4's own reads are not anchored. What `get-benchmark-data` returns for a
+confirmed benchmark is immutable per `benchmark_id`, so those reads may be
+made once the closing block has been accepted, with readiness judged against
+that block's active set; what step 4 forbids is pairing cached facts with an
+active set from a different block, not fetching after step 6. Fetching inside
+the anchored section would put a warm-up of hundreds of reads between the two
+`get-block` calls, and step 6 would discard nearly every snapshot. The reads
+are bounded per pass and continue on the next poll of the same block, so the
+warm-up §5.2 allows to span several blocks need not wait a block between
+passes.
+
 Within one block, each endpoint response is cached by its complete request key.
 No component may independently refetch and substitute one field into an
 already accepted snapshot.

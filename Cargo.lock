@@ -1544,6 +1544,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "fake-tig",
+ "http-body-util",
  "pool-domain",
  "pool-test-support",
  "serde",
@@ -1553,6 +1554,7 @@ dependencies = [
  "thiserror",
  "tig-client",
  "tokio",
+ "tower",
  "tracing",
 ]
 

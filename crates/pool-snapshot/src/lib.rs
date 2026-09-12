@@ -10,12 +10,15 @@
 //! driven through the cases that matter — a block advancing mid-assembly
 //! above all, which cannot be provoked against live testnet on demand.
 
+pub mod active_cache;
 mod cache;
+mod postgres_active_cache;
 mod postgres_store;
 pub mod store;
 mod tig_source;
 
 pub use cache::BlockCache;
+pub use postgres_active_cache::PostgresActiveBenchmarkStore;
 pub use postgres_store::PostgresSnapshotStore;
 pub use tig_source::TigSnapshotSource;
 
@@ -147,6 +150,33 @@ pub struct Snapshot {
 impl Snapshot {
     pub fn read(&self, read: AnchoredRead) -> Option<&serde_json::Value> {
         self.reads.get(read.endpoint())
+    }
+
+    /// `block.data.active_ids.benchmark`: the active set the block names,
+    /// which §5.2 says is always taken from the current block.
+    ///
+    /// An error, not an empty list, when the block carries no such set: an
+    /// absent set reads as "nothing is active", which would make every
+    /// snapshot cache-ready and every §6.3 projection empty.
+    pub fn active_benchmark_ids(&self) -> Result<Vec<String>, SnapshotError> {
+        let block = self.block.get("block").unwrap_or(&self.block);
+        let ids = block
+            .pointer("/data/active_ids/benchmark")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| SnapshotError::Shape {
+                endpoint: "get-block".to_string(),
+                reason: "block.data.active_ids.benchmark is not a list".to_string(),
+            })?;
+        ids.iter()
+            .map(|id| {
+                id.as_str()
+                    .map(str::to_string)
+                    .ok_or_else(|| SnapshotError::Shape {
+                        endpoint: "get-block".to_string(),
+                        reason: "an active benchmark id is not a string".to_string(),
+                    })
+            })
+            .collect()
     }
 }
 

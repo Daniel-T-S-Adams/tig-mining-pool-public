@@ -50,3 +50,9 @@ player_id = "0x2935a721068da756b28cba896efdb64e8909dfae"
 # from reviewed policy, and there is deliberately no compiled default to fall
 # back to.
 internal_pool_unverified_limit = 4
+# `get-benchmark-data` reads one poll may spend warming the active-benchmark
+# cache (tig_integration.md §5.2). The controller's read share is 1 request
+# per second and the poll interval 15 seconds; assembly takes a dozen or so
+# reads per block, so this is roughly what a poll has left. A local
+# placeholder like the limit above, not a proposed value.
+active_cache_fetches_per_poll = 10

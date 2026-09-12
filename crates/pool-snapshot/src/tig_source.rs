@@ -6,6 +6,7 @@
 //! one path that talks to TIG rather than being a discipline each caller has
 //! to remember.
 
+use crate::active_cache::BenchmarkDataSource;
 use crate::{AnchoredRead, BlockCache, SnapshotError, SnapshotSource};
 
 use tig_client::{ReadError, TigReadClient};
@@ -157,6 +158,20 @@ impl SnapshotSource for TigSnapshotSource {
             .map_err(|e| to_snapshot_error("get-tracks-data", e))?;
         self.cache.put(block_id, &key, value.clone());
         Ok(value)
+    }
+}
+
+impl BenchmarkDataSource for TigSnapshotSource {
+    async fn get_benchmark_data(
+        &self,
+        benchmark_id: &str,
+    ) -> Result<serde_json::Value, SnapshotError> {
+        // Not through the per-block cache: the request names no block, and
+        // the retained facts go to the durable cache instead.
+        self.client
+            .get_json(&format!("get-benchmark-data?benchmark_id={benchmark_id}"))
+            .await
+            .map_err(|e| to_snapshot_error("get-benchmark-data", e))
     }
 }
 

@@ -140,6 +140,16 @@ pub struct TigConfig {
     /// that falls back to something is an endpoint reached when the operator
     /// forgot to choose one.
     pub base_url: String,
+    /// The pool's own TIG player id on this endpoint.
+    ///
+    /// Public and safe to commit — it is an address, not a credential; the
+    /// API key that goes with it lives only in `tig-gateway`'s secret file
+    /// (§2.2). It is part of every §6.1 precommit body, so the controller
+    /// needs it to digest a payload at admission and the gateway to rebuild
+    /// the same bytes before sending. Beside `base_url` because it is an
+    /// identity *on that endpoint*: the same pool has a different id on a
+    /// different network.
+    pub player_id: String,
 }
 
 impl TigConfig {
@@ -434,6 +444,26 @@ impl Config {
                         tig.base_url
                     )));
                 }
+                // §6.1 renders it as "<lowercase pool address>", and
+                // `reconcile` compares `settings.player_id` byte for byte
+                // against what TIG returns. A mixed-case or padded value
+                // would go into the body and the digest verbatim; if TIG
+                // normalises it, the pool's own confirmed precommit would
+                // reconcile as NoCandidate — an accepted write reported as
+                // absent, which is the precondition §10 forbids acting on.
+                // Refused at load, where the operator can fix it.
+                let hex = tig.player_id.strip_prefix("0x").unwrap_or("");
+                let well_formed = hex.len() == 40
+                    && hex
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+                if !well_formed {
+                    return Err(invalid(
+                        "tig.player_id must be 0x followed by 40 lowercase hex digits, exactly \
+                         as tig_integration.md §6.1 renders it and as TIG compares it"
+                            .into(),
+                    ));
+                }
                 // A TIG endpoint has no legitimate userinfo. One here would
                 // put a credential in TOML against §9 — and be echoed back in
                 // this very message — and userinfo before a real host is how
@@ -522,12 +552,21 @@ impl Config {
     /// decide, and including them would make every decision record look
     /// different for no protocol reason.
     ///
-    /// The digest covers `network` today. Fields join it as the slices that
-    /// introduce decision-affecting configuration land; the domain string is
-    /// versioned so a change of coverage is never mistaken for a change of
-    /// value.
+    /// The digest covers `network` and, when a `[tig]` section is present,
+    /// `player_id` — the pool's identity is a field of every §6.1 body a
+    /// decision commits to, so two decisions taken under different identities
+    /// must not carry the same config digest. Fields join it as the slices
+    /// that introduce decision-affecting configuration land; the domain
+    /// string is versioned so a change of coverage is never mistaken for a
+    /// change of value, and `v2` is the version that added `player_id`.
+    ///
+    /// `base_url` is deliberately not included. Which server the pool talks
+    /// to does not change what it would decide, and a digest that varied
+    /// between the fake and the pinned endpoint would make every fake-tig
+    /// decision record look unlike a live one for no protocol reason.
     pub fn decision_digest(&self) -> [u8; 32] {
-        let preimage = format!("tig-pool-config-digest-v1\n{}", self.network);
+        let player = self.tig.as_ref().map_or("", |t| t.player_id.as_str());
+        let preimage = format!("tig-pool-config-digest-v2\n{}\n{player}", self.network);
         *blake3::hash(preimage.as_bytes()).as_bytes()
     }
 

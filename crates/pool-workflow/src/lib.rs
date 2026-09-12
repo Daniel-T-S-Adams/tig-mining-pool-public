@@ -11,6 +11,7 @@ pub mod deadlines;
 pub mod decision;
 pub mod intent;
 pub mod lease;
+pub mod payload;
 pub mod restart;
 pub mod workflow;
 
@@ -25,13 +26,17 @@ pub use attempt::{
 pub use deadlines::{GuardrailError, Guardrails, Remaining, Standing};
 pub use decision::{
     AdmissionError, Admitted, AnchorSnapshot, NewDecision, PRECOMMIT_ADMISSION_LOCK, RecordedDraw,
-    RecordedTie, admit_precommit,
+    RecordedTie, admit_precommit, payload_inputs,
 };
 pub use intent::{
     IntentError, IntentState, NewIntent, PostgresIntentRepository, SettledOutcome,
     TigWriteIntentRepository, WriteIntent, WriteKind,
 };
 pub use lease::{Lease, LeaseError, LeaseKind};
+pub use payload::{
+    DecisionPayloadInputs, PayloadError, PrecommitSubmission, TrackSettings, precommit_body,
+    precommit_digest,
+};
 pub use restart::{
     ConfirmedWindow, NeedsAttention, Reconciled, RestartReport, open_block_gaps,
     reconcile_after_restart, record_block_gap,

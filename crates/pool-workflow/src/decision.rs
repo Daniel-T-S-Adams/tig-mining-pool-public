@@ -89,6 +89,12 @@ pub struct NewDecision {
     pub draw: RecordedDraw,
     pub selected_challenge: String,
     pub selected_algorithm: String,
+    /// The TIG `compute_type` this decision was made for (`tig_integration.md`
+    /// §3, §6.1). A decision input, and the one the record used not to keep:
+    /// the gateway rebuilds the §6.1 body from this record and refuses to
+    /// send bytes that do not digest to the intent, so every input to that
+    /// body has to be here.
+    pub compute_type: String,
     /// The pool's own settings, at the types it chose them.
     pub track_settings: serde_json::Value,
     /// `P[s]`, `B[t]`, `F[s,t]` and the `X` policy version (§11.4). Inputs
@@ -202,6 +208,25 @@ pub enum AdmissionError {
     /// The reserve is not a canonical unsigned atom string (`accounting.md` §3).
     #[error("precommit_reserve {value:?} is not a canonical unsigned atom string: {reason}")]
     ReserveNotCanonical { value: String, reason: &'static str },
+    /// The decision names no compute type, so its §6.1 body cannot be built.
+    ///
+    /// Permanent, and reported as such rather than as `Unavailable`. That
+    /// variant is what this module reserves for a retry that can succeed; a
+    /// caller with the usual retry-on-outage policy would loop on this for
+    /// ever, and an operator reading "decision store unavailable" would look
+    /// at the database instead of at the record. Two routes here: a decision
+    /// being admitted with a blank compute type (migration 0013's trigger
+    /// refuses it), and a decision written before the column existed
+    /// (`payload_inputs` finds it null).
+    #[error(
+        "{network} workflow {workflow_id} generation {generation}: the decision names no compute \
+         type, so its precommit body cannot be rebuilt"
+    )]
+    ComputeTypeMissing {
+        network: Network,
+        workflow_id: String,
+        generation: i32,
+    },
 }
 
 /// Whether `value` is the canonical unsigned base-10 form `accounting.md` §3
@@ -400,9 +425,9 @@ pub async fn admit_precommit(
               tie_domain, tie_draw_ranks, tie_candidates, tie_winner,
               selected_challenge, selected_algorithm, track_settings,
               pool_unverified, unverified_limit,
-              reserve_inputs, precommit_reserve, config_digest)
+              reserve_inputs, precommit_reserve, config_digest, compute_type)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
-                 $16, $17::numeric, $18)
+                 $16, $17::numeric, $18, $19)
          ON CONFLICT (network, workflow_id, generation) DO NOTHING
          RETURNING decision_id::text AS decision_id",
     )
@@ -424,9 +449,22 @@ pub async fn admit_precommit(
     .bind(&decision.reserve_inputs)
     .bind(&decision.precommit_reserve)
     .bind(decision.config_digest.as_slice())
+    .bind(&decision.compute_type)
     .fetch_optional(&mut *tx)
     .await
-    .map_err(unavailable)?;
+    // Migration 0013's trigger raises on a blank compute type. A record
+    // defect, not an outage, and mapped to say so for the same reason the
+    // intent conflict below is: a caller must not retry it forever.
+    .map_err(|e| match &e {
+        sqlx::Error::Database(db) if db.message().contains("names the compute type") => {
+            AdmissionError::ComputeTypeMissing {
+                network: decision.network,
+                workflow_id: decision.workflow_id.clone(),
+                generation: decision.generation,
+            }
+        }
+        _ => unavailable(e),
+    })?;
 
     // Unreachable given the check above, but the ON CONFLICT stays: it is what
     // makes a concurrent duplicate the database's decision rather than a race
@@ -578,4 +616,56 @@ async fn count_unverified(
     .await
     .map_err(unavailable)?;
     row.try_get("unverified").map_err(unavailable)
+}
+
+/// Read back what a recorded decision contributes to its §6.1 body.
+///
+/// The gateway's half of the reconstruction. It holds `SELECT` on
+/// `pool.precommit_decision` for exactly this, and nothing here needs the
+/// controller's role: the record is immutable once written, so a read at
+/// claim time sees what admission wrote.
+///
+/// `None` when no decision exists for the generation, which for an intent that
+/// does exist is a discrepancy — `admit_precommit` writes both in one
+/// transaction — and is left to the caller to name.
+pub async fn payload_inputs(
+    pool: &PgPool,
+    network: Network,
+    workflow_id: &str,
+    generation: i32,
+) -> Result<Option<crate::payload::DecisionPayloadInputs>, AdmissionError> {
+    let row = sqlx::query(
+        "SELECT anchor_block_id, selected_challenge, selected_algorithm,
+                compute_type, track_settings
+           FROM pool.precommit_decision
+          WHERE network = $1 AND workflow_id = $2 AND generation = $3",
+    )
+    .bind(network.as_str())
+    .bind(workflow_id)
+    .bind(generation)
+    .fetch_optional(pool)
+    .await
+    .map_err(unavailable)?;
+
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    // A decision written before `compute_type` existed (migration 0013) reads
+    // as null. It cannot be rebuilt, and saying so beats rendering a body the
+    // intent never digested.
+    let compute_type: Option<String> = row.try_get("compute_type").map_err(unavailable)?;
+    let Some(compute_type) = compute_type else {
+        return Err(AdmissionError::ComputeTypeMissing {
+            network,
+            workflow_id: workflow_id.to_string(),
+            generation,
+        });
+    };
+    Ok(Some(crate::payload::DecisionPayloadInputs {
+        anchor_block_id: row.try_get("anchor_block_id").map_err(unavailable)?,
+        selected_challenge: row.try_get("selected_challenge").map_err(unavailable)?,
+        selected_algorithm: row.try_get("selected_algorithm").map_err(unavailable)?,
+        compute_type,
+        track_settings: row.try_get("track_settings").map_err(unavailable)?,
+    }))
 }

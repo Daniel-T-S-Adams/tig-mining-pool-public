@@ -25,12 +25,14 @@ const PAYLOAD: [u8; 32] = [0xab; 32];
 fn fake() -> TigConfig {
     TigConfig {
         base_url: "http://127.0.0.1:8080".to_string(),
+        player_id: "0x2935a721068da756b28cba896efdb64e8909dfae".to_string(),
     }
 }
 
 fn live() -> TigConfig {
     TigConfig {
         base_url: "https://api.tig.foundation".to_string(),
+        player_id: "0x2935a721068da756b28cba896efdb64e8909dfae".to_string(),
     }
 }
 

@@ -23,13 +23,13 @@
 //! the duplicate precommit, and a second fee, that §10 exists to prevent.
 
 use pool_workflow::{AttemptOutcome, WriteAttempt, WriteIntent, WriteKind};
-use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
+use serde_json::Value;
 
 use crate::credential::TigApiKey;
-use crate::reconcile::PrecommitSubmission;
 use crate::write_gate::WritePermit;
 use crate::write_policy::WritePolicy;
+use pool_workflow::payload::PrecommitSubmission;
+pub use pool_workflow::payload::{precommit_body, precommit_digest};
 
 /// What one transmission established.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -91,60 +91,6 @@ pub enum TransmitError {
     /// a payload that was never transmitted.
     #[error("submission does not hash to intent {intent_id}'s recorded payload digest")]
     PayloadNotTheRecordedOne { intent_id: String },
-}
-
-/// Build §6.1's request body from what the pool decided.
-///
-/// The submitted `track_id` is empty because TIG selects it (§6.1), and
-/// `track_settings` carries every live active track of the chosen challenge.
-/// That is the same asymmetry `reconcile` matches on afterwards, which is why
-/// both take the one type.
-pub fn precommit_body(submission: &PrecommitSubmission) -> Value {
-    let mut track_settings = serde_json::Map::new();
-    for (track_id, settings) in &submission.track_settings {
-        // The values the pool chose, at their own types. §4 requires lossless
-        // numeric handling on this body and §6.6 copies the source
-        // benchmark's hyperparameters, so a number must leave as a number.
-        let hyperparameters: serde_json::Map<String, Value> = settings
-            .hyperparameters
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-        track_settings.insert(
-            track_id.clone(),
-            json!({
-                "hyperparameters": Value::Object(hyperparameters),
-                "fuel_budget": settings.fuel_budget,
-                "num_bundles": settings.num_bundles,
-            }),
-        );
-    }
-
-    json!({
-        "settings": {
-            "player_id": submission.player_id,
-            "block_id": submission.block_id,
-            "challenge_id": submission.challenge_id,
-            "algorithm_id": submission.algorithm_id,
-            "track_id": "",
-        },
-        "track_settings": Value::Object(track_settings),
-        "compute_type": submission.compute_type,
-    })
-}
-
-/// The §7.3 `payload_digest` of a precommit submission.
-///
-/// Taken over the exact bytes [`PrecommitTransmitter::send`] puts on the
-/// socket, which is the point: the intent is recorded with this digest and
-/// the send refuses anything that does not reproduce it, so the recorded
-/// payload and the transmitted one cannot diverge. `serde_json` orders object
-/// keys, so a given submission always renders the same bytes.
-pub fn precommit_digest(submission: &PrecommitSubmission) -> [u8; 32] {
-    // `Display` for `Value` is serde_json's compact form — the same bytes
-    // `to_vec` produces — and needs no error path, so the digest cannot fail
-    // and the send has no branch that skips the check.
-    Sha256::digest(precommit_body(submission).to_string()).into()
 }
 
 /// Sends one precommit, once.
@@ -355,6 +301,8 @@ mod tests {
     use super::*;
     use crate::credential;
     use crate::reconcile::{Reconciliation, TrackSettings, reconcile_precommit};
+    use serde_json::json;
+    use sha2::{Digest, Sha256};
 
     /// These tests live inside the crate rather than in `tests/` because
     /// `TigApiKey` has no public constructor and `expose` is crate-private

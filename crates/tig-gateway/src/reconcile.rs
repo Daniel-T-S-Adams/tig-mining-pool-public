@@ -21,59 +21,7 @@
 
 use std::collections::BTreeMap;
 
-/// What the pool actually submitted (`tig_integration.md` §6.1).
-///
-/// The pool does NOT choose the track. §6.1: "The submitted `track_id` is
-/// empty because TIG selects it; the confirmed precommit's
-/// `settings.track_id`, `details.rand_hash`, counts, fuel, hyperparameters
-/// and fee are authoritative." The pool submits `track_settings` for every
-/// live active track of the chosen challenge, and TIG picks one during
-/// precommit processing.
-///
-/// So §10's "selected-track settings" is a comparison against the settings
-/// the pool submitted *for whichever track TIG selected* — not against a
-/// track the pool picked, because it picked none.
-///
-/// Getting this wrong is not a near miss. Matching a single guessed track
-/// makes a confirmed precommit on any other track report `NoCandidate` — an
-/// accepted write reported as absent, which is the precondition for the
-/// blind resubmission §10 forbids and a second fee paid. Probing per track
-/// to work around that would defeat the multi-candidate rule too: two
-/// duplicates landing on different tracks would each match a separate call
-/// and never surface as `StopForOperator`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PrecommitSubmission {
-    pub player_id: String,
-    /// The decision block the precommit was anchored to.
-    pub block_id: String,
-    pub challenge_id: String,
-    pub algorithm_id: String,
-    pub compute_type: String,
-    /// Every live active track of the chosen challenge, as submitted.
-    pub track_settings: BTreeMap<String, TrackSettings>,
-}
-
-/// The per-track settings submitted for one track.
-///
-/// `num_nonces` is deliberately absent: §14 pins it as TIG-derived
-/// (`num_nonces = num_bundles * num_nonces_per_bundle`) and authoritative
-/// only on the confirmed precommit. Matching on it would be matching on a
-/// value the pool did not pick — and a caller deriving it from a different
-/// block's `num_nonces_per_bundle` would turn a real match into
-/// `NoCandidate`, the fail-open direction that licenses a resend.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TrackSettings {
-    pub num_bundles: u64,
-    pub fuel_budget: u64,
-    /// Selected hyperparameters, as values.
-    ///
-    /// `mining_system.md` §6.6 copies the source benchmark's hyperparameters
-    /// and `tig_integration.md` §4 requires lossless numeric handling on the
-    /// §6.1 write body, so a numeric hyperparameter has to reach TIG as a
-    /// number. Comparison normalises instead — see `hyperparameters_match`.
-    /// Storing the normalised form here would transmit a re-typed method.
-    pub hyperparameters: BTreeMap<String, serde_json::Value>,
-}
+pub use pool_workflow::payload::{PrecommitSubmission, TrackSettings};
 
 /// Whether two hyperparameter sets name the same values.
 ///

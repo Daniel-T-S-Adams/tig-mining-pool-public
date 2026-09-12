@@ -32,6 +32,10 @@ deployment = "local-dev"
 # check is on the endpoint and not on `network`, because `network` is pinned
 # to "testnet" either way and could not tell the two apart.
 base_url = "http://127.0.0.1:8080"
+# The slice-1 testnet identity (docs/plans/slice-1-gateway.md §4). Public: an
+# address, not a credential. The API key that pairs with it is never in a
+# config file.
+player_id = "0x2935a721068da756b28cba896efdb64e8909dfae"
 
 [orchestration]
 # `mining_system.md` §11 lists this among the values "required before full

@@ -92,6 +92,8 @@ fn decision_with_tie(workflow: &str, generation: i32, tie: Option<RecordedTie>) 
         },
         selected_challenge: "c001".to_string(),
         selected_algorithm: "a011".to_string(),
+        // The pool-owned bootstrap's compute type, from the pinned fixture.
+        compute_type: "aws_t4g".to_string(),
         // Numbers stay numbers: §6.6 copies the source benchmark's
         // hyperparameters and §4 requires lossless numeric handling.
         track_settings: json!({
@@ -422,10 +424,10 @@ async fn the_gateway_can_read_a_decision_and_cannot_write_one() {
              (network, workflow_id, generation, anchor_block_id, anchor_digest,
               anchor_height, tie_domain, tie_draw_ranks, selected_challenge,
               selected_algorithm, track_settings, pool_unverified, unverified_limit,
-              reserve_inputs, precommit_reserve, config_digest)
+              reserve_inputs, precommit_reserve, config_digest, compute_type)
          VALUES ('testnet', 'forged', 1, 'block_1', decode(repeat('cd', 32), 'hex'),
                  1, 'd', '{\"c001\": \"00\"}'::jsonb, 'c001', 'a011', '{}'::jsonb,
-                 0, 4, '{}'::jsonb, 0, decode(repeat('ef', 32), 'hex'))",
+                 0, 4, '{}'::jsonb, 0, decode(repeat('ef', 32), 'hex'), 'aws_t4g')",
     )
     .execute(&gateway)
     .await
@@ -600,10 +602,10 @@ async fn the_database_refuses_a_decision_that_breaks_its_own_record() {
                   anchor_height, tie_domain, selected_challenge, selected_algorithm,
                   pool_unverified, unverified_limit, tie_draw_ranks, tie_candidates,
                   tie_winner, track_settings, reserve_inputs, precommit_reserve,
-                  config_digest)
+                  config_digest, compute_type)
              VALUES ('testnet', 'w1', 1, '{ANCHOR}', decode(repeat('cd', 32), 'hex'),
                      1, 'd', {values}, '{{}}'::jsonb, '{{}}'::jsonb, {reserve},
-                     decode(repeat('ef', 32), 'hex'))"
+                     decode(repeat('ef', 32), 'hex'), 'aws_t4g')"
         );
         let error = sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
             .execute(&mut owner)
@@ -677,10 +679,10 @@ async fn a_decision_cannot_name_a_snapshot_that_was_never_persisted() {
              (network, workflow_id, generation, anchor_block_id, anchor_digest,
               anchor_height, tie_domain, selected_challenge, selected_algorithm,
               pool_unverified, unverified_limit, tie_draw_ranks, track_settings,
-              reserve_inputs, precommit_reserve, config_digest)
+              reserve_inputs, precommit_reserve, config_digest, compute_type)
          VALUES ('testnet', 'w1', 1, 'block_never', decode(repeat('11', 32), 'hex'),
                  1, 'd', 'c001', 'a011', 0, 4, '{"c001": "00"}'::jsonb,
-                 '{}'::jsonb, '{}'::jsonb, 0, decode(repeat('ef', 32), 'hex'))"#,
+                 '{}'::jsonb, '{}'::jsonb, 0, decode(repeat('ef', 32), 'hex'), 'aws_t4g')"#,
     )
     .execute(&mut owner)
     .await
@@ -1078,4 +1080,191 @@ async fn a_workflow_whose_precommit_reached_tig_cannot_take_another_generation()
     admit_precommit(&pool, &decision("w2", 2), 4)
         .await
         .expect("nothing was sent for w2, so §7.3's new generation is safe");
+}
+
+#[tokio::test]
+async fn the_gateway_can_rebuild_the_exact_bytes_the_intent_was_digested_over() {
+    // The whole chain, end to end: the controller digests a payload at
+    // admission, records the decision, and the gateway later rebuilds the
+    // submission from that record plus its configured player id. The bytes
+    // must be the same bytes, because `claim` refuses anything else on both
+    // the send and the reconcile path.
+    //
+    // One function does both renderings (`PrecommitSubmission::from_decision`),
+    // and this is the test that the record carries every input it needs — it
+    // is how `compute_type`'s absence was found.
+    let Some(db) = TempDb::migrated("admit_rebuild").await else {
+        return;
+    };
+    let pool = with_anchor(&db).await;
+    let player = "0x2935a721068da756b28cba896efdb64e8909dfae";
+
+    // Admission's side: digest the real submission and record it.
+    let mut new = decision("w1", 1);
+    let inputs = pool_workflow::DecisionPayloadInputs {
+        anchor_block_id: new.anchor.block_id.clone(),
+        selected_challenge: new.selected_challenge.clone(),
+        selected_algorithm: new.selected_algorithm.clone(),
+        compute_type: new.compute_type.clone(),
+        track_settings: new.track_settings.clone(),
+    };
+    let submitted = pool_workflow::PrecommitSubmission::from_decision(player, &inputs).unwrap();
+    new.payload_digest = pool_workflow::precommit_digest(&submitted);
+    let admitted = admit_precommit(&pool, &new, 4).await.unwrap();
+
+    // The gateway's side: read the record back under its own role and rebuild.
+    let gateway = db.pool_as("pool_gateway").await;
+    let read = pool_workflow::payload_inputs(&gateway, Network::Testnet, "w1", 1)
+        .await
+        .unwrap()
+        .expect("the decision exists");
+    let rebuilt = pool_workflow::PrecommitSubmission::from_decision(player, &read).unwrap();
+
+    assert_eq!(
+        rebuilt, submitted,
+        "the rebuilt submission is the submitted one"
+    );
+    assert_eq!(
+        pool_workflow::precommit_digest(&rebuilt),
+        admitted.intent.payload_digest,
+        "and digests to what the intent recorded"
+    );
+
+    // Types survive the round trip through jsonb. §6.6 copies hyperparameters
+    // and §4 requires lossless numeric handling, so a number that came back as
+    // a string would digest differently and the gateway would refuse its own
+    // payload.
+    assert_eq!(
+        rebuilt.track_settings["t001"].hyperparameters["restart_period"],
+        json!(250)
+    );
+    assert_eq!(
+        rebuilt.track_settings["t001"].hyperparameters["noise"],
+        json!(0.15)
+    );
+}
+
+#[tokio::test]
+async fn a_decision_names_the_compute_type_it_was_made_for() {
+    // Migration 0013. The §6.1 body carries `compute_type`, so a decision
+    // without one cannot be rebuilt into the bytes its intent was digested
+    // over. The trigger refuses the record rather than the gateway refusing
+    // its own payload later.
+    let Some(db) = TempDb::migrated("admit_compute_type").await else {
+        return;
+    };
+    let pool = with_anchor(&db).await;
+    let mut new = decision("w1", 1);
+    new.compute_type = "   ".to_string();
+    let error = admit_precommit(&pool, &new, 4)
+        .await
+        .expect_err("a blank compute type is no compute type");
+    // Typed, not a substring: this is a permanent record defect and must not
+    // wear `Unavailable`, which is the variant a caller retries.
+    assert!(
+        matches!(
+            error,
+            AdmissionError::ComputeTypeMissing { generation: 1, .. }
+        ),
+        "unexpected error: {error:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_decision_that_predates_compute_type_is_reported_as_unrebuildable_not_unavailable() {
+    // Migration 0013 added the column nullable, so a row written before it
+    // reads back null. That row can never be rebuilt into the bytes its
+    // intent was digested over — a permanent fact about the record, and one
+    // that must not be reported as an outage: a caller with the usual
+    // retry-on-outage policy would loop on it forever.
+    let Some(db) = TempDb::migrated("admit_predates_compute").await else {
+        return;
+    };
+    let pool = with_anchor(&db).await;
+    let mut owner = sqlx::PgConnection::connect_with(&db.as_superuser())
+        .await
+        .unwrap();
+
+    // The pre-0013 shape, created the only way a pre-0013 database holds one:
+    // with the insert trigger disabled for this statement.
+    sqlx::query(
+        "ALTER TABLE pool.precommit_decision DISABLE TRIGGER precommit_decision_insert_compute_type",
+    )
+    .execute(&mut owner)
+    .await
+    .unwrap();
+    pool_test_support::seed_workflows(&pool, "testnet", &["legacy"]).await;
+    sqlx::query(
+        r#"INSERT INTO pool.precommit_decision
+             (network, workflow_id, generation, anchor_block_id, anchor_digest,
+              anchor_height, tie_domain, selected_challenge, selected_algorithm,
+              pool_unverified, unverified_limit, tie_draw_ranks, track_settings,
+              reserve_inputs, precommit_reserve, config_digest)
+         VALUES ('testnet', 'legacy', 1, $1, $2, 100080, 'd', 'c001', 'a011', 0, 4,
+                 '{"c001": "00"}'::jsonb, '{}'::jsonb, '{}'::jsonb, 0,
+                 decode(repeat('ef', 32), 'hex'))"#,
+    )
+    .bind(ANCHOR)
+    .bind(ANCHOR_DIGEST.as_slice())
+    .execute(&mut owner)
+    .await
+    .unwrap();
+    sqlx::query(
+        "ALTER TABLE pool.precommit_decision ENABLE TRIGGER precommit_decision_insert_compute_type",
+    )
+    .execute(&mut owner)
+    .await
+    .unwrap();
+
+    let error = pool_workflow::payload_inputs(&pool, Network::Testnet, "legacy", 1)
+        .await
+        .expect_err("a record with no compute type cannot be rebuilt");
+    assert!(
+        matches!(error, AdmissionError::ComputeTypeMissing { .. }),
+        "permanent, and typed as such: {error:?}"
+    );
+}
+
+#[test]
+fn a_decision_record_that_cannot_be_rebuilt_says_so_instead_of_rendering_something_else() {
+    // A rebuilt body must digest to what the intent recorded, and a track
+    // with a defaulted bundle count would render something the intent never
+    // described — which `claim` then refuses, at the send, for a reason the
+    // operator would have to trace back here. Better to fail at the read.
+    let base = pool_workflow::DecisionPayloadInputs {
+        anchor_block_id: "block_1".to_string(),
+        selected_challenge: "c001".to_string(),
+        selected_algorithm: "a011".to_string(),
+        compute_type: "aws_t4g".to_string(),
+        track_settings: json!({}),
+    };
+
+    let mut missing_bundles = base.clone();
+    missing_bundles.track_settings = json!({ "t001": { "fuel_budget": 1 } });
+    let error = pool_workflow::PrecommitSubmission::from_decision("p", &missing_bundles)
+        .expect_err("no bundle count is not zero bundles");
+    assert!(
+        matches!(
+            error,
+            pool_workflow::PayloadError::Shape {
+                field: "num_bundles",
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+
+    let mut retyped = base.clone();
+    retyped.track_settings = json!({ "t001": { "num_bundles": "4", "fuel_budget": 1 } });
+    assert!(
+        pool_workflow::PrecommitSubmission::from_decision("p", &retyped).is_err(),
+        "a string where a number was recorded is not the recorded payload"
+    );
+
+    let mut not_object = base;
+    not_object.track_settings = json!([]);
+    assert_eq!(
+        pool_workflow::PrecommitSubmission::from_decision("p", &not_object).unwrap_err(),
+        pool_workflow::PayloadError::NotAnObject
+    );
 }

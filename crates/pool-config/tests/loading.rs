@@ -191,7 +191,7 @@ const ORCHESTRATION: &str = "\n[orchestration]\ninternal_pool_unverified_limit =
 
 /// The endpoint the controller and gateway both require. A local `fake-tig`
 /// here, which is also what F4d's guard reads.
-const TIG: &str = "\n[tig]\nbase_url = \"http://127.0.0.1:8080\"\n";
+const TIG: &str = "\n[tig]\nbase_url = \"http://127.0.0.1:8080\"\nplayer_id = \"0x2935a721068da756b28cba896efdb64e8909dfae\"\n";
 
 #[test]
 fn a_controller_without_an_unverified_limit_does_not_load() {
@@ -335,6 +335,69 @@ fn decision_digest_is_stable_and_excludes_non_decision_fields() {
     assert_eq!(base.decision_digest_hex().len(), 64);
     // Recomputing must give the same answer; the digest is a pure function.
     assert_eq!(base.decision_digest(), base.decision_digest());
+
+    // And it must change when something that changes the write changes.
+    // `player_id` is a field of every §6.1 body, so two decisions taken under
+    // different identities must not carry the same config digest — while the
+    // endpoint, which changes nothing about what is decided, must not enter.
+    let gateway = |player: &str, base_url: &str| {
+        let mut toml = valid_toml(&scratch.password_file())
+            .replace("user = \"pool_migration\"", "user = \"pool_gateway\"");
+        toml.push_str(&format!(
+            "\n[tig]\nbase_url = \"{base_url}\"\nplayer_id = \"{player}\"\n"
+        ));
+        Config::load(scratch.write(&toml), Binary::TigGateway).unwrap()
+    };
+    let a = gateway(
+        "0x2935a721068da756b28cba896efdb64e8909dfae",
+        "http://127.0.0.1:8080",
+    );
+    let b = gateway(
+        "0x0000000000000000000000000000000000000001",
+        "http://127.0.0.1:8080",
+    );
+    let c = gateway(
+        "0x2935a721068da756b28cba896efdb64e8909dfae",
+        "https://testnet-api.tig.foundation",
+    );
+    assert_ne!(
+        a.decision_digest(),
+        b.decision_digest(),
+        "a different pool identity is a different decision context"
+    );
+    assert_eq!(
+        a.decision_digest(),
+        c.decision_digest(),
+        "which server the pool talks to does not change what it decides"
+    );
+}
+
+#[test]
+fn a_player_id_that_is_not_a_lowercase_address_does_not_load() {
+    // §6.1 renders `player_id` as "<lowercase pool address>", and `reconcile`
+    // compares it byte for byte against what TIG returns. A value TIG would
+    // normalise differently would put the pool's own confirmed precommit out
+    // of reach of its own search.
+    let scratch = Scratch::new("player-shape");
+    for bad in [
+        "0x2935A721068DA756B28CBA896EFDB64E8909DFAE",
+        " 0x2935a721068da756b28cba896efdb64e8909dfae",
+        "0x2935a721068da756b28cba896efdb64e8909dfae ",
+        "2935a721068da756b28cba896efdb64e8909dfae",
+        "0x2935a721068da756b28cba896efdb64e8909dfa",
+        "0xzz35a721068da756b28cba896efdb64e8909dfae",
+        "",
+    ] {
+        let mut toml = valid_toml(&scratch.password_file())
+            .replace("user = \"pool_migration\"", "user = \"pool_gateway\"");
+        toml.push_str(&format!(
+            "\n[tig]\nbase_url = \"http://127.0.0.1:8080\"\nplayer_id = \"{bad}\"\n"
+        ));
+        let Err(err) = Config::load(scratch.write(&toml), Binary::TigGateway) else {
+            panic!("{bad:?} must not load");
+        };
+        assert_invalid(err, "40 lowercase hex digits");
+    }
 }
 
 #[test]
@@ -469,7 +532,7 @@ fn an_endpoint_that_is_not_a_url_does_not_load() {
     ] {
         let mut toml = valid_toml(&scratch.password_file())
             .replace("user = \"pool_migration\"", "user = \"pool_gateway\"");
-        toml.push_str(&format!("\n[tig]\nbase_url = \"{bad}\"\n"));
+        toml.push_str(&format!("\n[tig]\nbase_url = \"{bad}\"\nplayer_id = \"0x2935a721068da756b28cba896efdb64e8909dfae\"\n"));
         let path = scratch.write(&toml);
         let Err(err) = Config::load(&path, Binary::TigGateway) else {
             panic!("{bad} must not load");
@@ -496,7 +559,8 @@ fn the_fake_tig_test_reads_the_endpoint_and_not_the_network() {
     ] {
         assert!(
             pool_config::TigConfig {
-                base_url: local.to_string()
+                base_url: local.to_string(),
+                player_id: "0x2935a721068da756b28cba896efdb64e8909dfae".to_string(),
             }
             .is_local_fake_tig(),
             "{local} is a local fake"
@@ -520,7 +584,8 @@ fn the_fake_tig_test_reads_the_endpoint_and_not_the_network() {
     ] {
         assert!(
             !pool_config::TigConfig {
-                base_url: remote.to_string()
+                base_url: remote.to_string(),
+                player_id: "0x2935a721068da756b28cba896efdb64e8909dfae".to_string(),
             }
             .is_local_fake_tig(),
             "{remote} is not a local fake"
@@ -609,7 +674,7 @@ fn the_endpoint_cannot_be_pointed_at_mainnet_or_anywhere_unpinned() {
     let with = |base: &str| {
         let mut toml = valid_toml(&scratch.password_file())
             .replace("user = \"pool_migration\"", "user = \"pool_gateway\"");
-        toml.push_str(&format!("\n[tig]\nbase_url = \"{base}\"\n"));
+        toml.push_str(&format!("\n[tig]\nbase_url = \"{base}\"\nplayer_id = \"0x2935a721068da756b28cba896efdb64e8909dfae\"\n"));
         toml
     };
 
@@ -643,7 +708,7 @@ fn a_rejected_endpoint_never_echoes_its_userinfo() {
     ] {
         let mut toml = valid_toml(&scratch.password_file())
             .replace("user = \"pool_migration\"", "user = \"pool_gateway\"");
-        toml.push_str(&format!("\n[tig]\nbase_url = \"{bad}\"\n"));
+        toml.push_str(&format!("\n[tig]\nbase_url = \"{bad}\"\nplayer_id = \"0x2935a721068da756b28cba896efdb64e8909dfae\"\n"));
         let path = scratch.write(&toml);
         let Err(err) = Config::load(&path, Binary::TigGateway) else {
             panic!("{bad} must not load");

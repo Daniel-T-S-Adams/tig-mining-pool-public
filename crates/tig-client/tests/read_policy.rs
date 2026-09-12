@@ -504,6 +504,36 @@ async fn clients_disagreeing_on_rate_limits_are_refused() {
 }
 
 #[tokio::test]
+async fn a_host_whose_clients_are_all_gone_accepts_new_limits() {
+    // The refusal above exists to keep live clients on one host agreeing.
+    // Once no client is left, the registered limits protect nothing — and
+    // in a test process the same host:port is routinely reissued by the
+    // kernel to an unrelated server, whose client must not be refused for
+    // disagreeing with a limiter nobody holds. The rate must still be
+    // decided by the newer client, not inherited from the dead entry.
+    let base = serve(Flaky::default()).await;
+    let first = unrestricted(base.clone(), fast_limits()).unwrap();
+
+    let stricter = ReadLimits {
+        requests_per_second: 1,
+        ..fast_limits()
+    };
+    assert!(
+        unrestricted(base.clone(), stricter).is_err(),
+        "while the first client lives, its limits are the host's limits"
+    );
+
+    drop(first);
+    let second = unrestricted(base, stricter)
+        .expect("with no live client, the host is free to take new limits");
+    assert_eq!(
+        tig_client::testing::shared_limits_for_test(&second).requests_per_second,
+        1,
+        "the new client's rate must be its own, not the dead entry's"
+    );
+}
+
+#[tokio::test]
 async fn large_integers_survive_the_read_boundary() {
     // §4 requires lossless numeric handling and accounting.md §3 forbids
     // floating point; a u64 beyond 2^53 routed through f64 would come back

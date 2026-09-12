@@ -556,7 +556,11 @@ enough to be implemented wrongly:
   separate processes behind one egress address. Each reader is configured
   with an explicit share and the shares must sum to no more than the
   ceiling; ADR-0006 records the allocation and why an even split was chosen
-  for v0. Two clients inside one process share that process's share.
+  for v0. Two clients inside one process share that process's share. That
+  shared state — the pacing bucket and the `Retry-After` pause below — lives
+  exactly as long as some client on the host does, so a reading process
+  constructs its client once and keeps it for its lifetime. One built per
+  request would take a fresh burst and forget an in-force pause each time.
 - The concurrency ceiling counts requests whose **body is still
   streaming**, not merely those awaiting response headers, and a caller
   waiting on a token or a `Retry-After` occupies no slot. A ceiling on

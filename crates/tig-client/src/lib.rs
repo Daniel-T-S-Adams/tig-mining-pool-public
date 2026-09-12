@@ -38,7 +38,7 @@ mod limits;
 pub use limits::{PolicyError, ReadLimits, ReadPolicy, TigReader};
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex as StdMutex, OnceLock};
+use std::sync::{Arc, Mutex as StdMutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
 use tokio::sync::{Mutex, Semaphore};
@@ -196,8 +196,26 @@ impl Limiter {
 /// configured with a *share* of the pinned ceiling rather than the whole of
 /// it: 1 req/s each against the pool-wide 2 req/s, per ADR-0006. Two clients
 /// inside one process share that process's share.
+///
+/// The registry holds each limiter weakly. A limiter exists to be shared
+/// between the clients that are alive on a host; once the last of them is
+/// dropped there is nothing left to share, and the entry is stale. Holding
+/// it strongly instead made the host name outlive every client on it, which
+/// is wrong for one real caller: a test process binds an ephemeral port per
+/// test, the kernel hands the same port to a later test, and the second
+/// test's client is refused for disagreeing with limits nobody holds any
+/// more.
+///
+/// What dies with the last client is the bucket's deficit and any pause in
+/// force. That is the intended scope, not a gap: the alternative — a strong
+/// per-host memory seeded into the next limiter — would carry a pause left
+/// by one server to whatever the kernel next puts on that port, which is
+/// the cross-test coupling this exists to remove, moved from limits to
+/// timing. A reader that wants the shared state to persist keeps its client
+/// alive; [`TigReadClient::new`] says so, and §11 records it as the
+/// lifecycle production readers follow.
 fn shared_limiter(base_url: &str, limits: ReadLimits) -> Result<Arc<Limiter>, String> {
-    static REGISTRY: OnceLock<StdMutex<HashMap<String, Arc<Limiter>>>> = OnceLock::new();
+    static REGISTRY: OnceLock<StdMutex<HashMap<String, Weak<Limiter>>>> = OnceLock::new();
     let registry = REGISTRY.get_or_init(|| StdMutex::new(HashMap::new()));
     let mut map = match registry.lock() {
         Ok(map) => map,
@@ -206,13 +224,17 @@ fn shared_limiter(base_url: &str, limits: ReadLimits) -> Result<Arc<Limiter>, St
         // propagate a panic into every subsequent read.
         Err(poisoned) => poisoned.into_inner(),
     };
+    // Entries whose clients have all gone are dead weight; drop them here,
+    // at the only point that writes the map, so it stays bounded by the
+    // number of hosts with a live client rather than ever addressed.
+    map.retain(|_, limiter| limiter.strong_count() > 0);
 
     // Keyed on the normalised host, not the base-URL string: §11's budget
     // is per IP, so two clients spelling the same host differently — case,
     // an explicit default port, a path suffix — must not each receive a
     // full allowance and silently double the pinned rate.
     let key = limiter_key(base_url);
-    if let Some(existing) = map.get(&key) {
+    if let Some(existing) = map.get(&key).and_then(Weak::upgrade) {
         // Fail loudly rather than silently applying someone else's policy.
         // The rate fields live in the shared limiter while the rest live
         // per client, so a mismatch would leave a client reporting limits
@@ -229,11 +251,11 @@ fn shared_limiter(base_url: &str, limits: ReadLimits) -> Result<Arc<Limiter>, St
                 a.requests_per_second, a.burst, a.max_concurrent
             ));
         }
-        return Ok(Arc::clone(existing));
+        return Ok(existing);
     }
 
     let limiter = Arc::new(Limiter::new(limits));
-    map.insert(key, Arc::clone(&limiter));
+    map.insert(key, Arc::downgrade(&limiter));
     Ok(limiter)
 }
 
@@ -336,6 +358,14 @@ pub struct TigReadClient {
 }
 
 impl TigReadClient {
+    /// Build a reader for one host.
+    ///
+    /// Construct it **once per process and keep it**. The pacing bucket and
+    /// the host-wide `Retry-After` pause (§11) are shared through a per-host
+    /// limiter that lives exactly as long as some client on the host does;
+    /// a client built per operation would take a fresh burst and forget an
+    /// in-force pause each time. Production readers hold theirs for the life
+    /// of the process, which is what makes the shared state mean anything.
     pub fn new(
         base_url: impl Into<String>,
         policy: &ReadPolicy,
@@ -766,6 +796,14 @@ pub mod testing {
                 .limits
                 .max_backoff,
         )
+    }
+
+    /// The rate fields of the limiter a client actually shares, as opposed
+    /// to the ones it was built with. The two agree by construction for a
+    /// client that registered its host; a test asserting which limiter a
+    /// later client on a reused host ended up with needs the shared one.
+    pub fn shared_limits_for_test(client: &crate::TigReadClient) -> crate::ReadLimits {
+        client.limiter.limits
     }
 
     /// The bound applied to a host-wide `Retry-After` pause.

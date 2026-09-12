@@ -12,6 +12,7 @@ pub mod decision;
 pub mod intent;
 pub mod lease;
 pub mod payload;
+pub mod reconcile;
 pub mod restart;
 pub mod workflow;
 
@@ -37,6 +38,7 @@ pub use payload::{
     DecisionPayloadInputs, PayloadError, PrecommitSubmission, TrackSettings, precommit_body,
     precommit_digest,
 };
+pub use reconcile::{ReconcileError, Reconciliation, reconcile_precommit};
 pub use restart::{
     ConfirmedWindow, NeedsAttention, Reconciled, RestartReport, open_block_gaps,
     reconcile_after_restart, record_block_gap,

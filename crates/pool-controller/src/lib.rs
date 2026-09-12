@@ -9,6 +9,7 @@
 //! any way to *manufacture* the facts a write depends on, except behind the
 //! gate in [`stub`].
 
+pub mod bind;
 pub mod window;
 
 #[cfg(feature = "stub-acceptance")]

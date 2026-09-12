@@ -422,6 +422,37 @@ pub async fn create(
     row_to_workflow(&row)
 }
 
+/// Every workflow of one network in one state, by id.
+///
+/// The controller's binding pass reads `DECIDED` this way. Read then
+/// re-read: the transitions each load their row `FOR UPDATE` and check its
+/// revision, so a workflow that moved between this read and the transition is
+/// refused as stale rather than acted on twice.
+pub async fn in_state(
+    pool: &PgPool,
+    network: Network,
+    state: WorkflowState,
+) -> Result<Vec<Workflow>, WorkflowError> {
+    let ids: Vec<String> = sqlx::query_scalar(
+        "SELECT workflow_id FROM pool.workflow
+         WHERE network = $1 AND state = $2
+         ORDER BY workflow_id",
+    )
+    .bind(network.as_str())
+    .bind(state.as_str())
+    .fetch_all(pool)
+    .await
+    .map_err(unavailable)?;
+
+    let mut out = Vec::with_capacity(ids.len());
+    for id in ids {
+        if let Some(w) = find(pool, network, &id).await? {
+            out.push(w);
+        }
+    }
+    Ok(out)
+}
+
 pub async fn find(
     pool: &PgPool,
     network: Network,

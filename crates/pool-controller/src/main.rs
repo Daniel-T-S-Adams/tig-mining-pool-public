@@ -138,7 +138,19 @@ async fn run(config: &Config, once: bool) -> Result<(), String> {
         policy.for_reader(TigReader::Controller),
     )?;
     let source = TigSnapshotSource::new(reader, &tig.player_id);
-    let mut service = Service::new(pool, source, poll, network, &tig.player_id, guardrails);
+    let orchestration = config
+        .orchestration
+        .as_ref()
+        .ok_or("configuration has no [orchestration] section")?;
+    let mut service = Service::new(
+        pool,
+        source,
+        poll,
+        network,
+        &tig.player_id,
+        guardrails,
+        orchestration.active_cache_fetches_per_poll as usize,
+    );
 
     let interval = policy.block_poll_interval();
     tracing::info!(
@@ -161,12 +173,50 @@ fn report(tick: &Tick) {
         Tick::Unchanged { block_id } => {
             tracing::debug!(event = "controller.block.unchanged", block_id = %block_id);
         }
+        Tick::AlreadyIngested { block_id } => {
+            tracing::info!(
+                event = "controller.block.already_ingested",
+                block_id = %block_id,
+                "a previous run took this block in; reconciling from the next one"
+            );
+        }
+        Tick::CacheAdvanced {
+            block_id,
+            cache,
+            now_usable,
+        } => {
+            tracing::info!(
+                event = "controller.cache.advanced",
+                block_id = %block_id,
+                fetched = cache.fetched.len(),
+                missing = cache.missing.len(),
+                failed = cache.failed.len(),
+                now_usable,
+            );
+            for (benchmark_id, error) in &cache.failed {
+                tracing::warn!(
+                    event = "controller.cache.fetch_failed",
+                    benchmark_id = %benchmark_id,
+                    error = %error,
+                );
+            }
+        }
         Tick::Ingested(ingested) => {
             tracing::info!(
                 event = "controller.block.ingested",
                 block_id = %ingested.block_id,
                 height = ingested.height,
+                cache_fetched = ingested.cache.fetched.len(),
+                cache_missing = ingested.cache.missing.len(),
+                cache_ready = ingested.cache.covers_active_set(),
             );
+            for (benchmark_id, error) in &ingested.cache.failed {
+                tracing::warn!(
+                    event = "controller.cache.fetch_failed",
+                    benchmark_id = %benchmark_id,
+                    error = %error,
+                );
+            }
             // §10.3: a recorded gap alerts. One line per height, so the
             // alert names what was lost.
             for height in &ingested.gaps_recorded {

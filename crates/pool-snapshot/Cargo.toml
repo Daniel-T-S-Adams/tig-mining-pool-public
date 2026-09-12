@@ -28,7 +28,9 @@ sqlx = { version = "0.9", features = ["migrate"] }
 fake-tig = { path = "../fake-tig" }
 tig-client = { path = "../tig-client", features = ["testing"] }
 axum = "0.8"
+http-body-util = "0.1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tower = { version = "0.5", features = ["util"] }
 
 [lints]
 workspace = true

@@ -215,6 +215,13 @@ async fn happy_path_precommit_to_active() {
         "num_samples_gte_average + num_samples_lt_average"
     );
     assert!(sampled.iter().all(|n| *n < 80));
+    // A confirmed benchmark publishes one average per bundle: 80 nonces
+    // over 2 bundles, qualities 0..80, so bundle means 19 and 59.
+    assert_eq!(
+        benches["benchmarks"][0]["details"]["average_quality_by_bundle"],
+        json!([19, 59]),
+        "per-bundle averages, the fact §5.2 caches and §7 attributes from"
+    );
 
     // 9. A proof missing a sampled nonce is rejected.
     let leaf = |nonce: u64| {

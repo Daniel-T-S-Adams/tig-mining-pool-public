@@ -8,6 +8,14 @@
 //! step is idempotent, but a pass costs database reads and the evidence has
 //! not changed.
 //!
+//! A poll that finds the block unchanged is not idle if the block's
+//! active-benchmark cache is still warming: it spends another budget of
+//! fetches on it (§5.2's warm-up "may span several blocks", but need not
+//! wait a block between passes), and once every active id is retained the
+//! same snapshot is persisted again as usable. That is the supersession
+//! `pool.block_snapshot` was designed for: the block's content has not
+//! changed, only what the pool knows about its active set.
+//!
 //! The poll and the assembly share one host, so they share one limiter
 //! (`tig-client` keys it by host); the poll client only differs in its
 //! deadlines, which `ReadPolicy::for_block_poll` bounds to the interval so a
@@ -16,12 +24,16 @@
 use std::time::{Duration, Instant};
 
 use pool_domain::Network;
-use pool_snapshot::{PostgresSnapshotStore, SnapshotSource};
+use pool_snapshot::active_cache::{Advance, BenchmarkDataSource};
+use pool_snapshot::store::BlockSnapshotStore;
+use pool_snapshot::{
+    PostgresActiveBenchmarkStore, PostgresSnapshotStore, Snapshot, SnapshotSource,
+};
 use pool_workflow::Guardrails;
 use sqlx::PgPool;
 use tig_client::{ReadError, TigReadClient};
 
-use crate::ingest::{IngestError, ingest};
+use crate::ingest::{IngestError, Ingestor};
 use crate::reconciler::{Outcome, ReconcileError, reconcile_block};
 
 /// How many times one ingestion may restart at a new block before giving
@@ -32,26 +44,57 @@ const ASSEMBLY_ATTEMPTS: u32 = 3;
 pub struct Service<S> {
     pool: PgPool,
     store: PostgresSnapshotStore,
+    cache: PostgresActiveBenchmarkStore,
     source: S,
     poll: TigReadClient,
     network: Network,
     player_id: String,
     guardrails: Guardrails,
+    cache_budget: usize,
     /// The block most recently taken in *and reconciled from*, so a poll
-    /// that sees it again does nothing.
+    /// that sees it again does nothing more than continue its warm-up.
     ///
     /// A block whose reads came back incomplete is not recorded here. Its
     /// pass reconciled nothing, and the reads that failed may succeed on the
     /// next poll; marking it seen would leave the pool blind to that block
     /// for its whole life over one transient read failure.
-    last_block: Option<String>,
+    last: Option<Seen>,
+}
+
+/// A block taken in, kept so its warm-up can continue.
+struct Seen {
+    snapshot: Snapshot,
+    /// Whether a snapshot of this block has been persisted usable for a
+    /// decision. Once true there is nothing left to warm.
+    usable: bool,
 }
 
 /// What one poll came to.
 #[derive(Debug)]
 pub enum Tick {
-    /// The latest block is the one already taken in.
+    /// The latest block is the one already taken in, and its cache was
+    /// already complete.
     Unchanged { block_id: String },
+    /// A previous run of the pool had already taken this block in and made
+    /// it usable, so this run assembled nothing.
+    ///
+    /// §9 allows one usable assembly per block, and re-assembling would
+    /// produce a second: `get-benchmarks` is a latest-state read, so a
+    /// second assembly of the same block legitimately differs, and two
+    /// usable rows for one block is the contradiction
+    /// `block_snapshot_one_usable_per_block` refuses. The cost is that this
+    /// run reconciles from the next block rather than this one — the same
+    /// wait a restart one block later would have had.
+    AlreadyIngested { block_id: String },
+    /// The latest block is the one already taken in; another budget went
+    /// on its cache.
+    CacheAdvanced {
+        block_id: String,
+        cache: Advance,
+        /// Whether this pass completed the warm-up and persisted the block
+        /// as usable for a decision.
+        now_usable: bool,
+    },
     /// A new block was taken in and reconciled from.
     Ingested(Box<Ingested>),
 }
@@ -62,6 +105,7 @@ pub struct Ingested {
     pub block_id: String,
     pub height: u64,
     pub gaps_recorded: Vec<i64>,
+    pub cache: Advance,
     pub outcome: Outcome,
 }
 
@@ -77,7 +121,7 @@ pub enum ServiceError {
     Reconcile(#[from] ReconcileError),
 }
 
-impl<S: SnapshotSource> Service<S> {
+impl<S: SnapshotSource + BenchmarkDataSource> Service<S> {
     pub fn new(
         pool: PgPool,
         source: S,
@@ -85,22 +129,37 @@ impl<S: SnapshotSource> Service<S> {
         network: Network,
         player_id: impl Into<String>,
         guardrails: Guardrails,
+        cache_budget: usize,
     ) -> Self {
         Self {
             store: PostgresSnapshotStore::new(pool.clone()),
+            cache: PostgresActiveBenchmarkStore::new(pool.clone()),
             pool,
             source,
             poll,
             network,
             player_id: player_id.into(),
             guardrails,
-            last_block: None,
+            cache_budget,
+            last: None,
         }
     }
 
     /// The snapshot source this service reads through.
     pub fn source(&self) -> &S {
         &self.source
+    }
+
+    fn ingestor(&self) -> Ingestor<'_, S, PostgresSnapshotStore, PostgresActiveBenchmarkStore> {
+        Ingestor {
+            pool: &self.pool,
+            store: &self.store,
+            cache: &self.cache,
+            source: &self.source,
+            network: self.network,
+            assembly_attempts: ASSEMBLY_ATTEMPTS,
+            cache_budget: self.cache_budget,
+        }
     }
 
     /// One poll.
@@ -117,20 +176,34 @@ impl<S: SnapshotSource> Service<S> {
             .and_then(|v| v.as_str())
             .ok_or(ServiceError::BlockWithoutId)?
             .to_string();
-        if self.last_block.as_deref() == Some(latest_id.as_str()) {
-            return Ok(Tick::Unchanged {
+        if let Some(seen) = self.last.as_ref()
+            && seen.snapshot.block_id == latest_id
+        {
+            if seen.usable {
+                return Ok(Tick::Unchanged {
+                    block_id: latest_id,
+                });
+            }
+            return self.continue_warm_up().await;
+        }
+
+        // A block a *previous run* finished. Assembling it again would give
+        // this block a second usable assembly — see `Tick::AlreadyIngested`
+        // — so the pool waits for the next block instead. Only ever true on
+        // the first poll after a restart: within one run `last` answers.
+        if self
+            .store
+            .load_usable_record(self.network, &latest_id)
+            .await
+            .map_err(IngestError::from)?
+            .is_some()
+        {
+            return Ok(Tick::AlreadyIngested {
                 block_id: latest_id,
             });
         }
 
-        let ingested = ingest(
-            &self.pool,
-            &self.store,
-            &self.source,
-            self.network,
-            ASSEMBLY_ATTEMPTS,
-        )
-        .await?;
+        let ingested = self.ingestor().ingest().await?;
         let record = ingested.snapshot.record();
         let block_id = record.block_id.clone();
         let height = record.height;
@@ -144,15 +217,54 @@ impl<S: SnapshotSource> Service<S> {
         )
         .await?;
 
-        if matches!(outcome, Outcome::Reconciled(_)) {
-            self.last_block = Some(block_id.clone());
+        if let Outcome::Reconciled(_) = &outcome
+            && let Ok(snapshot) = ingested.snapshot.for_reconciliation()
+        {
+            self.last = Some(Seen {
+                snapshot: snapshot.clone(),
+                usable: ingested.snapshot.for_decision().is_ok(),
+            });
         }
         Ok(Tick::Ingested(Box::new(Ingested {
             block_id,
             height,
             gaps_recorded: ingested.gaps_recorded,
+            cache: ingested.cache,
             outcome,
         })))
+    }
+
+    /// Another budget on the last block's active set; if that completes the
+    /// warm-up, the block is persisted again as usable.
+    async fn continue_warm_up(&mut self) -> Result<Tick, ServiceError> {
+        let Some(seen) = self.last.as_mut() else {
+            unreachable!("continue_warm_up is called only with a block seen");
+        };
+        let ingestor = Ingestor {
+            pool: &self.pool,
+            store: &self.store,
+            cache: &self.cache,
+            source: &self.source,
+            network: self.network,
+            assembly_attempts: ASSEMBLY_ATTEMPTS,
+            cache_budget: self.cache_budget,
+        };
+        let cache = ingestor.warm_cache(&seen.snapshot).await?;
+        let now_usable = cache.covers_active_set();
+        if now_usable {
+            seen.snapshot.active_cache_ready = true;
+            let persisted = self
+                .store
+                .persist(self.network, seen.snapshot.clone())
+                .await
+                .map_err(IngestError::from)?;
+            seen.usable = persisted.for_decision().is_ok();
+        }
+        Ok(Tick::CacheAdvanced {
+            block_id: seen.snapshot.block_id.clone(),
+            cache,
+            now_usable,
+        })
     }
 }
 
@@ -176,7 +288,7 @@ pub async fn run<S, R>(
     report: R,
 ) -> Result<(), ServiceError>
 where
-    S: SnapshotSource,
+    S: SnapshotSource + BenchmarkDataSource,
     R: Fn(&Tick),
 {
     loop {

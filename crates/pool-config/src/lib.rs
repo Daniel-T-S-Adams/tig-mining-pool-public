@@ -240,6 +240,17 @@ impl TigConfig {
 pub struct OrchestrationConfig {
     /// The §6.1 gate: `pool_unverified < internal_pool_unverified_limit`.
     pub internal_pool_unverified_limit: i64,
+    /// How many `get-benchmark-data` reads one poll may spend warming the
+    /// active-benchmark cache (`tig_integration.md` §5.2, §9 step 4).
+    ///
+    /// The reads come out of the controller's share of the per-IP budget
+    /// (ADR-0006) alongside the poll and the snapshot assembly, and a block
+    /// must still be taken in every block; this is where the operator says
+    /// how much of what is left the warm-up may use. No default, for the
+    /// same reason as the limit above: a compiled value here would be a
+    /// rate decision made in the binary rather than in reviewed
+    /// configuration.
+    pub active_cache_fetches_per_poll: u32,
 }
 
 /// The configuration shared by every pool binary.
@@ -517,8 +528,10 @@ impl Config {
             (Binary::PoolController, None) => {
                 return Err(invalid(
                     "pool-controller requires [orchestration] with \
-                     internal_pool_unverified_limit; it has no default because \
-                     mining_system.md §11 makes it versioned policy"
+                     internal_pool_unverified_limit and \
+                     active_cache_fetches_per_poll; neither has a default because \
+                     mining_system.md §11 makes the limit versioned policy and the \
+                     fetch budget is a share of the reviewed read budget"
                         .into(),
                 ));
             }
@@ -530,6 +543,14 @@ impl Config {
                          a misconfiguration rather than a policy",
                         orchestration.internal_pool_unverified_limit
                     )));
+                }
+                if orchestration.active_cache_fetches_per_poll < 1 {
+                    return Err(invalid(
+                        "orchestration.active_cache_fetches_per_poll must be at \
+                         least 1: with 0 the active-benchmark cache never warms and \
+                         no snapshot ever becomes usable for a decision"
+                            .into(),
+                    ));
                 }
             }
             (other, Some(_)) => {

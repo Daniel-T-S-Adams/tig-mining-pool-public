@@ -187,7 +187,8 @@ fn each_binary_accepts_only_its_own_role() {
 /// `mining_system.md` §11 makes `internal_pool_unverified_limit` versioned
 /// policy with no settled value, so this is a test fixture and never a
 /// production constant.
-const ORCHESTRATION: &str = "\n[orchestration]\ninternal_pool_unverified_limit = 8\n";
+const ORCHESTRATION: &str =
+    "\n[orchestration]\ninternal_pool_unverified_limit = 8\nactive_cache_fetches_per_poll = 20\n";
 
 /// The endpoint the controller and gateway both require. A local `fake-tig`
 /// here, which is also what F4d's guard reads.
@@ -213,10 +214,29 @@ fn a_zero_unverified_limit_is_rejected() {
     let mut toml = valid_toml(&scratch.password_file())
         .replace("user = \"pool_migration\"", "user = \"pool_controller\"");
     toml.push_str(TIG);
-    toml.push_str("\n[orchestration]\ninternal_pool_unverified_limit = 0\n");
+    toml.push_str(
+        "\n[orchestration]\ninternal_pool_unverified_limit = 0\nactive_cache_fetches_per_poll = 20\n",
+    );
     let path = scratch.write(&toml);
     let err = Config::load(&path, Binary::PoolController).expect_err("0 admits nothing");
     assert_invalid(err, "at least 1");
+}
+
+#[test]
+fn a_zero_cache_fetch_budget_is_rejected() {
+    // With no fetches the active-benchmark cache never warms, so no
+    // snapshot ever becomes usable for a decision — a controller that
+    // silently decides nothing forever.
+    let scratch = Scratch::new("zero-fetches");
+    let mut toml = valid_toml(&scratch.password_file())
+        .replace("user = \"pool_migration\"", "user = \"pool_controller\"");
+    toml.push_str(TIG);
+    toml.push_str(
+        "\n[orchestration]\ninternal_pool_unverified_limit = 8\nactive_cache_fetches_per_poll = 0\n",
+    );
+    let path = scratch.write(&toml);
+    let err = Config::load(&path, Binary::PoolController).expect_err("0 never warms");
+    assert_invalid(err, "active_cache_fetches_per_poll");
 }
 
 #[test]

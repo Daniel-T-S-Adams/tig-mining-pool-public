@@ -183,6 +183,33 @@ fn rewrite_strings(value: &mut Value, from: &str, to: &str) {
     }
 }
 
+/// The per-bundle average qualities a confirmed benchmark publishes.
+///
+/// TIG assigns nonces to bundles at random; the pool never needs the
+/// assignment (`mining_system.md` §7), only the resulting per-bundle
+/// averages, so this fake assigns nonce `i` to bundle `i / nonces_per_bundle`
+/// and averages. Integer means, rounded down, as the pinned fixture shows
+/// them. A stopped submission has no qualities and publishes an empty list.
+fn average_quality_by_bundle(bench: &Bench, sub: &BenchmarkSubmission) -> Value {
+    let Some(qualities) = sub.solution_quality.as_ref() else {
+        return json!([]);
+    };
+    if bench.num_bundles == 0 || qualities.is_empty() {
+        return json!([]);
+    }
+    let per_bundle = usize::try_from(bench.num_nonces / bench.num_bundles)
+        .unwrap_or(1)
+        .max(1);
+    let averages: Vec<i64> = qualities
+        .chunks(per_bundle)
+        .map(|chunk| {
+            let sum: i64 = chunk.iter().sum();
+            sum / i64::try_from(chunk.len()).unwrap_or(1)
+        })
+        .collect();
+    json!(averages)
+}
+
 fn read_fixture_file(dir: &Path, name: &str) -> Result<Value, String> {
     let path = dir.join(name);
     let bytes =
@@ -522,7 +549,7 @@ impl World {
                     "details": {
                         "stopped": sub.stopped,
                         "num_active_bundles": bench.num_bundles,
-                        "average_quality_by_bundle": null,
+                        "average_quality_by_bundle": average_quality_by_bundle(bench, sub),
                         "merkle_root": sub.merkle_root,
                         "sampled_nonces": sub.confirmed.is_some()
                             .then(|| sub.sampled_nonces.clone())

@@ -21,6 +21,7 @@ use std::future::Future;
 use sqlx::{PgPool, Row};
 
 use crate::intent::IntentState;
+use crate::lease::Lease;
 
 /// How an attempt ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,6 +66,14 @@ pub struct WriteAttempt {
     pub http_status: Option<i32>,
     /// Whether §10 reconciliation has settled this attempt's ambiguity.
     pub reconciled: bool,
+    /// Seconds since the attempt row was written, by the database's clock at
+    /// the moment this value was read.
+    ///
+    /// An age rather than a timestamp so the comparison a caller makes — is
+    /// this attempt older than a write's call timeout, so no sender can still
+    /// be about to record its response — is against the clock that stamped
+    /// `started_at`, not the caller's. Zero on the row `begin` returns.
+    pub age_secs: i64,
 }
 
 impl WriteAttempt {
@@ -199,21 +208,40 @@ pub async fn has_transmitted_precommit_write(
 /// the same text, so the two cannot answer differently.
 macro_rules! transmitted_precommit_exists {
     () => {
-        "EXISTS (
+        concat!(
+            "EXISTS (
              SELECT 1
                FROM pool.tig_write_intent i
               WHERE i.network = $1 AND i.workflow_id = $2
                 AND i.write_kind = 'precommit'
-                AND EXISTS (
-                     SELECT 1 FROM pool.tig_write_attempt a
-                      WHERE a.intent_id = i.intent_id
-                        AND (a.outcome IS NULL
-                             OR a.outcome IN ('AMBIGUOUS', 'ACCEPTED'))
-                    )
+                AND ",
+            $crate::attempt::intent_has_transmitted_attempt!(),
+            "
          )"
+        )
     };
 }
 pub(crate) use transmitted_precommit_exists;
+
+/// Whether the intent `i` (an alias in the enclosing query) has an attempt
+/// that may have reached TIG: unresolved, ambiguous, or accepted.
+///
+/// The one place the outcome list is written. `transmitted_precommit_exists!`
+/// asks it per workflow and `intent::precommit_siblings` asks it per sibling
+/// intent; the two used to spell the list separately, which is how the
+/// controller's admission gate and the gateway's supersession check could
+/// have come to disagree about what "reached TIG" means.
+macro_rules! intent_has_transmitted_attempt {
+    () => {
+        "EXISTS (
+             SELECT 1 FROM pool.tig_write_attempt a
+              WHERE a.intent_id = i.intent_id
+                AND (a.outcome IS NULL
+                     OR a.outcome IN ('AMBIGUOUS', 'ACCEPTED'))
+         )"
+    };
+}
+pub(crate) use intent_has_transmitted_attempt;
 
 #[derive(Debug, thiserror::Error)]
 pub enum AttemptError {
@@ -228,6 +256,13 @@ pub enum AttemptError {
     /// §7.3: the response is recorded once.
     #[error("attempt {attempt_id} already has an outcome")]
     AlreadyResolved { attempt_id: String },
+    /// The caller's lease no longer holds the fence it presented.
+    ///
+    /// §12's protection: a claimant that stalled and lost its lease to another
+    /// must not record an attempt afterwards. Permanent for this claim — the
+    /// caller reclaims and starts over, it does not retry the insert.
+    #[error("cannot record an attempt: {reason}")]
+    FenceLost { reason: String },
     /// Reconciliation must produce a definitive finding.
     #[error("attempt {attempt_id}: reconciliation settles an ambiguity, it cannot restate it")]
     NotSettled { attempt_id: String },
@@ -244,6 +279,28 @@ pub trait WriteAttemptLedger {
     fn begin(
         &self,
         intent_id: &str,
+    ) -> impl Future<Output = Result<WriteAttempt, AttemptError>> + Send;
+
+    /// [`begin`](Self::begin), refused unless the caller still holds the
+    /// lease it presents.
+    ///
+    /// `architecture.md` §12: "Controller dies after decision commit: the
+    /// write intent remains claimable; another controller uses the higher
+    /// lease fence." The protection that sentence describes is that a claimant
+    /// whose lease has lapsed **cannot record an attempt** — otherwise a
+    /// gateway that stalled, lost its lease to a second gateway, and woke up
+    /// after the second had already sent and resolved would record a fresh
+    /// attempt and send again. The lane index does not catch that: it refuses
+    /// a second *unresolved* attempt, and by then the first is resolved.
+    ///
+    /// So the fence is checked in the same transaction that inserts the row.
+    /// `lease::require_fence` locks the lease row `FOR UPDATE`, which also
+    /// serializes against a concurrent reclaim — a fence that advances after
+    /// this check has to wait for this commit.
+    fn begin_fenced(
+        &self,
+        intent_id: &str,
+        lease: &Lease,
     ) -> impl Future<Output = Result<WriteAttempt, AttemptError>> + Send;
 
     /// Record the response, separately from the attempt.
@@ -302,6 +359,18 @@ fn unavailable(e: sqlx::Error) -> AttemptError {
 const PRECOMMIT_LANE_INDEX: &str = "tig_write_attempt_one_unresolved_precommit";
 const BENCHMARK_INDEX: &str = "tig_write_attempt_one_unresolved_per_benchmark";
 
+/// The columns every read of an attempt row returns, so `row_to_attempt`
+/// has one shape to read and the three statements that produce it cannot
+/// drift from each other.
+macro_rules! attempt_columns {
+    () => {
+        "attempt_id::text AS attempt_id, intent_id::text AS intent_id,
+         attempt_no, outcome, http_status,
+         (reconciled_at IS NOT NULL) AS reconciled,
+         EXTRACT(EPOCH FROM (now() - started_at))::bigint AS age_secs"
+    };
+}
+
 fn row_to_attempt(row: &sqlx::postgres::PgRow) -> Result<WriteAttempt, AttemptError> {
     let attempt_id: String = row.try_get("attempt_id").map_err(unavailable)?;
     let outcome_text: Option<String> = row.try_get("outcome").map_err(unavailable)?;
@@ -321,70 +390,117 @@ fn row_to_attempt(row: &sqlx::postgres::PgRow) -> Result<WriteAttempt, AttemptEr
         outcome,
         http_status: row.try_get("http_status").map_err(unavailable)?,
         reconciled: row.try_get("reconciled").map_err(unavailable)?,
+        age_secs: row.try_get("age_secs").map_err(unavailable)?,
     })
+}
+
+impl PostgresAttemptLedger {
+    /// Turn a refused attempt insert into the rule that refused it.
+    ///
+    /// The lane rules surface as unique violations on the partial indexes.
+    /// Reported by name so the caller learns which rule stopped it, not
+    /// merely that the database refused. Shared by the fenced and unfenced
+    /// `begin`, so the two cannot classify the same refusal differently.
+    async fn classify_begin_error(&self, intent_id: &str, e: sqlx::Error) -> AttemptError {
+        if let Some(db) = e.as_database_error()
+            && db.code().as_deref() == Some("23505")
+            && matches!(
+                db.constraint(),
+                Some(PRECOMMIT_LANE_INDEX | BENCHMARK_INDEX)
+            )
+        {
+            let which = db.constraint().unwrap_or_default().to_string();
+            // One extra read, only on the refusal path, so the error names
+            // the lane that is occupied. An error that said only "a write is
+            // already unresolved" would send an operator looking for which.
+            let identity = match sqlx::query(
+                "SELECT network, benchmark_id FROM pool.tig_write_intent
+                  WHERE intent_id = $1::uuid",
+            )
+            .bind(intent_id)
+            .fetch_optional(&self.pool)
+            .await
+            {
+                Ok(row) => row,
+                Err(read) => return unavailable(read),
+            };
+            let network: String = identity
+                .as_ref()
+                .and_then(|r| r.try_get("network").ok())
+                .unwrap_or_else(|| "unknown".to_string());
+            let benchmark_id: String = identity
+                .as_ref()
+                .and_then(|r| r.try_get::<Option<String>, _>("benchmark_id").ok())
+                .flatten()
+                .unwrap_or_else(|| "unknown".to_string());
+
+            return if which == PRECOMMIT_LANE_INDEX {
+                AttemptError::PrecommitLaneOccupied { network }
+            } else {
+                AttemptError::BenchmarkWriteInFlight { benchmark_id }
+            };
+        }
+        unavailable(e)
+    }
 }
 
 impl WriteAttemptLedger for PostgresAttemptLedger {
     async fn begin(&self, intent_id: &str) -> Result<WriteAttempt, AttemptError> {
         // attempt_no is derived in the statement rather than by the caller,
         // so a retry cannot renumber history.
-        let row = sqlx::query(
+        let row = sqlx::query(concat!(
             "INSERT INTO pool.tig_write_attempt (intent_id, attempt_no)
              SELECT $1::uuid, COALESCE(MAX(attempt_no), 0) + 1
                FROM pool.tig_write_attempt WHERE intent_id = $1::uuid
-             RETURNING attempt_id::text AS attempt_id, intent_id::text AS intent_id,
-                       attempt_no, outcome, http_status,
-                       (reconciled_at IS NOT NULL) AS reconciled",
-        )
+             RETURNING ",
+            attempt_columns!()
+        ))
         .bind(intent_id)
         .fetch_one(&self.pool)
         .await;
 
         match row {
             Ok(row) => row_to_attempt(&row),
-            Err(e) => {
-                // The lane rules surface as unique violations on the partial
-                // indexes. Reported by name so the caller learns which rule
-                // stopped it, not merely that the database refused.
-                if let Some(db) = e.as_database_error()
-                    && db.code().as_deref() == Some("23505")
-                    && matches!(
-                        db.constraint(),
-                        Some(PRECOMMIT_LANE_INDEX | BENCHMARK_INDEX)
-                    )
-                {
-                    let which = db.constraint().unwrap_or_default().to_string();
-                    // One extra read, only on the refusal path, so the error
-                    // names the lane that is occupied. An error that said
-                    // only "a write is already unresolved" would send an
-                    // operator looking for which.
-                    let identity = sqlx::query(
-                        "SELECT network, benchmark_id FROM pool.tig_write_intent
-                          WHERE intent_id = $1::uuid",
-                    )
-                    .bind(intent_id)
-                    .fetch_optional(&self.pool)
-                    .await
-                    .map_err(unavailable)?;
-                    let network: String = identity
-                        .as_ref()
-                        .and_then(|r| r.try_get("network").ok())
-                        .unwrap_or_else(|| "unknown".to_string());
-                    let benchmark_id: String = identity
-                        .as_ref()
-                        .and_then(|r| r.try_get::<Option<String>, _>("benchmark_id").ok())
-                        .flatten()
-                        .unwrap_or_else(|| "unknown".to_string());
-
-                    return Err(if which == PRECOMMIT_LANE_INDEX {
-                        AttemptError::PrecommitLaneOccupied { network }
-                    } else {
-                        AttemptError::BenchmarkWriteInFlight { benchmark_id }
-                    });
-                }
-                Err(unavailable(e))
-            }
+            Err(e) => Err(self.classify_begin_error(intent_id, e).await),
         }
+    }
+
+    async fn begin_fenced(
+        &self,
+        intent_id: &str,
+        lease: &Lease,
+    ) -> Result<WriteAttempt, AttemptError> {
+        let mut tx = self.pool.begin().await.map_err(unavailable)?;
+        crate::lease::require_fence(&mut tx, lease)
+            .await
+            .map_err(|e| AttemptError::FenceLost {
+                reason: e.to_string(),
+            })?;
+        let row = sqlx::query(concat!(
+            "INSERT INTO pool.tig_write_attempt (intent_id, attempt_no)
+             SELECT $1::uuid, COALESCE(MAX(attempt_no), 0) + 1
+               FROM pool.tig_write_attempt WHERE intent_id = $1::uuid
+             RETURNING ",
+            attempt_columns!()
+        ))
+        .bind(intent_id)
+        .fetch_one(&mut *tx)
+        .await;
+        let attempt = match row {
+            Ok(row) => row_to_attempt(&row)?,
+            Err(e) => {
+                // Release this transaction — and the lease row it holds
+                // `FOR UPDATE` — *before* classifying. `classify_begin_error`
+                // reads through the pool, and a second connection awaited
+                // while this one is held is a deadlock on a pool of one and
+                // a stall on a small one, on exactly the lane-occupied path
+                // that recurs on every pass while a precommit is in flight.
+                drop(tx);
+                return Err(self.classify_begin_error(intent_id, e).await);
+            }
+        };
+        tx.commit().await.map_err(unavailable)?;
+        Ok(attempt)
     }
 
     async fn resolve(
@@ -483,14 +599,13 @@ impl WriteAttemptLedger for PostgresAttemptLedger {
     }
 
     async fn attempts_for(&self, intent_id: &str) -> Result<Vec<WriteAttempt>, AttemptError> {
-        let rows = sqlx::query(
-            "SELECT attempt_id::text AS attempt_id, intent_id::text AS intent_id,
-                    attempt_no, outcome, http_status,
-                       (reconciled_at IS NOT NULL) AS reconciled
-               FROM pool.tig_write_attempt
+        let rows = sqlx::query(concat!(
+            "SELECT ",
+            attempt_columns!(),
+            "  FROM pool.tig_write_attempt
               WHERE intent_id = $1::uuid
-              ORDER BY attempt_no",
-        )
+              ORDER BY attempt_no"
+        ))
         .bind(intent_id)
         .fetch_all(&self.pool)
         .await

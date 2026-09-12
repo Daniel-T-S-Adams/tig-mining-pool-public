@@ -81,6 +81,7 @@ fn attempt(outcome: Option<AttemptOutcome>) -> WriteAttempt {
         outcome,
         http_status: None,
         reconciled: false,
+        age_secs: 0,
     }
 }
 

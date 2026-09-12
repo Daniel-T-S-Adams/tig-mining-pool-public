@@ -29,8 +29,8 @@ pub use decision::{
     RecordedTie, admit_precommit, payload_inputs,
 };
 pub use intent::{
-    IntentError, IntentState, NewIntent, PostgresIntentRepository, SettledOutcome,
-    TigWriteIntentRepository, WriteIntent, WriteKind,
+    IntentError, IntentState, NewIntent, PostgresIntentRepository, PrecommitSiblings,
+    SettledOutcome, TigWriteIntentRepository, WriteIntent, WriteKind, precommit_siblings,
 };
 pub use lease::{Lease, LeaseError, LeaseKind};
 pub use payload::{

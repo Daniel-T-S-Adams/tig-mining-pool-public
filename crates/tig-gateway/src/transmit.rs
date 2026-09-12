@@ -409,6 +409,7 @@ mod tests {
             outcome: None,
             http_status: None,
             reconciled: false,
+            age_secs: 0,
         }
     }
 

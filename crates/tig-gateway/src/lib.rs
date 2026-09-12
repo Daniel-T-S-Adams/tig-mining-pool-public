@@ -11,6 +11,8 @@
 
 pub mod claim;
 pub mod credential;
+pub mod drive;
+pub mod lane;
 pub mod readiness;
 pub mod reconcile;
 pub mod transmit;
@@ -21,6 +23,8 @@ pub use claim::{
     ClaimDecision, OwningWorkflow, SiblingGenerations, SkipReason, StopReason, decide,
 };
 pub use credential::{CredentialError, TigApiKey};
+pub use drive::{Acted, DriveError, Driver, IntentOutcome, RunReport, run_once};
+pub use lane::PostLane;
 pub use readiness::{Check, Evidence, Failure, Pins, WriteReady, evaluate};
 pub use reconcile::{PrecommitSubmission, Reconciliation, TrackSettings, reconcile_precommit};
 pub use transmit::{PrecommitTransmitter, TransmitError, Transmitted, precommit_body};

@@ -544,3 +544,48 @@ impl PostgresIntentRepository {
         row.as_ref().map(row_to_intent).transpose()
     }
 }
+
+/// What one precommit intent's siblings say: the newest generation this
+/// workflow has, and whether any *other* generation has been transmitted.
+///
+/// The two facts the gateway's claim decision is scoped by
+/// (`architecture.md` §7.3 forbids a new generation once an earlier attempt
+/// may have reached TIG). Read in one statement so they describe the same
+/// instant — a newest generation from one read and a transmitted flag from
+/// another could disagree about a generation admitted in between.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PrecommitSiblings {
+    pub newest_generation: i32,
+    pub sibling_transmitted: bool,
+}
+
+/// [`PrecommitSiblings`] for the workflow that owns `intent`, excluding the
+/// intent's own attempts from `sibling_transmitted`.
+pub async fn precommit_siblings(
+    pool: &PgPool,
+    intent: &WriteIntent,
+) -> Result<PrecommitSiblings, IntentError> {
+    // "Transmitted" is `attempt`'s predicate, spliced in rather than
+    // restated: this answer and `admit_precommit`'s must agree about which
+    // attempts may have reached TIG.
+    let row: (Option<i32>, bool) = sqlx::query_as(concat!(
+        "SELECT MAX(i.generation),
+                COALESCE(bool_or(",
+        crate::attempt::intent_has_transmitted_attempt!(),
+        " AND i.intent_id <> $3::uuid), false)
+           FROM pool.tig_write_intent i
+          WHERE i.network = $1 AND i.workflow_id = $2 AND i.write_kind = 'precommit'"
+    ))
+    .bind(intent.network.as_str())
+    .bind(&intent.workflow_id)
+    .bind(&intent.intent_id)
+    .fetch_one(pool)
+    .await
+    .map_err(unavailable)?;
+    Ok(PrecommitSiblings {
+        // The intent exists, so the max is at least its own generation; a
+        // NULL here means the read and the intent disagree about the world.
+        newest_generation: row.0.unwrap_or(intent.generation),
+        sibling_transmitted: row.1,
+    })
+}

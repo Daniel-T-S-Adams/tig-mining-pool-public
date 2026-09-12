@@ -9,6 +9,12 @@ version = "0.1.0"
 [dependencies]
 pool-domain = { path = "../pool-domain" }
 pool-workflow = { path = "../pool-workflow" }
+# For `PgPool` by name in the claim loop; the same features pool-workflow uses.
+sqlx = { version = "0.9", default-features = false, features = [
+    "postgres",
+    "runtime-tokio",
+    "tls-rustls-ring",
+] }
 reqwest = { version = "0.12", default-features = false, features = [
     "json",
     "rustls-tls",
@@ -17,10 +23,17 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 thiserror = "2"
+# The POST lane's pacing sleeps between initial writes; `time` only.
+tokio = { version = "1", default-features = false, features = ["time"] }
 tracing = "0.1"
 
 [dev-dependencies]
 fake-tig = { path = "../fake-tig" }
+# The claim loop's tests run it against a real database. They live inside the
+# crate rather than in tests/ because a `TigApiKey` can only be built through
+# `credential::load`, which is crate-private on purpose (§2.2).
+pool-test-support = { path = "../pool-test-support" }
+sqlx = { version = "0.9", features = ["migrate"] }
 axum = "0.8"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net"] }
 # The §10.3 alert is a log event, so the test captures tracing output the

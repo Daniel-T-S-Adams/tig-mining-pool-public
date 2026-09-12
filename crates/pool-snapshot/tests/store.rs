@@ -103,6 +103,101 @@ async fn an_incomplete_snapshot_is_recorded_but_yields_no_decision() {
         "a partial assembly must never be offered as a decision input"
     );
     assert_eq!(persisted.for_decision(), Err(NotUsable::ReadsIncomplete));
+    // Nor to reconciliation: a read that was not made is not an absence.
+    assert_eq!(
+        persisted.for_reconciliation(),
+        Err(NotUsable::ReadsIncomplete)
+    );
+}
+
+#[tokio::test]
+async fn complete_reads_serve_reconciliation_before_the_active_cache_is_ready() {
+    // §10 reconciliation consumes §7's confirmed reads and divides by
+    // nothing, so the active-benchmark cache that gates a *decision* has no
+    // bearing on it. Until the cache exists at all, this is the only way a
+    // confirmation the pool can already see reaches a workflow.
+    let Some(db) = TempDb::migrated("reconciliation_gate").await else {
+        return;
+    };
+    let store = PostgresSnapshotStore::new(db.pool_as("pool_controller").await);
+    let mut snap = snapshot("block-r", 102, true);
+    snap.active_cache_ready = false;
+
+    let persisted = store.persist(Network::Testnet, snap).await.unwrap();
+
+    assert_eq!(
+        persisted.for_decision(),
+        Err(NotUsable::ActiveCacheUnavailable)
+    );
+    assert_eq!(
+        persisted.for_reconciliation().map(|s| s.height),
+        Ok(102),
+        "reconciliation needs complete reads and nothing more"
+    );
+}
+
+#[tokio::test]
+async fn the_last_local_height_counts_only_completely_read_blocks() {
+    // §10 measures a gap from "the last local height", and the gap exists to
+    // record per-block data the pool cannot recover. A height whose anchored
+    // reads never all succeeded holds no more of that data than one never
+    // polled — and none of it can be fetched later, since the public API
+    // serves no historical snapshot — so counting it here would leave the
+    // loss unrecorded and §10.3's alert silent.
+    let Some(db) = TempDb::migrated("last_height").await else {
+        return;
+    };
+    let controller = db.pool_as("pool_controller").await;
+    let store = PostgresSnapshotStore::new(controller.clone());
+
+    assert_eq!(
+        store.last_local_height(Network::Testnet).await.unwrap(),
+        None
+    );
+
+    store
+        .persist(Network::Testnet, snapshot("block-h1", 200, true))
+        .await
+        .unwrap();
+    store
+        .persist(Network::Testnet, snapshot("block-h2", 201, false))
+        .await
+        .unwrap();
+    store
+        .persist(Network::Mainnet, snapshot("block-h3", 900, true))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        store.last_local_height(Network::Testnet).await.unwrap(),
+        Some(200),
+        "the incompletely read block at 201 holds no per-block data"
+    );
+    // Its record is still there — an operator needs to see the block was
+    // reached at all. It is the *height* that does not count.
+    let rows: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM pool.block_snapshot WHERE height = 201")
+            .fetch_one(&controller)
+            .await
+            .unwrap();
+    assert_eq!(rows, 1);
+
+    // Reading it completely later — the next poll of the same block — makes
+    // it count.
+    store
+        .persist(Network::Testnet, snapshot("block-h2", 201, true))
+        .await
+        .unwrap();
+    assert_eq!(
+        store.last_local_height(Network::Testnet).await.unwrap(),
+        Some(201)
+    );
+
+    assert_eq!(
+        store.last_local_height(Network::Mainnet).await.unwrap(),
+        Some(900),
+        "heights are per network"
+    );
 }
 
 #[tokio::test]

@@ -279,7 +279,12 @@ impl ReadPolicy {
     ///
     /// Crate-private for the reason ADR-0006 gives: a public accessor
     /// returning the entire allowance is the same hole as a `Default`, with
-    /// a different name. Production readers take a share.
+    /// a different name. Production readers take a share. Its only caller is
+    /// the `testing` module, so it is compiled with that module: without the
+    /// gate a production build of this crate carried an unused method, and
+    /// `clippy -D warnings` on any crate that depends on it alone refused to
+    /// build.
+    #[cfg(feature = "testing")]
     pub(crate) fn ceiling(&self) -> ReadLimits {
         self.ceiling
     }

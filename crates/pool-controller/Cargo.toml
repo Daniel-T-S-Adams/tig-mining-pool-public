@@ -19,8 +19,11 @@ version = "0.1.0"
 stub-acceptance = []
 
 [dependencies]
+clap = { version = "4", features = ["derive"] }
 pool-config = { path = "../pool-config" }
 pool-domain = { path = "../pool-domain" }
+pool-snapshot = { path = "../pool-snapshot" }
+pool-telemetry = { path = "../pool-telemetry" }
 pool-workflow = { path = "../pool-workflow" }
 serde_json = "1"
 sqlx = { version = "0.9", default-features = false, features = [
@@ -29,6 +32,9 @@ sqlx = { version = "0.9", default-features = false, features = [
     "tls-rustls-ring",
 ] }
 thiserror = "2"
+tig-client = { path = "../tig-client" }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+tracing = "0.1"
 
 [dev-dependencies]
 # The window builder is only worth what it agrees with. Constructed JSON and
@@ -40,6 +46,7 @@ http-body-util = "0.1"
 pool-controller = { path = ".", features = ["stub-acceptance"] }
 pool-test-support = { path = "../pool-test-support" }
 sqlx = { version = "0.9", features = ["migrate"] }
+tig-client = { path = "../tig-client", features = ["testing"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 tower = { version = "0.5", features = ["util"] }
 

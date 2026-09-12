@@ -1,0 +1,773 @@
+//! One block in, one block reconciled — the controller's pass, end to end
+//! against a live fake-tig.
+//!
+//! `ingest` and `reconcile_block` are exercised the way the binary will run
+//! them: a real snapshot assembled over HTTP, persisted, then read back as
+//! evidence for the workflows the database holds. The precommit is sent by
+//! hand, as `bind.rs` does, because the controller cannot depend on the
+//! gateway.
+//!
+//! Requires `POOL_TEST_SUPERUSER_URL`; without it these skip.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
+use std::time::Duration;
+
+use axum::Router;
+use axum::body::Body;
+use axum::http::Request;
+use fake_tig::{Config, DEFAULT_API_KEY, SharedWorld, build_world, router};
+use http_body_util::BodyExt;
+use pool_controller::bind::Bound;
+use pool_controller::ingest::{IngestError, Ingested, ingest};
+use pool_controller::reconciler::{Outcome, reconcile_block};
+use pool_domain::{Network, challenge_tie_seed, draw_rank};
+use pool_snapshot::store::{
+    BlockSnapshotStore, NotUsable, PersistedSnapshot, SnapshotRecord, StoreError,
+};
+use pool_snapshot::{
+    AnchoredRead, PostgresSnapshotStore, Snapshot, SnapshotError, SnapshotSource, TigSnapshotSource,
+};
+use pool_test_support::TempDb;
+use pool_workflow::{
+    AnchorSnapshot, AttemptOutcome, DecisionPayloadInputs, Guardrails, IntentState, NewDecision,
+    PostgresAttemptLedger, PostgresIntentRepository, PrecommitSubmission, RecordedDraw,
+    TigWriteIntentRepository, WorkflowState, WriteAttemptLedger, WriteKind, admit_precommit,
+    open_block_gaps, precommit_body, precommit_digest, workflow,
+};
+use serde_json::{Value, json};
+use sqlx::PgPool;
+use tig_client::{ReadLimits, TigReadClient};
+use tower::ServiceExt;
+
+const PLAYER: &str = "0xp00l00000000000000000000000000000000000";
+const NET: Network = Network::Testnet;
+const ANCHOR_DIGEST: [u8; 32] = [0xcd; 32];
+
+/// Loose enough that nothing expires unless a test drives the chain there.
+fn guardrails() -> Guardrails {
+    Guardrails {
+        max_assignment_age_blocks: 2,
+        package_due_age_blocks: 3,
+        workflow_expiry_age_blocks: 5,
+        proof_reserve_blocks: 2,
+    }
+}
+
+struct FakeTig {
+    app: Router,
+    world: SharedWorld,
+    base: String,
+}
+
+async fn fake_tig() -> FakeTig {
+    let fixtures = concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/tig/v1");
+    let world = build_world(Config::new(fixtures)).expect("fixture world loads");
+    let app = router(world.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let served = app.clone();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, served).await;
+    });
+    FakeTig {
+        app,
+        world,
+        base: format!("http://{addr}"),
+    }
+}
+
+impl FakeTig {
+    fn source(&self) -> TigSnapshotSource {
+        let policy = tig_client::testing::shipped_policy_for_test().unwrap();
+        let limits = ReadLimits {
+            max_backoff: Duration::from_millis(50),
+            ..tig_client::testing::pool_ceiling_for_test(&policy)
+        };
+        let client =
+            TigReadClient::new_unrestricted_for_test(self.base.clone(), &policy, limits).unwrap();
+        TigSnapshotSource::new(client, PLAYER)
+    }
+
+    /// The chain's current block, as the server reports it.
+    async fn tip(&self) -> (String, u64) {
+        let block = call(&self.app, "GET", "/get-block?include_data=true", None, None).await;
+        (
+            block["block"]["id"].as_str().unwrap().to_owned(),
+            block["block"]["details"]["height"].as_u64().unwrap(),
+        )
+    }
+
+    fn advance(&self, blocks: u32) {
+        let mut world = self.world.lock().unwrap();
+        for _ in 0..blocks {
+            world.advance_block();
+        }
+    }
+}
+
+async fn call(
+    app: &Router,
+    method: &str,
+    uri: &str,
+    key: Option<&str>,
+    body: Option<Value>,
+) -> Value {
+    let mut b = Request::builder().method(method).uri(uri);
+    if let Some(k) = key {
+        b = b.header("x-api-key", k);
+    }
+    let req = match body {
+        Some(v) => b
+            .header("content-type", "application/json")
+            .body(Body::from(v.to_string())),
+        None => b.body(Body::empty()),
+    }
+    .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    let status = resp.status();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    assert!(
+        status.is_success(),
+        "{method} {uri} -> {status}: {}",
+        String::from_utf8_lossy(&bytes)
+    );
+    if bytes.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(&bytes).unwrap()
+    }
+}
+
+fn track_settings() -> Value {
+    json!({
+        "t001": { "num_bundles": 2, "fuel_budget": 1_000_000u64, "hyperparameters": null },
+        "t002": { "num_bundles": 1, "fuel_budget": 1_000_000u64, "hyperparameters": null }
+    })
+}
+
+fn submission(anchor: &str) -> PrecommitSubmission {
+    PrecommitSubmission::from_decision(
+        PLAYER,
+        &DecisionPayloadInputs {
+            anchor_block_id: anchor.to_string(),
+            selected_challenge: "c001".to_string(),
+            selected_algorithm: "a011".to_string(),
+            compute_type: "aws_t4g".to_string(),
+            track_settings: track_settings(),
+        },
+    )
+    .unwrap()
+}
+
+fn decision(workflow: &str, anchor: &str, height: i64) -> NewDecision {
+    let seed = challenge_tie_seed(NET, anchor);
+    let mut draw_ranks = serde_json::Map::new();
+    for c in ["c001", "c002", "c003"] {
+        let rank = draw_rank(&seed, c);
+        draw_ranks.insert(
+            c.to_string(),
+            json!(
+                rank.as_bytes()
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<String>()
+            ),
+        );
+    }
+    NewDecision {
+        network: NET,
+        workflow_id: workflow.to_string(),
+        generation: 1,
+        anchor: AnchorSnapshot {
+            block_id: anchor.to_string(),
+            content_digest: ANCHOR_DIGEST,
+            height,
+        },
+        draw: RecordedDraw {
+            domain: pool_domain::CHALLENGE_TIE_DOMAIN.to_string(),
+            draw_ranks,
+            tie: None,
+        },
+        selected_challenge: "c001".to_string(),
+        selected_algorithm: "a011".to_string(),
+        compute_type: "aws_t4g".to_string(),
+        track_settings: track_settings(),
+        reserve_inputs: json!({}),
+        precommit_reserve: "0".to_string(),
+        config_digest: [0xef; 32],
+        payload_digest: precommit_digest(&submission(anchor)),
+    }
+}
+
+/// A usable anchor for the chain's current block, written by hand.
+///
+/// Admission requires the newest usable snapshot, and "usable" includes the
+/// active-benchmark cache, which assembly does not build yet — so an ingested
+/// snapshot cannot anchor a decision until it does. This row stands in for
+/// that cache, not for ingestion: the tests below still ingest the real
+/// thing, as a second (partial) assembly of the same block.
+async fn persist_usable_anchor(pool: &PgPool, tig: &FakeTig) -> (String, i64) {
+    let (block_id, height) = tig.tip().await;
+    let height = i64::try_from(height).unwrap();
+    sqlx::query(
+        "INSERT INTO pool.block_snapshot
+             (network, block_id, content_digest, height, reads_complete, active_cache_ready)
+         VALUES ('testnet', $1, $2, $3, true, true)",
+    )
+    .bind(&block_id)
+    .bind(ANCHOR_DIGEST.as_slice())
+    .bind(height)
+    .execute(pool)
+    .await
+    .unwrap();
+    (block_id, height)
+}
+
+/// What the gateway does: record the attempt, post the exact body, record
+/// the response.
+async fn send_precommit(tig: &FakeTig, gateway: &PgPool, intent_id: &str, anchor: &str) -> String {
+    let ledger = PostgresAttemptLedger::new(gateway.clone());
+    let attempt = ledger.begin(intent_id).await.unwrap();
+    let resp = call(
+        &tig.app,
+        "POST",
+        "/submit-precommit",
+        Some(DEFAULT_API_KEY),
+        Some(precommit_body(&submission(anchor))),
+    )
+    .await;
+    ledger
+        .resolve(
+            &attempt.attempt_id,
+            AttemptOutcome::Accepted,
+            Some(200),
+            Some("accepted"),
+        )
+        .await
+        .unwrap();
+    resp["benchmark_id"].as_str().unwrap().to_owned()
+}
+
+async fn ingest_live(pool: &PgPool, tig: &FakeTig) -> Ingested {
+    let store = PostgresSnapshotStore::new(pool.clone());
+    ingest(pool, &store, &tig.source(), NET, 3)
+        .await
+        .expect("ingests against fake-tig")
+}
+
+async fn state(pool: &PgPool, id: &str) -> WorkflowState {
+    workflow::find(pool, NET, id).await.unwrap().unwrap().state
+}
+
+#[tokio::test]
+async fn a_block_carrying_a_confirmation_advances_the_workflow_that_sent_it() {
+    let Some(db) = TempDb::migrated("tick_confirms").await else {
+        return;
+    };
+    let controller = db.pool_as("pool_controller").await;
+    let gateway = db.pool_as("pool_gateway").await;
+    let tig = fake_tig().await;
+    let (anchor, height) = persist_usable_anchor(&controller, &tig).await;
+
+    // w1 sends; w2 decided and sent nothing.
+    let a = admit_precommit(&controller, &decision("w1", &anchor, height), 4)
+        .await
+        .unwrap();
+    admit_precommit(&controller, &decision("w2", &anchor, height), 4)
+        .await
+        .unwrap();
+    let benchmark_id = send_precommit(&tig, &gateway, &a.intent.intent_id, &anchor).await;
+
+    // The same block again: the precommit is listed but unconfirmed, and
+    // §7 says that is not evidence. Nothing moves.
+    let ingested = ingest_live(&controller, &tig).await;
+    assert!(ingested.gaps_recorded.is_empty());
+    let Outcome::Reconciled(report) =
+        reconcile_block(&controller, NET, PLAYER, &guardrails(), &ingested.snapshot)
+            .await
+            .unwrap()
+    else {
+        panic!("a complete snapshot must be reconciled");
+    };
+    assert_eq!(
+        report.bind.outcomes,
+        vec![Bound::Pending {
+            workflow_id: "w1".to_string()
+        }]
+    );
+    assert_eq!(state(&controller, "w1").await, WorkflowState::Decided);
+    assert!(!report.blocks_claiming(), "{:?}", report.needs_attention());
+
+    // The next block confirms it. One pass binds the workflow, settles its
+    // intent, and leaves the unsent one where it was.
+    tig.advance(1);
+    let ingested = ingest_live(&controller, &tig).await;
+    assert!(
+        ingested.gaps_recorded.is_empty(),
+        "consecutive blocks are not a gap"
+    );
+    let Outcome::Reconciled(report) =
+        reconcile_block(&controller, NET, PLAYER, &guardrails(), &ingested.snapshot)
+            .await
+            .unwrap()
+    else {
+        panic!("a complete snapshot must be reconciled");
+    };
+    assert_eq!(report.height, height + 1);
+    assert_eq!(
+        report.bind.outcomes,
+        vec![Bound::Confirmed {
+            workflow_id: "w1".to_string(),
+            benchmark_id: benchmark_id.clone()
+        }]
+    );
+    assert!(report.expired.is_empty(), "{:?}", report.expired);
+    assert!(!report.blocks_claiming(), "{:?}", report.needs_attention());
+
+    let w1 = workflow::find(&controller, NET, "w1")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(w1.state, WorkflowState::PrecommitConfirmed);
+    assert_eq!(w1.benchmark_id.as_deref(), Some(benchmark_id.as_str()));
+    assert_eq!(state(&controller, "w2").await, WorkflowState::Decided);
+    let intent = PostgresIntentRepository::new(controller.clone())
+        .find(NET, "w1", WriteKind::Precommit, 1)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(intent.state, IntentState::Confirmed);
+
+    // The bound workflow is now the restart pass's to carry, and with no
+    // further evidence it stays put: a second pass changes nothing.
+    let ingested = ingest_live(&controller, &tig).await;
+    let Outcome::Reconciled(report) =
+        reconcile_block(&controller, NET, PLAYER, &guardrails(), &ingested.snapshot)
+            .await
+            .unwrap()
+    else {
+        panic!("a complete snapshot must be reconciled");
+    };
+    assert!(report.bind.outcomes.is_empty(), "{:?}", report.bind);
+    assert!(report.restart.advanced.is_empty(), "{:?}", report.restart);
+    assert_eq!(
+        report.restart.unchanged,
+        vec!["w1".to_string(), "w2".to_string()],
+        "both are nonterminal, and neither has evidence to move on"
+    );
+    assert_eq!(
+        state(&controller, "w1").await,
+        WorkflowState::PrecommitConfirmed
+    );
+}
+
+#[tokio::test]
+async fn a_workflow_the_binding_stopped_on_is_not_expired_by_the_clock() {
+    // Two workflows decide the same settings and both send. §10's tuple
+    // search then matches both against one confirmed precommit and stops for
+    // an operator. Their attempts are ACCEPTED, so the in-flight guard does
+    // not withhold them — and once the anchor ages past §8's guardrail the
+    // pool's clock would terminate workflows TIG has confirmed, under a
+    // reason code meaning the work never began, while the operator is still
+    // untangling them. The deadline is withheld instead.
+    let Some(db) = TempDb::migrated("tick_stop_no_expiry").await else {
+        return;
+    };
+    let controller = db.pool_as("pool_controller").await;
+    let gateway = db.pool_as("pool_gateway").await;
+    let tig = fake_tig().await;
+    let (anchor, height) = persist_usable_anchor(&controller, &tig).await;
+    let g = guardrails();
+
+    for w in ["w1", "w2"] {
+        let admitted = admit_precommit(&controller, &decision(w, &anchor, height), 4)
+            .await
+            .unwrap();
+        send_precommit(&tig, &gateway, &admitted.intent.intent_id, &anchor).await;
+    }
+    // Both sends confirm as separate precommits with identical settings, so
+    // the search finds two candidates for each workflow.
+    tig.advance(g.workflow_expiry_age_blocks);
+
+    let ingested = ingest_live(&controller, &tig).await;
+    let Outcome::Reconciled(report) =
+        reconcile_block(&controller, NET, PLAYER, &g, &ingested.snapshot)
+            .await
+            .unwrap()
+    else {
+        panic!("a complete snapshot must be reconciled");
+    };
+    assert!(
+        report
+            .bind
+            .outcomes
+            .iter()
+            .all(|o| matches!(o, Bound::StopForOperator { .. })),
+        "{:?}",
+        report.bind
+    );
+    assert!(report.expired.is_empty(), "{:?}", report.expired);
+    assert_eq!(
+        report.expiry_withheld,
+        vec!["w1".to_string(), "w2".to_string()]
+    );
+    assert!(report.blocks_claiming());
+    for w in ["w1", "w2"] {
+        assert_eq!(state(&controller, w).await, WorkflowState::Decided);
+    }
+}
+
+#[tokio::test]
+async fn an_unsent_decision_expires_when_the_guardrail_passes_and_not_before() {
+    let Some(db) = TempDb::migrated("tick_expires").await else {
+        return;
+    };
+    let controller = db.pool_as("pool_controller").await;
+    let tig = fake_tig().await;
+    let (anchor, height) = persist_usable_anchor(&controller, &tig).await;
+    admit_precommit(&controller, &decision("w1", &anchor, height), 4)
+        .await
+        .unwrap();
+    let g = guardrails();
+
+    // One short of the guardrail: still unfinished, still allowed.
+    tig.advance(g.workflow_expiry_age_blocks - 1);
+    let ingested = ingest_live(&controller, &tig).await;
+    let Outcome::Reconciled(report) =
+        reconcile_block(&controller, NET, PLAYER, &g, &ingested.snapshot)
+            .await
+            .unwrap()
+    else {
+        panic!("a complete snapshot must be reconciled");
+    };
+    assert!(report.expired.is_empty(), "{:?}", report.expired);
+    assert_eq!(state(&controller, "w1").await, WorkflowState::Decided);
+
+    // At the guardrail: expired by the pass, with the reason on the row.
+    tig.advance(1);
+    let ingested = ingest_live(&controller, &tig).await;
+    let Outcome::Reconciled(report) =
+        reconcile_block(&controller, NET, PLAYER, &g, &ingested.snapshot)
+            .await
+            .unwrap()
+    else {
+        panic!("a complete snapshot must be reconciled");
+    };
+    assert_eq!(report.expired, vec!["w1".to_string()]);
+    let w1 = workflow::find(&controller, NET, "w1")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(w1.state, WorkflowState::Expired);
+    assert!(w1.terminal_reason.is_some());
+    assert!(!report.blocks_claiming(), "{:?}", report.needs_attention());
+}
+
+#[tokio::test]
+async fn missed_blocks_are_recorded_as_a_gap_once() {
+    let Some(db) = TempDb::migrated("tick_gap").await else {
+        return;
+    };
+    let controller = db.pool_as("pool_controller").await;
+    let tig = fake_tig().await;
+    let first = i64::try_from(tig.tip().await.1).unwrap();
+
+    // The first block ever observed is not preceded by a gap.
+    let ingested = ingest_live(&controller, &tig).await;
+    assert!(ingested.gaps_recorded.is_empty());
+    assert!(open_block_gaps(&controller, NET).await.unwrap().is_empty());
+
+    // Two blocks pass; the pool sees the second. The one between is lost.
+    tig.advance(2);
+    let ingested = ingest_live(&controller, &tig).await;
+    assert_eq!(ingested.gaps_recorded, vec![first + 1]);
+    assert_eq!(
+        open_block_gaps(&controller, NET).await.unwrap(),
+        vec![first + 1]
+    );
+
+    // Seeing the same block again re-records nothing.
+    let ingested = ingest_live(&controller, &tig).await;
+    assert!(
+        ingested.gaps_recorded.is_empty(),
+        "{:?}",
+        ingested.gaps_recorded
+    );
+
+    // And the next consecutive block is not a gap.
+    tig.advance(1);
+    let ingested = ingest_live(&controller, &tig).await;
+    assert!(ingested.gaps_recorded.is_empty());
+    assert_eq!(
+        open_block_gaps(&controller, NET).await.unwrap(),
+        vec![first + 1],
+        "the earlier gap stays open until an operator resolves it"
+    );
+}
+
+/// A store that knows a last height and cannot persist.
+struct DeadStore {
+    last: Option<u64>,
+}
+
+impl BlockSnapshotStore for DeadStore {
+    async fn persist(&self, _: Network, _: Snapshot) -> Result<PersistedSnapshot, StoreError> {
+        Err(StoreError::Unavailable("the store is down".to_string()))
+    }
+
+    async fn load_usable_record(
+        &self,
+        _: Network,
+        _: &str,
+    ) -> Result<Option<SnapshotRecord>, StoreError> {
+        Ok(None)
+    }
+
+    async fn last_local_height(&self, _: Network) -> Result<Option<u64>, StoreError> {
+        Ok(self.last)
+    }
+}
+
+#[tokio::test]
+async fn the_gap_is_recorded_before_the_snapshot_that_revealed_it() {
+    // "Last local height" is read from the persisted snapshots, so persist
+    // first and crash, and the next run measures from the new height with
+    // nothing recorded for the ones between. Gap first, and there is no
+    // order in which the loss goes unrecorded. Staged with a store that
+    // fails to persist: the gap must be on record anyway.
+    let Some(db) = TempDb::migrated("tick_gap_order").await else {
+        return;
+    };
+    let controller = db.pool_as("pool_controller").await;
+    let tig = fake_tig().await;
+    let observed = i64::try_from(tig.tip().await.1).unwrap();
+    let store = DeadStore {
+        last: Some(u64::try_from(observed - 3).unwrap()),
+    };
+
+    let err = ingest(&controller, &store, &tig.source(), NET, 3)
+        .await
+        .expect_err("the store refuses");
+    assert!(matches!(err, IngestError::Store(_)), "{err}");
+    assert_eq!(
+        open_block_gaps(&controller, NET).await.unwrap(),
+        vec![observed - 2, observed - 1],
+        "the gap was recorded even though the snapshot was not"
+    );
+}
+
+/// A source that cannot make one read.
+struct Blindfolded<'a> {
+    inner: &'a TigSnapshotSource,
+    missing: AnchoredRead,
+}
+
+impl SnapshotSource for Blindfolded<'_> {
+    async fn get_block(&self) -> Result<Value, SnapshotError> {
+        self.inner.get_block().await
+    }
+
+    async fn get_anchored(
+        &self,
+        read: AnchoredRead,
+        block_id: &str,
+    ) -> Result<Value, SnapshotError> {
+        if read == self.missing {
+            return Err(SnapshotError::Unavailable {
+                endpoint: read.endpoint().to_string(),
+                reason: "staged outage".to_string(),
+            });
+        }
+        self.inner.get_anchored(read, block_id).await
+    }
+
+    async fn get_tracks(&self, challenge_id: &str, block_id: &str) -> Result<Value, SnapshotError> {
+        self.inner.get_tracks(challenge_id, block_id).await
+    }
+}
+
+#[tokio::test]
+async fn a_snapshot_missing_a_read_is_persisted_but_reconciles_nothing() {
+    // C5 for the reconciler: a read that was not made is not evidence of
+    // absence. Staged at the block that would have confirmed w1 and expired
+    // w2 — with get-benchmarks unavailable, the pass must do neither.
+    let Some(db) = TempDb::migrated("tick_blind").await else {
+        return;
+    };
+    let controller = db.pool_as("pool_controller").await;
+    let gateway = db.pool_as("pool_gateway").await;
+    let tig = fake_tig().await;
+    let (anchor, height) = persist_usable_anchor(&controller, &tig).await;
+    let a = admit_precommit(&controller, &decision("w1", &anchor, height), 4)
+        .await
+        .unwrap();
+    send_precommit(&tig, &gateway, &a.intent.intent_id, &anchor).await;
+    admit_precommit(&controller, &decision("w2", &anchor, height), 4)
+        .await
+        .unwrap();
+    let g = guardrails();
+    tig.advance(g.workflow_expiry_age_blocks);
+
+    let store = PostgresSnapshotStore::new(controller.clone());
+    let live = tig.source();
+    let blind = Blindfolded {
+        inner: &live,
+        missing: AnchoredRead::Benchmarks,
+    };
+    let ingested = ingest(&controller, &store, &blind, NET, 3)
+        .await
+        .expect("an incomplete snapshot is still accepted and persisted");
+    assert!(!ingested.snapshot.record().reads_complete);
+
+    let outcome = reconcile_block(&controller, NET, PLAYER, &g, &ingested.snapshot)
+        .await
+        .unwrap();
+    assert!(
+        matches!(
+            outcome,
+            Outcome::Blind {
+                reason: NotUsable::ReadsIncomplete,
+                ..
+            }
+        ),
+        "{outcome:?}"
+    );
+    assert_eq!(state(&controller, "w1").await, WorkflowState::Decided);
+    assert_eq!(state(&controller, "w2").await, WorkflowState::Decided);
+
+    // The same block, fully read: now everything the block carries happens,
+    // in the pass's order. w1 is bound first — TIG started its benchmark at
+    // the anchor, so at this height it is exactly at the guardrail too — and
+    // then expired, carrying the benchmark_id the binding gave it. Expiry
+    // before binding would have left an expired row with no id, and §10's
+    // tuple search would later find a confirmed precommit with no owner.
+    let ingested = ingest_live(&controller, &tig).await;
+    let Outcome::Reconciled(report) =
+        reconcile_block(&controller, NET, PLAYER, &g, &ingested.snapshot)
+            .await
+            .unwrap()
+    else {
+        panic!("a complete snapshot must be reconciled");
+    };
+    let [
+        Bound::Confirmed {
+            workflow_id,
+            benchmark_id,
+        },
+    ] = report.bind.outcomes.as_slice()
+    else {
+        panic!("{:?}", report.bind);
+    };
+    assert_eq!(workflow_id, "w1");
+    assert_eq!(report.expired, vec!["w1".to_string(), "w2".to_string()]);
+    let w1 = workflow::find(&controller, NET, "w1")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(w1.state, WorkflowState::Expired);
+    assert_eq!(w1.benchmark_id.as_deref(), Some(benchmark_id.as_str()));
+    assert_eq!(state(&controller, "w2").await, WorkflowState::Expired);
+}
+
+// ---- What blocks claiming, with no database ---------------------------------
+
+fn report_with(
+    bind: Vec<Bound>,
+    attention: Vec<pool_workflow::NeedsAttention>,
+    expiry_failed: Vec<(String, String)>,
+) -> pool_controller::reconciler::BlockReport {
+    pool_controller::reconciler::BlockReport {
+        block_id: "block_1".to_string(),
+        height: 1,
+        bind: pool_controller::bind::BindReport { outcomes: bind },
+        restart: pool_workflow::RestartReport {
+            advanced: Vec::new(),
+            unchanged: Vec::new(),
+            needs_attention: attention,
+        },
+        expired: Vec::new(),
+        expiry_withheld: Vec::new(),
+        expiry_failed,
+    }
+}
+
+#[test]
+fn a_precommit_the_pool_cannot_bind_blocks_claiming() {
+    // Several confirmed candidates for one decision is the duplicate §10
+    // exists to prevent; claiming more work on top of it compounds what an
+    // operator has to untangle. A workflow the pass could not evaluate is
+    // one whose state the pool does not have.
+    for outcome in [
+        Bound::StopForOperator {
+            workflow_id: "w1".to_string(),
+            reason: "2 candidates".to_string(),
+        },
+        Bound::Failed {
+            workflow_id: "w1".to_string(),
+            error: "db".to_string(),
+        },
+    ] {
+        let report = report_with(vec![outcome.clone()], Vec::new(), Vec::new());
+        assert!(report.blocks_claiming(), "{outcome:?}");
+        assert_eq!(report.needs_attention().len(), 1, "{outcome:?}");
+    }
+}
+
+#[test]
+fn an_unconfirmed_or_absent_precommit_does_not_block_claiming() {
+    // Each names a workflow whose state is known and merely unconfirmed.
+    for outcome in [
+        Bound::Pending {
+            workflow_id: "w1".to_string(),
+        },
+        Bound::NotFound {
+            workflow_id: "w1".to_string(),
+        },
+        Bound::Confirmed {
+            workflow_id: "w1".to_string(),
+            benchmark_id: "b1".to_string(),
+        },
+    ] {
+        let report = report_with(vec![outcome.clone()], Vec::new(), Vec::new());
+        assert!(!report.blocks_claiming(), "{outcome:?}");
+        assert!(report.needs_attention().is_empty(), "{outcome:?}");
+    }
+}
+
+#[test]
+fn a_failed_expiry_sweep_blocks_claiming() {
+    let report = report_with(
+        Vec::new(),
+        Vec::new(),
+        vec![("w1".to_string(), "db".to_string())],
+    );
+    assert!(report.blocks_claiming());
+    assert_eq!(report.needs_attention().len(), 1);
+}
+
+#[test]
+fn the_restart_pass_keeps_its_own_say() {
+    // The restart report decides which of its buckets block; this pass
+    // relays that rather than re-deciding it, and lists every bucket for
+    // the operator whether or not it blocks.
+    let blocking = report_with(
+        Vec::new(),
+        vec![pool_workflow::NeedsAttention::Failed {
+            workflow_id: "w1".to_string(),
+            error: "db".to_string(),
+        }],
+        Vec::new(),
+    );
+    assert!(blocking.blocks_claiming());
+
+    let informational = report_with(
+        Vec::new(),
+        vec![pool_workflow::NeedsAttention::OutsideWindow {
+            workflow_id: "w1".to_string(),
+            benchmark_id: "b1".to_string(),
+        }],
+        Vec::new(),
+    );
+    assert!(!informational.blocks_claiming());
+    assert_eq!(informational.needs_attention().len(), 1);
+}

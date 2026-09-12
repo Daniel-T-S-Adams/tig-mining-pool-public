@@ -78,6 +78,25 @@ impl PersistedSnapshot {
         }
         Ok(&self.snapshot)
     }
+
+    /// The snapshot as evidence for advancing local state, which needs less
+    /// than a decision does.
+    ///
+    /// §9 gates the *orchestrator* — the part that chooses work — on a
+    /// complete snapshot and the active-benchmark cache, because the cache
+    /// holds the denominators a decision divides by. §10's reconciliation
+    /// chooses nothing: it consumes §7's confirmed reads, all of which are in
+    /// `get-benchmarks` and the block, and a workflow whose confirmation is
+    /// already visible should not wait on a cache that has nothing to say
+    /// about it. What it must still refuse is a snapshot with reads missing,
+    /// since absence of a record is what licenses acting as though nothing
+    /// happened, and a read that was not made is not an absence.
+    pub fn for_reconciliation(&self) -> Result<&Snapshot, NotUsable> {
+        if !self.snapshot.reads_complete {
+            return Err(NotUsable::ReadsIncomplete);
+        }
+        Ok(&self.snapshot)
+    }
 }
 
 /// Why a persisted snapshot cannot be used for a decision.
@@ -135,6 +154,27 @@ pub trait BlockSnapshotStore {
         network: Network,
         block_id: &str,
     ) -> impl Future<Output = Result<Option<SnapshotRecord>, StoreError>> + Send;
+
+    /// §10's "last local height": the highest block this network has a
+    /// **complete** assembly for, or `None` before the first.
+    ///
+    /// Completeness is the whole of the test, and the reason is what the gap
+    /// record is for. §10 forbids inventing "per-block qualifier attribution
+    /// or payouts" for a gap, and that attribution is made from the anchored
+    /// reads — OPoW above all. A height whose reads never all succeeded has
+    /// no more of that data than a height the pool never polled, and none of
+    /// it can be fetched later, because the public API serves no historical
+    /// snapshot. Counting such a height as observed would leave the loss
+    /// unrecorded and §10.3's alert silent.
+    ///
+    /// The active-benchmark cache is deliberately not part of this. It is
+    /// keyed by `benchmark_id` and warms across blocks (§5.2), so a block
+    /// whose reads all succeeded is fully observed whether or not the cache
+    /// had caught up.
+    fn last_local_height(
+        &self,
+        network: Network,
+    ) -> impl Future<Output = Result<Option<u64>, StoreError>> + Send;
 }
 
 /// SHA-256 over the assembled snapshot, binding every field an accepted

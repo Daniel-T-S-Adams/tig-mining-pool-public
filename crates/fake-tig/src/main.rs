@@ -6,7 +6,8 @@ use fake_tig::{Config, build_world, router};
 fn usage() -> ! {
     eprintln!(
         "usage: fake-tig --fixture <dir> [--port <u16, default 0>] \
-         [--api-key <key>] [--confirm-delay <blocks, default 1>]"
+         [--api-key <key>] [--confirm-delay <blocks, default 1>] \
+         [--player <id: serve the fixture's pool player as this id>]"
     );
     std::process::exit(2);
 }
@@ -17,6 +18,7 @@ fn main() {
     let mut port: u16 = 0;
     let mut api_key: Option<String> = None;
     let mut confirm_delay: u32 = 1;
+    let mut player: Option<String> = None;
     while let Some(flag) = args.next() {
         let Some(value) = args.next() else { usage() };
         match flag.as_str() {
@@ -30,6 +32,7 @@ fn main() {
                 Ok(d) => confirm_delay = d,
                 Err(_) => usage(),
             },
+            "--player" => player = Some(value),
             _ => usage(),
         }
     }
@@ -40,6 +43,7 @@ fn main() {
         cfg.api_key = key;
     }
     cfg.confirm_delay = confirm_delay;
+    cfg.pool_player_id = player;
 
     let world = match build_world(cfg) {
         Ok(world) => world,

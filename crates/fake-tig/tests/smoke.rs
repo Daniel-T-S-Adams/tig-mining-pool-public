@@ -783,3 +783,71 @@ async fn a_fraudulent_benchmark_does_not_then_verify() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
+
+#[tokio::test]
+async fn the_pool_player_can_be_served_under_a_real_address() {
+    // A production binary's configuration refuses the fixture's placeholder
+    // id, so a local run against this server needs the fixture served as
+    // though its pool player were the configured address — everywhere the
+    // fixture names it, or the server would describe one player two ways.
+    const REAL: &str = "0x2935a721068da756b28cba896efdb64e8909dfae";
+    let mut cfg = Config::new(fixture_dir());
+    cfg.pool_player_id = Some(REAL.to_owned());
+    let app = router(build_world(cfg).expect("fixture loads"));
+
+    let (_, block) = call(&app, "GET", "/get-block?include_data=true", None, None).await;
+    let block_id = block["block"]["id"].as_str().unwrap().to_owned();
+
+    let (status, player) = call(
+        &app,
+        "GET",
+        &format!("/get-player-data?player_id={REAL}&block_id={block_id}"),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{player}");
+    assert_eq!(player["player"]["id"], json!(REAL));
+
+    let (status, opow) = call(
+        &app,
+        "GET",
+        &format!("/get-opow?block_id={block_id}"),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{opow}");
+    assert_eq!(opow["opow"]["player_id"], json!(REAL));
+    assert!(
+        opow["opow"]["block_data"]["coinbase"].get(REAL).is_some(),
+        "map keys are rewritten too: {}",
+        opow["opow"]["block_data"]["coinbase"]
+    );
+
+    let (status, benchmarks) = call(
+        &app,
+        "GET",
+        &format!("/get-benchmarks?player_id={REAL}&block_id={block_id}"),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{benchmarks}");
+
+    // And the placeholder is gone: the server knows one player.
+    let (status, _) = call(
+        &app,
+        "GET",
+        &format!("/get-benchmarks?player_id=0xp00l00000000000000000000000000000000000&block_id={block_id}"),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let text = serde_json::to_string(&block).unwrap();
+    assert!(
+        !text.contains("0xp00l"),
+        "the block still names the placeholder"
+    );
+}

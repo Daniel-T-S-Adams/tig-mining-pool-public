@@ -489,6 +489,16 @@ different snapshot are a refresh conflict, not partial success. The
 orchestrator does no work until a complete snapshot and required active cache
 are available.
 
+That gate binds the **decision and payout path** — step 7's "a decision or
+payout derived from them" — and not §10's reconciliation. Reconciliation
+consumes §7's confirmed reads and divides by nothing, so the
+active-benchmark cache has no bearing on it, and requiring the cache there
+would leave a confirmation the pool can already see unable to reach its
+workflow for as long as a warm-up takes. What reconciliation does still
+require is a snapshot whose reads all succeeded: a read that was not made is
+not evidence of absence, and absence is what would license expiring a
+workflow whose confirmation the missing read was carrying.
+
 Within one block, each endpoint response is cached by its complete request key.
 No component may independently refetch and substitute one field into an
 already accepted snapshot.
@@ -505,6 +515,11 @@ After restart, the controller:
 6. verifies accepted artifact availability before any benchmark or proof retry;
    and
 7. reconciles a write before retrying it.
+
+The same pass runs on every accepted block, not only after a restart. A
+restart is when local state is most likely to lag TIG, but the evidence the
+pass consumes is the same on every block, and a controller that reconciled
+only on restart would advance nothing while it stayed up.
 
 For benchmark and proof writes, `benchmark_id` makes reconciliation direct. A
 lost precommit HTTP response is harder because the client may not know the

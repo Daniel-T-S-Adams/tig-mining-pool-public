@@ -1487,18 +1487,23 @@ name = "pool-controller"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "clap",
  "fake-tig",
  "http-body-util",
  "pool-config",
  "pool-controller",
  "pool-domain",
+ "pool-snapshot",
+ "pool-telemetry",
  "pool-test-support",
  "pool-workflow",
  "serde_json",
  "sqlx",
  "thiserror",
+ "tig-client",
  "tokio",
  "tower",
+ "tracing",
 ]
 
 [[package]]

@@ -37,6 +37,16 @@ pub struct Config {
     pub api_key: String,
     /// Blocks between a write being accepted and appearing as confirmed.
     pub confirm_delay: u32,
+    /// Serve the fixture as though its pool player had this id.
+    ///
+    /// The fixture's pool player is a deliberately unreal placeholder, and a
+    /// production binary's configuration refuses anything but a real
+    /// address. Rewriting the id when the fixture loads lets one binary run
+    /// against this server with the configuration it would run against
+    /// testnet with, while every test keeps the placeholder it was written
+    /// against. Every occurrence is rewritten — block, OPoW, player data —
+    /// so the server cannot describe one player two ways.
+    pub pool_player_id: Option<String>,
 }
 
 impl Config {
@@ -45,6 +55,7 @@ impl Config {
             fixture_dir: fixture_dir.into(),
             api_key: DEFAULT_API_KEY.to_owned(),
             confirm_delay: 1,
+            pool_player_id: None,
         }
     }
 }
@@ -153,6 +164,25 @@ pub struct World {
 
 pub type SharedWorld = Arc<Mutex<World>>;
 
+/// Replace every string value equal to `from` — and every object key equal
+/// to it, since the fixtures key coinbase maps by player id — with `to`.
+fn rewrite_strings(value: &mut Value, from: &str, to: &str) {
+    match value {
+        Value::String(s) if s == from => *s = to.to_owned(),
+        Value::Array(items) => items.iter_mut().for_each(|v| rewrite_strings(v, from, to)),
+        Value::Object(map) => {
+            let renamed: Vec<String> = map.keys().filter(|k| *k == from).cloned().collect();
+            for key in renamed {
+                if let Some(v) = map.remove(&key) {
+                    map.insert(to.to_owned(), v);
+                }
+            }
+            map.values_mut().for_each(|v| rewrite_strings(v, from, to));
+        }
+        _ => {}
+    }
+}
+
 fn read_fixture_file(dir: &Path, name: &str) -> Result<Value, String> {
     let path = dir.join(name);
     let bytes =
@@ -176,7 +206,7 @@ impl World {
     pub fn from_fixture_dir(cfg: Config) -> Result<World, String> {
         let dir = cfg.fixture_dir.clone();
         let block_template = read_fixture_file(&dir, "get-block.json")?;
-        let fixture = Fixture {
+        let mut fixture = Fixture {
             challenges: read_fixture_file(&dir, "get-challenges.json")?,
             algorithms: read_fixture_file(&dir, "get-algorithms.json")?,
             opow: read_fixture_file(&dir, "get-opow.json")?,
@@ -184,6 +214,25 @@ impl World {
             tracks: read_fixture_file(&dir, "get-tracks-data.json")?,
             block_template,
         };
+        if let Some(wanted) = cfg.pool_player_id.as_deref() {
+            let placeholder = fixture
+                .player
+                .get("player")
+                .and_then(|p| p.get("id"))
+                .and_then(Value::as_str)
+                .ok_or("fixture get-player-data.json names no player.id")?
+                .to_owned();
+            for doc in [
+                &mut fixture.block_template,
+                &mut fixture.opow,
+                &mut fixture.player,
+                &mut fixture.challenges,
+                &mut fixture.algorithms,
+                &mut fixture.tracks,
+            ] {
+                rewrite_strings(doc, &placeholder, wanted);
+            }
+        }
         let height = u32::try_from(get_u64(
             &fixture.block_template,
             &["block", "details", "height"],

@@ -10,6 +10,9 @@
 //! gate in [`stub`].
 
 pub mod bind;
+pub mod ingest;
+pub mod reconciler;
+pub mod service;
 pub mod window;
 
 #[cfg(feature = "stub-acceptance")]

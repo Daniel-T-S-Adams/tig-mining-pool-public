@@ -433,13 +433,38 @@ pub async fn in_state(
     network: Network,
     state: WorkflowState,
 ) -> Result<Vec<Workflow>, WorkflowError> {
+    in_states(pool, network, &[state]).await
+}
+
+/// Every workflow §8's guardrail applies to: the states
+/// [`WorkflowState::is_unfinished_local_work`] names.
+///
+/// The controller's expiry sweep reads this. Which states qualify is the
+/// state's to say, not a list repeated here — `expire_if_due` re-checks the
+/// same predicate on the row it locks, so a workflow that finished between
+/// this read and the sweep is left alone rather than expired.
+pub async fn unfinished(pool: &PgPool, network: Network) -> Result<Vec<Workflow>, WorkflowError> {
+    let states: Vec<WorkflowState> = WorkflowState::ALL
+        .iter()
+        .copied()
+        .filter(|state| state.is_unfinished_local_work())
+        .collect();
+    in_states(pool, network, &states).await
+}
+
+async fn in_states(
+    pool: &PgPool,
+    network: Network,
+    states: &[WorkflowState],
+) -> Result<Vec<Workflow>, WorkflowError> {
+    let names: Vec<&str> = states.iter().map(|state| state.as_str()).collect();
     let ids: Vec<String> = sqlx::query_scalar(
         "SELECT workflow_id FROM pool.workflow
-         WHERE network = $1 AND state = $2
+         WHERE network = $1 AND state = ANY($2)
          ORDER BY workflow_id",
     )
     .bind(network.as_str())
-    .bind(state.as_str())
+    .bind(&names)
     .fetch_all(pool)
     .await
     .map_err(unavailable)?;

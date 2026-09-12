@@ -7,6 +7,12 @@
 # Usage:
 #   ./scripts/dev-db.sh
 #   cargo run -p pool-admin -- --config config/pool-admin.dev.toml migrate
+#   cargo run -p fake-tig -- --fixture fixtures/tig/v1 --port 8080 \
+#       --player 0x2935a721068da756b28cba896efdb64e8909dfae
+#   cargo run -p pool-controller -- --config config/pool-controller.dev.toml run
+#
+# `--player` serves the fixture as though its pool player were the address
+# below: the fixture's own is a placeholder that `[tig].player_id` refuses.
 
 network = "testnet"
 

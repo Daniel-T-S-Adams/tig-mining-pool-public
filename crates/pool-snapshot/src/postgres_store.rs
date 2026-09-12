@@ -163,4 +163,27 @@ impl BlockSnapshotStore for PostgresSnapshotStore {
     ) -> Result<Option<SnapshotRecord>, StoreError> {
         fetch_usable(&self.pool, network, block_id).await
     }
+
+    async fn last_local_height(&self, network: Network) -> Result<Option<u64>, StoreError> {
+        // `reads_complete` only: see the trait's doc. An incomplete assembly
+        // records that the block was reached, which is worth keeping, but not
+        // that its per-block data was captured — and the gap row exists for
+        // the second.
+        let height: Option<i64> = sqlx::query_scalar(
+            "SELECT max(height) FROM pool.block_snapshot
+              WHERE network = $1 AND reads_complete",
+        )
+        .bind(network.as_str())
+        .fetch_one(&self.pool)
+        .await
+        .map_err(unavailable)?;
+        height
+            .map(|h| {
+                u64::try_from(h).map_err(|_| StoreError::Corrupt {
+                    block_id: String::new(),
+                    reason: format!("stored height {h} is negative"),
+                })
+            })
+            .transpose()
+    }
 }

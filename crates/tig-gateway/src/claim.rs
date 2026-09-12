@@ -321,3 +321,110 @@ fn reconciled(
         },
     }
 }
+
+/// What a benchmark commitment intent is owed (`tig_integration.md` §6.2).
+///
+/// A separate judgement from [`decide`], because §10 makes the two kinds
+/// reconcile differently and pretending otherwise would be the bug: "For
+/// benchmark and proof writes, `benchmark_id` makes reconciliation direct. A
+/// lost precommit HTTP response is harder because the client may not know the
+/// generated ID." A commitment already names its benchmark in the request, so
+/// there is no tuple search, no multi-candidate stop, and nothing for the
+/// response to teach the pool.
+///
+/// It is also not in the precommit lane. §10's single unresolved request is
+/// about precommits — the write whose identity is unknown until it answers —
+/// and §11's rule for the rest is narrower: "never send two concurrent writes
+/// for the same benchmark", which is what the intent's own attempts say.
+///
+/// `confirmed_benchmarks` is the set of `benchmark_id`s the pool has read as
+/// confirmed (§7: an entry in `get-benchmarks.benchmarks` with a non-null
+/// `state.block_confirmed`). Membership is the evidence, and its absence is
+/// not evidence of anything.
+pub fn decide_benchmark(
+    intent: &WriteIntent,
+    attempts: &[WriteAttempt],
+    owning: OwningWorkflow,
+    confirmed_benchmarks: &[String],
+) -> ClaimDecision {
+    if intent.write_kind != WriteKind::Benchmark {
+        return ClaimDecision::Skip {
+            reason: SkipReason::NotAPrecommit {
+                kind: intent.write_kind.as_str(),
+            },
+        };
+    }
+    let Some(benchmark_id) = intent.benchmark_id.clone() else {
+        // §7.3 binds a benchmark write's generation to its benchmark, and
+        // `NewIntent` refuses one without it. A row here without it is a
+        // record the pool cannot act on rather than one to guess at.
+        return ClaimDecision::StopForOperator {
+            reason: StopReason::Unreadable {
+                reason: "a benchmark intent with no benchmark_id".to_string(),
+            },
+        };
+    };
+
+    // Settled first: §7.3 makes CONFIRMED and REJECTED terminal, and a
+    // settled intent owes nothing whatever the reads say.
+    if matches!(intent.state, IntentState::Confirmed | IntentState::Rejected) {
+        return ClaimDecision::Skip {
+            reason: SkipReason::AlreadySettled,
+        };
+    }
+
+    // The direct reconciliation §10 promises, and it comes before terminality
+    // for the reason the precommit path's does: a workflow that ended while
+    // its write was in flight still has an unresolved attempt, and only
+    // settling it says what became of the write.
+    if confirmed_benchmarks.contains(&benchmark_id) {
+        return ClaimDecision::AlreadyConfirmed { benchmark_id };
+    }
+
+    // TIG answered and refused. Nothing was created, so there is nothing to
+    // reconcile and nothing to resend — what the workflow is owed is `fail`.
+    if !attempts.is_empty()
+        && attempts
+            .iter()
+            .all(|a| a.outcome == Some(AttemptOutcome::Rejected))
+    {
+        return ClaimDecision::Skip {
+            reason: SkipReason::Refused,
+        };
+    }
+
+    // A write is out and TIG has not confirmed it. §11: never a second
+    // concurrent write for one benchmark, and §7 makes the confirmation a
+    // read rather than a response — so this waits, whatever the response
+    // said. An ACCEPTED attempt waits here just as an unresolved one does:
+    // the commitment exists at TIG or it does not, and only the read says.
+    if attempts
+        .iter()
+        .any(|a| a.is_unresolved() || a.outcome == Some(AttemptOutcome::Accepted))
+    {
+        return ClaimDecision::AwaitConfirmation;
+    }
+
+    // The intent's own record says a write may have reached TIG while no
+    // attempt row says so. §7.3 writes both in one transaction, so one
+    // without the other is a contradiction — and transmitting on the missing
+    // half would turn "may have been sent" into "send again", paying a second
+    // fee for a commitment that may already stand.
+    if intent.state == IntentState::OutcomeUnknown {
+        return ClaimDecision::StopForOperator {
+            reason: StopReason::UnknownOutcomeWithNoAttempt,
+        };
+    }
+
+    // Only now does terminality matter: nothing is in flight, so a workflow
+    // the pool has written off gets no write (issue #86, invariant 14).
+    if owning.is_terminal {
+        return ClaimDecision::Skip {
+            reason: SkipReason::WorkflowEnded {
+                state: owning.state,
+            },
+        };
+    }
+
+    ClaimDecision::Transmit
+}

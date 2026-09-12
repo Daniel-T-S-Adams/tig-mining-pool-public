@@ -14,6 +14,7 @@ use pool_workflow::{AttemptOutcome, IntentState, WriteAttempt, WriteIntent, Writ
 use serde_json::json;
 use tig_gateway::claim::{
     ClaimDecision, OwningWorkflow, SiblingGenerations, SkipReason, StopReason, decide,
+    decide_benchmark,
 };
 use tig_gateway::reconcile::{PrecommitSubmission, TrackSettings};
 
@@ -589,4 +590,182 @@ fn an_accepted_attempt_reconciles_rather_than_reading_as_refused() {
         ClaimDecision::AwaitConfirmation,
         "accepted and not yet confirmed is waited for, not skipped"
     );
+}
+
+// ---- benchmark commitments (§6.2), which reconcile directly -----------------
+
+fn benchmark_intent(state: IntentState) -> WriteIntent {
+    WriteIntent {
+        intent_id: "11111111-1111-1111-1111-111111111111".to_string(),
+        network: Network::Testnet,
+        workflow_id: "w1".to_string(),
+        write_kind: WriteKind::Benchmark,
+        generation: 1,
+        benchmark_id: Some("bench_a".to_string()),
+        payload_digest: [0xab; 32],
+        payload_artifact_id: Some("artifact/w1/commitment".to_string()),
+        state,
+    }
+}
+
+fn live() -> OwningWorkflow {
+    OwningWorkflow {
+        state: "PRECOMMIT_CONFIRMED",
+        is_terminal: false,
+    }
+}
+
+fn ended() -> OwningWorkflow {
+    OwningWorkflow {
+        state: "EXPIRED",
+        is_terminal: true,
+    }
+}
+
+#[test]
+fn an_unsent_commitment_on_a_live_workflow_is_transmitted() {
+    assert_eq!(
+        decide_benchmark(&benchmark_intent(IntentState::Prepared), &[], live(), &[]),
+        ClaimDecision::Transmit
+    );
+}
+
+#[test]
+fn a_confirmed_benchmark_is_reconciled_directly_and_never_resent() {
+    // §10: "For benchmark and proof writes, `benchmark_id` makes
+    // reconciliation direct." No tuple search, because the write named its
+    // benchmark in the request.
+    for attempts in [
+        vec![],
+        vec![attempt(None)],
+        vec![attempt(Some(AttemptOutcome::Ambiguous))],
+        vec![attempt(Some(AttemptOutcome::Accepted))],
+    ] {
+        assert_eq!(
+            decide_benchmark(
+                &benchmark_intent(IntentState::Prepared),
+                &attempts,
+                live(),
+                &["bench_a".to_string()],
+            ),
+            ClaimDecision::AlreadyConfirmed {
+                benchmark_id: "bench_a".to_string()
+            },
+            "{attempts:?}"
+        );
+    }
+}
+
+#[test]
+fn a_write_in_flight_waits_for_the_read_whatever_the_response_said() {
+    // §11 forbids a second concurrent write for one benchmark, and §7 makes
+    // the confirmation a read. An ACCEPTED attempt waits exactly as an
+    // unresolved one does: the commitment stands at TIG or it does not, and
+    // the response is not what says so.
+    for outcome in [
+        None,
+        Some(AttemptOutcome::Ambiguous),
+        Some(AttemptOutcome::Accepted),
+    ] {
+        assert_eq!(
+            decide_benchmark(
+                &benchmark_intent(IntentState::Prepared),
+                &[attempt(outcome)],
+                live(),
+                &[],
+            ),
+            ClaimDecision::AwaitConfirmation,
+            "{outcome:?}"
+        );
+    }
+}
+
+#[test]
+fn a_refused_commitment_is_not_searched_for_and_not_resent() {
+    // TIG answered and refused, so no benchmark was created. What the
+    // workflow is owed is `fail`, not another write.
+    assert_eq!(
+        decide_benchmark(
+            &benchmark_intent(IntentState::Prepared),
+            &[attempt(Some(AttemptOutcome::Rejected))],
+            live(),
+            &[],
+        ),
+        ClaimDecision::Skip {
+            reason: SkipReason::Refused
+        }
+    );
+}
+
+#[test]
+fn reconciliation_comes_before_terminality() {
+    // A workflow that ended while its write was in flight still has an
+    // unresolved attempt, and only settling it says what became of the write.
+    assert_eq!(
+        decide_benchmark(
+            &benchmark_intent(IntentState::Prepared),
+            &[attempt(None)],
+            ended(),
+            &["bench_a".to_string()],
+        ),
+        ClaimDecision::AlreadyConfirmed {
+            benchmark_id: "bench_a".to_string()
+        }
+    );
+    // With nothing in flight, the ended workflow gets no write.
+    assert_eq!(
+        decide_benchmark(&benchmark_intent(IntentState::Prepared), &[], ended(), &[]),
+        ClaimDecision::Skip {
+            reason: SkipReason::WorkflowEnded { state: "EXPIRED" }
+        }
+    );
+}
+
+#[test]
+fn an_unknown_outcome_with_no_attempt_stops_rather_than_sending() {
+    // §7.3 writes both halves in one transaction, so one without the other
+    // is a contradiction — and sending on the missing half pays a second fee
+    // for a commitment that may already stand.
+    assert_eq!(
+        decide_benchmark(
+            &benchmark_intent(IntentState::OutcomeUnknown),
+            &[],
+            live(),
+            &[],
+        ),
+        ClaimDecision::StopForOperator {
+            reason: StopReason::UnknownOutcomeWithNoAttempt
+        }
+    );
+}
+
+#[test]
+fn a_settled_intent_owes_nothing() {
+    for state in [IntentState::Confirmed, IntentState::Rejected] {
+        assert_eq!(
+            decide_benchmark(
+                &benchmark_intent(state),
+                &[],
+                live(),
+                &["bench_a".to_string()]
+            ),
+            ClaimDecision::Skip {
+                reason: SkipReason::AlreadySettled
+            },
+            "{state:?}"
+        );
+    }
+}
+
+#[test]
+fn another_kind_of_intent_is_not_this_paths() {
+    let mut precommit = benchmark_intent(IntentState::Prepared);
+    precommit.write_kind = WriteKind::Precommit;
+    precommit.benchmark_id = None;
+    assert!(matches!(
+        decide_benchmark(&precommit, &[], live(), &[]),
+        ClaimDecision::Skip {
+            reason: SkipReason::NotAPrecommit { .. }
+        }
+    ));
 }

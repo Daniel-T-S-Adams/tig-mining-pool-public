@@ -12,13 +12,16 @@
 use pool_domain::Network;
 use pool_test_support::TempDb;
 use pool_workflow::{
-    CanonicalPayload, NewIntent, PackageAcceptance, PostgresIntentRepository,
+    CanonicalPayload, CommitmentPayload, NewIntent, PackageAcceptance, PostgresIntentRepository,
     TigWriteIntentRepository, WriteKind, record_acceptance, record_canonical_payload,
+    record_commitment_payload,
 };
 
 const NET: Network = Network::Testnet;
 const PAYLOAD: [u8; 32] = [0xab; 32];
 const SAMPLE: [u8; 32] = [0x5c; 32];
+
+const COMMITMENT_ARTIFACT: &str = "artifact/commitment";
 
 fn benchmark_intent(workflow: &str, benchmark: &str) -> NewIntent {
     NewIntent {
@@ -28,7 +31,18 @@ fn benchmark_intent(workflow: &str, benchmark: &str) -> NewIntent {
         generation: 1,
         benchmark_id: Some(benchmark.to_string()),
         payload_digest: PAYLOAD,
-        payload_artifact_id: None,
+        payload_artifact_id: Some(COMMITMENT_ARTIFACT.to_string()),
+    }
+}
+
+fn commitment(workflow: &str, benchmark: &str) -> CommitmentPayload {
+    CommitmentPayload {
+        network: NET,
+        artifact_id: COMMITMENT_ARTIFACT.to_string(),
+        workflow_id: workflow.to_string(),
+        benchmark_id: benchmark.to_string(),
+        payload_digest: PAYLOAD,
+        stub_origin: false,
     }
 }
 
@@ -68,10 +82,14 @@ fn payload(artifact: &str, workflow: &str, benchmark: &str) -> CanonicalPayload 
 
 #[tokio::test]
 async fn a_benchmark_write_cannot_exist_before_durable_acceptance() {
-    // §13 invariant 4, verbatim: "No benchmark commitment intent exists before
-    // durable package acceptance." Refused by the database, so it holds for
-    // every writer rather than for the ones that remembered to check — which
-    // is what makes it an invariant rather than a convention.
+    // §13 invariant 4: no benchmark commitment intent before durable package
+    // acceptance **and** the canonical commitment built from that package.
+    // Refused by the database, so it holds for every writer rather than for
+    // the ones that remembered to check — which is what makes it an invariant
+    // rather than a convention.
+    //
+    // This case walks the acceptance half; `a_benchmark_write_cannot_exist_
+    // before_its_commitment_is_built` walks the other.
     let Some(db) = TempDb::migrated("accept_invariant4").await else {
         return;
     };
@@ -109,11 +127,78 @@ async fn a_benchmark_write_cannot_exist_before_durable_acceptance() {
     record_acceptance(&pool, &acceptance("w1", "bench_a"))
         .await
         .unwrap();
+    record_commitment_payload(&pool, &commitment("w1", "bench_a"))
+        .await
+        .unwrap();
     let intent = repo
         .create(benchmark_intent("w1", "bench_a"))
         .await
-        .expect("the precondition now holds");
+        .expect("both preconditions now hold");
     assert_eq!(intent.write_kind, WriteKind::Benchmark);
+}
+
+#[tokio::test]
+async fn a_benchmark_write_cannot_exist_before_its_commitment_is_built() {
+    // The other half of invariant 4, and the one that is mechanism rather
+    // than policy: §7.3's digest guard has nothing to check the gateway's
+    // bytes against unless the built commitment is on record. Like the
+    // proof branch, all three of artifact, benchmark and digest must line
+    // up — a real payload built for another benchmark, or bytes it does not
+    // contain, satisfies the letter and not the point.
+    let Some(db) = TempDb::migrated("accept_invariant4_payload").await else {
+        return;
+    };
+    let pool = db.pool_as("pool_controller").await;
+    pool_test_support::seed_workflows(&pool, "testnet", &["w1"]).await;
+    let repo = PostgresIntentRepository::new(pool.clone());
+    record_acceptance(&pool, &acceptance("w1", "bench_a"))
+        .await
+        .unwrap();
+
+    let error = repo
+        .create(benchmark_intent("w1", "bench_a"))
+        .await
+        .expect_err("acceptance alone is half a precondition");
+    assert!(
+        format!("{error:?}").contains("no commitment payload"),
+        "the refusal should name what is missing: {error:?}"
+    );
+
+    // Naming no payload at all is refused before the lookup.
+    repo.create(NewIntent {
+        payload_artifact_id: None,
+        ..benchmark_intent("w1", "bench_a")
+    })
+    .await
+    .expect_err("a commitment that names no built payload");
+
+    // Built for another benchmark: not this benchmark's evidence.
+    record_commitment_payload(
+        &pool,
+        &CommitmentPayload {
+            artifact_id: "artifact/other".to_string(),
+            ..commitment("w1", "bench_other")
+        },
+    )
+    .await
+    .unwrap();
+    repo.create(benchmark_intent("w1", "bench_a"))
+        .await
+        .expect_err("another benchmark's commitment is not this one's");
+
+    // The right benchmark, the wrong bytes.
+    record_commitment_payload(
+        &pool,
+        &CommitmentPayload {
+            payload_digest: [0xcd; 32],
+            ..commitment("w1", "bench_a")
+        },
+    )
+    .await
+    .unwrap();
+    repo.create(benchmark_intent("w1", "bench_a"))
+        .await
+        .expect_err("the intent transmits bytes the payload does not contain");
 }
 
 #[tokio::test]

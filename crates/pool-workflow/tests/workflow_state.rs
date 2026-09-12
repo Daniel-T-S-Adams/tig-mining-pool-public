@@ -996,13 +996,24 @@ async fn an_unsettled_benchmark_write_holds_the_deadline_off_too() {
     let started = w.block_started.unwrap();
     let long_past = started + i64::from(guardrails.workflow_expiry_age_blocks) + 99;
 
-    // §13 invariant 4: a benchmark write needs its acceptance recorded.
+    // §13 invariant 4: a benchmark write needs its acceptance recorded and
+    // its commitment built.
     pool_test_support::seed_acceptances(&pool, "testnet", &[("w1", "bench_a")]).await;
+    pool_test_support::seed_commitment_payload(
+        &pool,
+        "testnet",
+        "artifact/w1/commitment",
+        "w1",
+        "bench_a",
+        [0xab; 32],
+    )
+    .await;
     let intent_id: String = sqlx::query_scalar(
         "INSERT INTO pool.tig_write_intent
-             (network, workflow_id, write_kind, generation, payload_digest, benchmark_id)
+             (network, workflow_id, write_kind, generation, payload_digest, benchmark_id,
+              payload_artifact_id)
          VALUES ('testnet', 'w1', 'benchmark', 1,
-                 decode(repeat('ab', 32), 'hex'), 'bench_a')
+                 decode(repeat('ab', 32), 'hex'), 'bench_a', 'artifact/w1/commitment')
          RETURNING intent_id::text",
     )
     .fetch_one(&pool)

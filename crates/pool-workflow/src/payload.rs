@@ -1,4 +1,4 @@
-//! The §6.1 precommit payload: one definition, both sides render it.
+//! The TIG write payloads: one definition, both sides render them.
 //!
 //! The controller computes an intent's `payload_digest` at admission and the
 //! gateway must transmit the exact bytes that digest was taken over — `claim`
@@ -155,6 +155,10 @@ pub enum PayloadError {
     },
     #[error("track_settings is not an object")]
     NotAnObject,
+    /// A commitment body does not match the precommit TIG confirmed
+    /// (`tig_integration.md` §6.2).
+    #[error("the commitment does not match the confirmed precommit: {0}")]
+    Commitment(String),
 }
 
 impl PrecommitSubmission {
@@ -221,4 +225,121 @@ impl PrecommitSubmission {
             track_settings,
         })
     }
+}
+
+/// What the pool commits to for one benchmark (`tig_integration.md` §6.2).
+///
+/// Two shapes, and the type keeps them apart rather than leaving a caller to
+/// remember which fields go with which. §6.2: a non-stopped commitment
+/// carries a Merkle root and exactly `precommit.details.num_nonces` quality
+/// entries; an explicit stopped submission sets `stopped` and makes **both**
+/// other fields null. A stopped submission carrying a root, or a non-stopped
+/// one missing it, is a body TIG refuses — and refuses after the fee is paid
+/// and the lane is occupied.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BenchmarkSubmission {
+    /// The member produced solutions: the ordered quality vector and the root
+    /// built over them.
+    Committed {
+        benchmark_id: String,
+        merkle_root: String,
+        /// One entry per nonce, in nonce order. Signed: §6.2 says signed
+        /// integers, and a challenge's quality may be negative.
+        solution_quality: Vec<i64>,
+    },
+    /// No bundle passed, so there is nothing to commit and no proof follows
+    /// (§7: a stopped benchmark reaches no proof).
+    Stopped { benchmark_id: String },
+}
+
+impl BenchmarkSubmission {
+    pub fn benchmark_id(&self) -> &str {
+        match self {
+            BenchmarkSubmission::Committed { benchmark_id, .. }
+            | BenchmarkSubmission::Stopped { benchmark_id } => benchmark_id,
+        }
+    }
+
+    /// Whether this is §6.2's explicit stopped submission.
+    pub fn is_stopped(&self) -> bool {
+        matches!(self, BenchmarkSubmission::Stopped { .. })
+    }
+}
+
+/// §6.2's body.
+///
+/// `solution_quality` entries leave as JSON numbers, not strings: §4 requires
+/// lossless numeric handling on this write, and the quality vector is what
+/// §7's per-bundle averages — and therefore the pool's whole qualifier
+/// attribution — are computed from upstream.
+pub fn benchmark_body(submission: &BenchmarkSubmission) -> Value {
+    match submission {
+        BenchmarkSubmission::Committed {
+            benchmark_id,
+            merkle_root,
+            solution_quality,
+        } => json!({
+            "benchmark_id": benchmark_id,
+            "stopped": false,
+            "merkle_root": merkle_root,
+            "solution_quality": solution_quality,
+        }),
+        BenchmarkSubmission::Stopped { benchmark_id } => json!({
+            "benchmark_id": benchmark_id,
+            "stopped": true,
+            "merkle_root": Value::Null,
+            "solution_quality": Value::Null,
+        }),
+    }
+}
+
+/// The §7.3 `payload_digest` of a benchmark commitment.
+///
+/// Same contract as [`precommit_digest`]: taken over the exact bytes the
+/// gateway puts on the socket, so the recorded payload and the transmitted
+/// one cannot diverge.
+pub fn benchmark_digest(submission: &BenchmarkSubmission) -> [u8; 32] {
+    Sha256::digest(benchmark_body(submission).to_string()).into()
+}
+
+/// Whether a commitment is well-formed for the precommit TIG confirmed.
+///
+/// §6.2 fixes the length of `solution_quality` at the confirmed
+/// `details.num_nonces`, and a wrong length is a body TIG refuses after the
+/// fee is paid. Checked where the body is built rather than trusted from the
+/// caller, because the caller that gets it wrong is the artifact worker and
+/// the cost lands on the pool.
+pub fn commitment_matches_confirmed(
+    submission: &BenchmarkSubmission,
+    confirmed_num_nonces: u64,
+) -> Result<(), PayloadError> {
+    let BenchmarkSubmission::Committed {
+        solution_quality,
+        merkle_root,
+        ..
+    } = submission
+    else {
+        // A stopped submission commits nothing, so there is no length to
+        // agree with.
+        return Ok(());
+    };
+    let found = u64::try_from(solution_quality.len()).unwrap_or(u64::MAX);
+    if found != confirmed_num_nonces {
+        return Err(PayloadError::Commitment(format!(
+            "solution_quality has {found} entries; the confirmed precommit says \
+             num_nonces is {confirmed_num_nonces}"
+        )));
+    }
+    // §6.2: 64 lowercase hex characters. A root of another shape is refused
+    // for the same reason as a wrong length.
+    if merkle_root.len() != 64
+        || !merkle_root
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        return Err(PayloadError::Commitment(
+            "merkle_root is not 64 lowercase hex characters".to_string(),
+        ));
+    }
+    Ok(())
 }

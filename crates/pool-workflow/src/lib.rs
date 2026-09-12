@@ -17,8 +17,9 @@ pub mod restart;
 pub mod workflow;
 
 pub use acceptance::{
-    AcceptanceError, CanonicalPayload, PackageAcceptance, record_acceptance,
-    record_canonical_payload,
+    AcceptanceError, CanonicalPayload, CommitmentPayload, PackageAcceptance,
+    benchmark_preconditions_are_stubbed, record_acceptance, record_canonical_payload,
+    record_commitment_payload,
 };
 pub use attempt::{
     AttemptError, AttemptOutcome, PostgresAttemptLedger, WriteAttempt, WriteAttemptLedger,
@@ -35,7 +36,8 @@ pub use intent::{
 };
 pub use lease::{Lease, LeaseError, LeaseKind};
 pub use payload::{
-    DecisionPayloadInputs, PayloadError, PrecommitSubmission, TrackSettings, precommit_body,
+    BenchmarkSubmission, DecisionPayloadInputs, PayloadError, PrecommitSubmission, TrackSettings,
+    benchmark_body, benchmark_digest, commitment_matches_confirmed, precommit_body,
     precommit_digest,
 };
 pub use reconcile::{ReconcileError, Reconciliation, reconcile_precommit};

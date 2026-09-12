@@ -19,10 +19,14 @@ fn intent(workflow: &str, kind: WriteKind, benchmark: Option<&str>) -> NewIntent
         generation: 1,
         benchmark_id: benchmark.map(str::to_string),
         payload_digest: [0xab; 32],
-        // §13 invariant 5: a proof write names the canonical payload it sends.
-        // `seed_preconditions` records the matching row.
-        payload_artifact_id: (kind == WriteKind::Proof)
-            .then(|| format!("artifact/{workflow}/proof")),
+        // §13 invariants 4 and 5: a benchmark and a proof write each name the
+        // built payload they send. `seed_preconditions` records the matching
+        // row.
+        payload_artifact_id: match kind {
+            WriteKind::Benchmark => Some(format!("artifact/{workflow}/commitment")),
+            WriteKind::Proof => Some(format!("artifact/{workflow}/proof")),
+            WriteKind::Precommit => None,
+        },
     }
 }
 
@@ -41,6 +45,17 @@ async fn seed_preconditions(pool: &sqlx::PgPool, new: &NewIntent) {
                 pool,
                 "testnet",
                 &[(new.workflow_id.as_str(), benchmark_id)],
+            )
+            .await;
+            pool_test_support::seed_commitment_payload(
+                pool,
+                "testnet",
+                new.payload_artifact_id
+                    .as_deref()
+                    .expect("a commitment names one"),
+                &new.workflow_id,
+                benchmark_id,
+                new.payload_digest,
             )
             .await;
         }

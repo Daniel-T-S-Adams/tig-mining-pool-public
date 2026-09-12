@@ -833,7 +833,13 @@ what prevent silent duplication.
    manufacture them.
 3. The controller remains responsible for every protocol deadline and proof
    outcome after durable package acceptance.
-4. No benchmark commitment intent exists before durable package acceptance.
+4. No benchmark commitment intent exists before durable package acceptance
+   **and** the canonical commitment payload built from that package. The
+   second half is what makes §7.3's payload digest checkable: the gateway
+   must be able to tell that the bytes it is about to send are the ones the
+   intent recorded, and a commitment's bytes are built from the package
+   rather than derivable from the decision, so with nothing recording that
+   construction the digest guards a value nobody can reproduce.
 5. No proof intent exists before a canonical proof payload for the confirmed
    sample is ready.
 6. One state-changing operation has one owner, one idempotency boundary, and an

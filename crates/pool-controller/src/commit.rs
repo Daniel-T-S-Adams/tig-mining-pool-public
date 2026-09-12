@@ -45,6 +45,15 @@ pub enum CommitError {
     /// The workflow has no `benchmark_id`, so there is nothing to commit for.
     #[error("workflow {workflow_id} has no confirmed benchmark id")]
     NoBenchmark { workflow_id: String },
+    /// The workflow does not record the nonce count TIG confirmed.
+    ///
+    /// §6.2 fixes the commitment's length at that number, and TIG refuses a
+    /// body of any other length after the fee is paid. A workflow confirmed
+    /// before `migrations/0016` added the column, or from a record TIG served
+    /// without the detail, has no length to build against — and building one
+    /// anyway is the paid-for rejection this exists to avoid.
+    #[error("workflow {workflow_id} records no confirmed num_nonces to build a commitment against")]
+    NoConfirmedLength { workflow_id: String },
     /// The commitment names a different benchmark than the workflow owns.
     #[error("the commitment is for {given}, but workflow {workflow_id} owns {owned}")]
     WrongBenchmark {
@@ -121,9 +130,22 @@ pub async fn create_commitment_intent(
     // §6.2's shape, against the precommit TIG confirmed. Checked before the
     // digest is taken, so a body TIG would refuse never becomes an intent —
     // the fee is paid on submission, and a refused commitment costs it.
-    if let Some(num_nonces) = confirmed_num_nonces(&current) {
-        commitment_matches_confirmed(submission, num_nonces)?;
-    }
+    //
+    // An absent length is a refusal, not a skipped check. The first version
+    // of this read `confirmed_settings`, where `num_nonces` never appears —
+    // it is a precommit *detail*, and `0007` split those out for the same
+    // reason — so the check silently never ran and every commitment was built
+    // unverified. Treating absence as permission is how that stays invisible.
+    let num_nonces =
+        current
+            .confirmed_num_nonces
+            .ok_or_else(|| CommitError::NoConfirmedLength {
+                workflow_id: workflow_id.to_string(),
+            })?;
+    let num_nonces = u64::try_from(num_nonces).map_err(|_| CommitError::NoConfirmedLength {
+        workflow_id: workflow_id.to_string(),
+    })?;
+    commitment_matches_confirmed(submission, num_nonces)?;
 
     // F4d's accepting half. The creating half lives in `crate::stub` and is
     // compiled out of a default build (F4c); this half must exist in every
@@ -157,19 +179,4 @@ pub async fn create_commitment_intent(
             payload_artifact_id: Some(artifact_id.to_string()),
         })
         .await?)
-}
-
-/// `precommit.details.num_nonces` as the confirmed settings recorded it.
-///
-/// `None` when the confirmed settings do not carry it, in which case §6.2's
-/// length rule has nothing to check against and the body is taken as given —
-/// the database's preconditions still hold, and TIG's own validation is the
-/// backstop. Not an error: `confirmed_settings` is whatever TIG published,
-/// and inventing a length would be worse than not checking one.
-fn confirmed_num_nonces(current: &workflow::Workflow) -> Option<u64> {
-    current
-        .confirmed_settings
-        .as_ref()?
-        .get("num_nonces")
-        .and_then(serde_json::Value::as_u64)
 }

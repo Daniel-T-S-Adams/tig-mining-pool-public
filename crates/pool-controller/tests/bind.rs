@@ -254,6 +254,27 @@ async fn a_sent_precommit_is_bound_from_the_confirmed_read_and_its_intent_settle
         w.block_started.is_some(),
         "§8's deadlines are ages from block_started"
     );
+    // §6.2 builds the commitment to exactly this length, and it is a
+    // *detail* — it is not in `confirmed_settings`, so binding has to carry
+    // it across explicitly or the length check has nothing to read.
+    let published = precommits(&app)
+        .await
+        .into_iter()
+        .find(|p| p["benchmark_id"] == json!(response_id))
+        .expect("the entry that was just bound");
+    assert_eq!(
+        w.confirmed_num_nonces,
+        published["details"]["num_nonces"].as_i64(),
+        "the confirmed nonce count must reach the workflow"
+    );
+    assert!(w.confirmed_num_nonces.is_some(), "and TIG published one");
+    assert!(
+        w.confirmed_settings
+            .as_ref()
+            .and_then(|s| s.get("num_nonces"))
+            .is_none(),
+        "settings and details are disjoint; num_nonces is a detail"
+    );
     // TIG chose the track; the confirmed settings replace the proposed ones.
     assert!(matches!(
         w.confirmed_track_id.as_deref(),

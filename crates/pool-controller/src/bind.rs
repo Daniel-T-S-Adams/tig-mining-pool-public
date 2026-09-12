@@ -203,6 +203,10 @@ async fn bind_one(
         block_started: entry["details"]["block_started"]
             .as_i64()
             .ok_or_else(|| shape("details.block_started"))?,
+        // §6.2's commitment is built to exactly this length. A *detail* TIG
+        // assigns, so it is not in `settings` and has to be carried across
+        // explicitly — the same split `block_started` sits on.
+        num_nonces: entry["details"]["num_nonces"].as_i64(),
         track_id: entry["settings"]["track_id"]
             .as_str()
             .unwrap_or_default()

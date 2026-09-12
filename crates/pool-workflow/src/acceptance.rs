@@ -286,7 +286,24 @@ where
     .bind(payload.stub_origin)
     .fetch_one(executor)
     .await
-    .map_err(unavailable)?;
+    .map_err(|e| {
+        // `0015`'s one-commitment-per-benchmark index. The ON CONFLICT above
+        // covers the primary key only, so a *second* payload for the same
+        // benchmark under a different artifact key lands here — and it is a
+        // permanent disagreement about what was built, not an outage.
+        // Reported as `Unavailable` it would be retried forever by a caller
+        // doing exactly what this module's contract tells it to.
+        if e.as_database_error()
+            .is_some_and(|db| db.constraint() == Some(ONE_COMMITMENT_PER_BENCHMARK))
+        {
+            return AcceptanceError::Conflict {
+                network: payload.network,
+                workflow_id: payload.workflow_id.clone(),
+                what: "commitment payload",
+            };
+        }
+        unavailable(e)
+    })?;
 
     match row {
         (true, _) => Ok(()),
@@ -301,6 +318,9 @@ where
         )),
     }
 }
+
+/// Name of the unique index in `migrations/0015_commitment_payload.sql`.
+const ONE_COMMITMENT_PER_BENCHMARK: &str = "commitment_payload_one_per_benchmark";
 
 /// Whether either precondition row for this benchmark was fabricated by
 /// F4a's stub.

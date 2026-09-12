@@ -229,40 +229,31 @@ impl PrecommitSubmission {
 
 /// What the pool commits to for one benchmark (`tig_integration.md` §6.2).
 ///
-/// Two shapes, and the type keeps them apart rather than leaving a caller to
-/// remember which fields go with which. §6.2: a non-stopped commitment
-/// carries a Merkle root and exactly `precommit.details.num_nonces` quality
-/// entries; an explicit stopped submission sets `stopped` and makes **both**
-/// other fields null. A stopped submission carrying a root, or a non-stopped
-/// one missing it, is a body TIG refuses — and refuses after the fee is paid
-/// and the lane is occupied.
+/// A commitment the pool *makes*: the ordered quality vector and the Merkle
+/// root built over them, from the package it durably accepted.
+///
+/// §6.2 also defines an explicit **stopped** submission — `stopped` true with
+/// both other fields null — and this type deliberately cannot express one.
+/// Nothing in the pool produces that write: `WorkflowState::Stopped` is TIG's
+/// determination on a *submitted* commitment when no bundle passed the
+/// active-quality threshold (`mining_system.md` §4.4), not a body the pool
+/// sends. Until a case that owes one exists, a variant for it would be a path
+/// whose only exercise is a fabricated precondition — and the preconditions
+/// are the point: `architecture.md` §13 invariant 4 requires a durable
+/// package acceptance for every benchmark intent, which a submission that
+/// accepted no package by definition does not have.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum BenchmarkSubmission {
-    /// The member produced solutions: the ordered quality vector and the root
-    /// built over them.
-    Committed {
-        benchmark_id: String,
-        merkle_root: String,
-        /// One entry per nonce, in nonce order. Signed: §6.2 says signed
-        /// integers, and a challenge's quality may be negative.
-        solution_quality: Vec<i64>,
-    },
-    /// No bundle passed, so there is nothing to commit and no proof follows
-    /// (§7: a stopped benchmark reaches no proof).
-    Stopped { benchmark_id: String },
+pub struct BenchmarkSubmission {
+    pub benchmark_id: String,
+    pub merkle_root: String,
+    /// One entry per nonce, in nonce order. Signed: §6.2 says signed
+    /// integers, and a challenge's quality may be negative.
+    pub solution_quality: Vec<i64>,
 }
 
 impl BenchmarkSubmission {
     pub fn benchmark_id(&self) -> &str {
-        match self {
-            BenchmarkSubmission::Committed { benchmark_id, .. }
-            | BenchmarkSubmission::Stopped { benchmark_id } => benchmark_id,
-        }
-    }
-
-    /// Whether this is §6.2's explicit stopped submission.
-    pub fn is_stopped(&self) -> bool {
-        matches!(self, BenchmarkSubmission::Stopped { .. })
+        &self.benchmark_id
     }
 }
 
@@ -273,24 +264,12 @@ impl BenchmarkSubmission {
 /// §7's per-bundle averages — and therefore the pool's whole qualifier
 /// attribution — are computed from upstream.
 pub fn benchmark_body(submission: &BenchmarkSubmission) -> Value {
-    match submission {
-        BenchmarkSubmission::Committed {
-            benchmark_id,
-            merkle_root,
-            solution_quality,
-        } => json!({
-            "benchmark_id": benchmark_id,
-            "stopped": false,
-            "merkle_root": merkle_root,
-            "solution_quality": solution_quality,
-        }),
-        BenchmarkSubmission::Stopped { benchmark_id } => json!({
-            "benchmark_id": benchmark_id,
-            "stopped": true,
-            "merkle_root": Value::Null,
-            "solution_quality": Value::Null,
-        }),
-    }
+    json!({
+        "benchmark_id": submission.benchmark_id,
+        "stopped": false,
+        "merkle_root": submission.merkle_root,
+        "solution_quality": submission.solution_quality,
+    })
 }
 
 /// The §7.3 `payload_digest` of a benchmark commitment.
@@ -313,16 +292,11 @@ pub fn commitment_matches_confirmed(
     submission: &BenchmarkSubmission,
     confirmed_num_nonces: u64,
 ) -> Result<(), PayloadError> {
-    let BenchmarkSubmission::Committed {
+    let BenchmarkSubmission {
         solution_quality,
         merkle_root,
         ..
-    } = submission
-    else {
-        // A stopped submission commits nothing, so there is no length to
-        // agree with.
-        return Ok(());
-    };
+    } = submission;
     let found = u64::try_from(solution_quality.len()).unwrap_or(u64::MAX);
     if found != confirmed_num_nonces {
         return Err(PayloadError::Commitment(format!(

@@ -188,8 +188,9 @@ END;
 $$;
 
 GRANT SELECT, INSERT ON pool.commitment_payload TO pool_controller;
--- The gateway reads it to know which payload an intent cites; §9 gives it
--- read-only access to derived payloads. No INSERT: building one is the
--- artifact worker's and recording it the controller's (§6).
-GRANT SELECT ON pool.commitment_payload TO pool_gateway;
+-- Nothing for the gateway, matching `0011`'s treatment of the sibling
+-- `canonical_payload`: §13 invariant 2 keeps the gateway out of deciding what
+-- a write contains, and these tables are exactly that decision. The intent
+-- row already names the payload it cites and carries the digest the gateway
+-- checks. A grant with no reader is a grant nobody can justify later.
 GRANT SELECT ON pool.commitment_payload TO pool_readonly;

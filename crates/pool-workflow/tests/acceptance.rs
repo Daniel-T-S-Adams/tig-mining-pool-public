@@ -12,9 +12,9 @@
 use pool_domain::Network;
 use pool_test_support::TempDb;
 use pool_workflow::{
-    CanonicalPayload, CommitmentPayload, NewIntent, PackageAcceptance, PostgresIntentRepository,
-    TigWriteIntentRepository, WriteKind, record_acceptance, record_canonical_payload,
-    record_commitment_payload,
+    AcceptanceError, CanonicalPayload, CommitmentPayload, NewIntent, PackageAcceptance,
+    PostgresIntentRepository, TigWriteIntentRepository, WriteKind, record_acceptance,
+    record_canonical_payload, record_commitment_payload,
 };
 
 const NET: Network = Network::Testnet;
@@ -135,6 +135,42 @@ async fn a_benchmark_write_cannot_exist_before_durable_acceptance() {
         .await
         .expect("both preconditions now hold");
     assert_eq!(intent.write_kind, WriteKind::Benchmark);
+}
+
+#[tokio::test]
+async fn a_second_commitment_for_one_benchmark_is_a_conflict_not_an_outage() {
+    // `migrations/0015` allows one commitment per benchmark: two would mean
+    // two quality vectors were built from one accepted package. Reported as
+    // `Unavailable` it would be retried forever by a caller following this
+    // module's own contract, because no retry can clear it.
+    let Some(db) = TempDb::migrated("accept_one_commitment").await else {
+        return;
+    };
+    let pool = db.pool_as("pool_controller").await;
+    pool_test_support::seed_workflows(&pool, "testnet", &["w1"]).await;
+
+    record_commitment_payload(&pool, &commitment("w1", "bench_a"))
+        .await
+        .unwrap();
+    // The same artifact and the same bytes: the crash-retry path.
+    record_commitment_payload(&pool, &commitment("w1", "bench_a"))
+        .await
+        .expect("an identical re-record is idempotent");
+
+    // A different artifact for the same benchmark.
+    let err = record_commitment_payload(
+        &pool,
+        &CommitmentPayload {
+            artifact_id: "artifact/second".to_string(),
+            ..commitment("w1", "bench_a")
+        },
+    )
+    .await
+    .expect_err("one commitment per benchmark");
+    assert!(
+        matches!(err, AcceptanceError::Conflict { what, .. } if what == "commitment payload"),
+        "{err:?}"
+    );
 }
 
 #[tokio::test]

@@ -32,7 +32,7 @@ fn live() -> TigConfig {
 }
 
 fn committed(nonces: usize) -> BenchmarkSubmission {
-    BenchmarkSubmission::Committed {
+    BenchmarkSubmission {
         benchmark_id: BENCH.to_string(),
         merkle_root: "ab".repeat(32),
         solution_quality: (0..nonces as i64).collect(),
@@ -40,7 +40,13 @@ fn committed(nonces: usize) -> BenchmarkSubmission {
 }
 
 /// A workflow at PRECOMMIT_CONFIRMED, the way the binding pass leaves one.
-async fn confirmed_workflow(pool: &PgPool, num_nonces: u64) {
+///
+/// The settings/details split is TIG's, and the test keeps it: §6.2's
+/// `num_nonces` is a *detail*, so it is carried in its own field and never
+/// inside `settings`. An earlier version of this helper injected it into
+/// `settings` — a shape the confirmed read never produces — which is exactly
+/// what let the length check look tested while it never ran.
+async fn confirmed_workflow(pool: &PgPool, num_nonces: Option<i64>) {
     pool_test_support::seed_workflows(pool, "testnet", &["w1"]).await;
     let current = workflow::find(pool, NET, "w1").await.unwrap().unwrap();
     workflow::confirm_precommit(
@@ -51,7 +57,16 @@ async fn confirmed_workflow(pool: &PgPool, num_nonces: u64) {
         &workflow::ConfirmedPrecommit {
             benchmark_id: BENCH.to_string(),
             track_id: "t001".to_string(),
-            settings: json!({ "track_id": "t001", "num_nonces": num_nonces }),
+            // As `get-benchmark-data` serves it: settings and details are
+            // disjoint objects, and this is the settings one.
+            settings: json!({
+                "player_id": "0xp00l00000000000000000000000000000000000",
+                "block_id": "block_100080",
+                "challenge_id": "c001",
+                "algorithm_id": "a011",
+                "track_id": "t001"
+            }),
+            num_nonces,
             block_confirmed: 100_081,
             block_started: 100_081,
         },
@@ -84,7 +99,7 @@ async fn a_confirmed_precommit_with_both_preconditions_gets_its_commitment() {
     };
     let pool = db.pool_as("pool_controller").await;
     let submission = committed(4);
-    confirmed_workflow(&pool, 4).await;
+    confirmed_workflow(&pool, Some(4)).await;
     preconditions(&pool, &submission).await;
 
     let intent = create_commitment_intent(&pool, NET, &fake(), "w1", ARTIFACT, &submission)
@@ -111,7 +126,7 @@ async fn a_fabricated_precondition_is_refused_against_a_live_endpoint() {
     };
     let pool = db.pool_as("pool_controller").await;
     let submission = committed(4);
-    confirmed_workflow(&pool, 4).await;
+    confirmed_workflow(&pool, Some(4)).await;
     preconditions(&pool, &submission).await;
 
     let err = create_commitment_intent(&pool, NET, &live(), "w1", ARTIFACT, &submission)
@@ -143,7 +158,7 @@ async fn a_real_precondition_is_fine_against_a_live_endpoint() {
     };
     let pool = db.pool_as("pool_controller").await;
     let submission = committed(4);
-    confirmed_workflow(&pool, 4).await;
+    confirmed_workflow(&pool, Some(4)).await;
     pool_workflow::record_acceptance(
         &pool,
         &pool_workflow::PackageAcceptance {
@@ -211,7 +226,7 @@ async fn the_quality_vector_must_be_the_length_the_confirmed_precommit_fixed() {
     };
     let pool = db.pool_as("pool_controller").await;
     let wrong = committed(3);
-    confirmed_workflow(&pool, 4).await;
+    confirmed_workflow(&pool, Some(4)).await;
     preconditions(&pool, &wrong).await;
 
     let err = create_commitment_intent(&pool, NET, &fake(), "w1", ARTIFACT, &wrong)
@@ -227,23 +242,31 @@ async fn the_quality_vector_must_be_the_length_the_confirmed_precommit_fixed() {
 }
 
 #[tokio::test]
-async fn a_stopped_submission_commits_nothing_and_needs_no_quality_vector() {
-    // §6.2: an explicit stopped submission sets `stopped` and makes both
-    // other fields null, so there is no length to agree with.
-    let Some(db) = TempDb::migrated("commit_stopped").await else {
+async fn a_workflow_with_no_confirmed_length_is_refused_rather_than_unchecked() {
+    // §6.2 builds the body to TIG's `num_nonces`. Without it there is
+    // nothing to check against, and treating that as permission is what made
+    // the check silently dead when it read the wrong object.
+    let Some(db) = TempDb::migrated("commit_no_length").await else {
         return;
     };
     let pool = db.pool_as("pool_controller").await;
-    let stopped = BenchmarkSubmission::Stopped {
-        benchmark_id: BENCH.to_string(),
-    };
-    confirmed_workflow(&pool, 4).await;
-    preconditions(&pool, &stopped).await;
+    let submission = committed(4);
+    confirmed_workflow(&pool, None).await;
+    preconditions(&pool, &submission).await;
 
-    let intent = create_commitment_intent(&pool, NET, &fake(), "w1", ARTIFACT, &stopped)
+    let err = create_commitment_intent(&pool, NET, &fake(), "w1", ARTIFACT, &submission)
         .await
-        .expect("a stopped commitment is still a commitment");
-    assert_eq!(intent.payload_digest, benchmark_digest(&stopped));
+        .expect_err("no length, no commitment");
+    assert!(
+        matches!(err, CommitError::NoConfirmedLength { .. }),
+        "{err}"
+    );
+
+    let intents: i64 = sqlx::query_scalar("SELECT count(*) FROM pool.tig_write_intent")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(intents, 0);
 }
 
 #[tokio::test]
@@ -252,8 +275,8 @@ async fn a_commitment_for_another_benchmark_is_refused() {
         return;
     };
     let pool = db.pool_as("pool_controller").await;
-    confirmed_workflow(&pool, 4).await;
-    let other = BenchmarkSubmission::Committed {
+    confirmed_workflow(&pool, Some(4)).await;
+    let other = BenchmarkSubmission {
         benchmark_id: "bench_other".to_string(),
         merkle_root: "ab".repeat(32),
         solution_quality: (0..4).collect(),
@@ -275,10 +298,10 @@ async fn an_intent_whose_digest_is_not_the_built_payloads_is_refused() {
     };
     let pool = db.pool_as("pool_controller").await;
     let built = committed(4);
-    confirmed_workflow(&pool, 4).await;
+    confirmed_workflow(&pool, Some(4)).await;
     preconditions(&pool, &built).await;
 
-    let different = BenchmarkSubmission::Committed {
+    let different = BenchmarkSubmission {
         benchmark_id: BENCH.to_string(),
         merkle_root: "cd".repeat(32),
         solution_quality: (0..4).collect(),

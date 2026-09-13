@@ -121,7 +121,7 @@ identities, secret names, deployment roles, and configuration profiles.
 Issuing, rotating, or revoking an API key is an audited operator procedure.
 Replacement issuance has been exercised, but whether it invalidates an older
 key remains unverified; the pool operator owns that confirmation and any needed
-revocation in [issue #61](https://github.com/Daniel-T-S-Adams/tig-mining-pool/issues/61).
+revocation in [issue #1](https://github.com/Daniel-T-S-Adams/tig-mining-pool-public/issues/1).
 Until invalidation is confirmed, suspected exposure disables the gateway and
 requires TIG operator coordination as well as replacement.
 

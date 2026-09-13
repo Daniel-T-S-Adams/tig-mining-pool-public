@@ -122,7 +122,7 @@ replaced before the slice's live run. Its old key is no longer loaded by this
 repository; server-side revocation is not inferred from replacing a local
 file. The pool operator owns confirmation of old-key invalidation and any
 needed TIG coordination in
-[issue #61](https://github.com/Daniel-T-S-Adams/tig-mining-pool/issues/61).
+[issue #1](https://github.com/Daniel-T-S-Adams/tig-mining-pool-public/issues/1).
 
 This is **not** the spike's identity. The spike ran as its own address
 ([`protocol-spike.md`](protocol-spike.md) §4), whose API key was destroyed

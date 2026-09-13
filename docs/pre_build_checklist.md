@@ -391,7 +391,8 @@ testnet precommit
 ```
 
 - [x] Create and fund the testnet Benchmarker identity required for the spike.
-  — PR #25 (plan §4: address `0xbeefbeefbeefbeefbeefbeefbeefbeefbeefbeef`)
+  — PR #25 (plan §4; the spike identity is recorded outside this
+    repository, see the note in `plans/protocol-spike.md` §4)
 - [x] Submit a valid precommit through the pool's TIG gateway.
   — PR #26 (S1); repeated in every live run
   ([spike report §4](protocol_spike_report.md))

@@ -116,23 +116,25 @@ obtained its API key through the official TIG testnet browser flow and
 installed it at the path above; the slice's live gateway run remains the
 credential-authentication acceptance evidence.
 
-The previous slice-1 candidate identity,
-`0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef`, was verified and funded but
+A previous slice-1 candidate identity — deliberately not named here, for
+the reason `protocol-spike.md` §4 gives — was verified and funded but
 replaced before the slice's live run. Its old key is no longer loaded by this
 repository; server-side revocation is not inferred from replacing a local
 file. The pool operator owns confirmation of old-key invalidation and any
 needed TIG coordination in
 [issue #61](https://github.com/Daniel-T-S-Adams/tig-mining-pool/issues/61).
 
-This is **not** the spike's identity. The spike ran as
-`0xbeefbeefbeefbeefbeefbeefbeefbeefbeefbeef`
+This is **not** the spike's identity. The spike ran as its own address
 ([`protocol-spike.md`](protocol-spike.md) §4), whose API key was destroyed
 during slice-1 development; that account still exists and is funded, but is
-no longer used. `protocol_spike_report.md` and `protocol-spike.md` keep the
-old address because they record runs that genuinely used it — rewriting them
-would falsify the evidence. `tig_integration.md` §13 check 9 makes the
-gateway verify that the confirmed player ID matches its configured identity,
-so the address above is what slice-1 configuration must name.
+no longer used. Neither that address nor the superseded candidate is
+recorded in this repository: they identify retired accounts, they are of no
+use to a reader, and this repository is public. The runs they record are
+unchanged; only the addresses are withheld, and the operator holds them.
+
+`tig_integration.md` §13 check 9 makes the gateway verify that the confirmed
+player ID matches its configured identity, so the address above is what
+slice-1 configuration must name.
 
 ### A. Configuration and fail-closed startup
 

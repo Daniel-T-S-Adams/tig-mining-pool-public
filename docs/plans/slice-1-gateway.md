@@ -382,6 +382,14 @@ slice-1 configuration must name.
   finding the write and the other by refusing to guess, and the counts are
   what tell them apart. The mapping from each point to its test is in
   `crates/tig-gateway/src/drive.rs`'s test-module doc.
+
+  **Outstanding:** the fourth point's controller half. §12's guarantee there
+  is "reconciliation advances monotonically from confirmed TIG evidence",
+  which §6 makes a controller transition. The gateway tests settle the
+  *attempt* from the confirmed read, which is what reopens the lane;
+  advancing the workflow from that same evidence is the reconciler's, and a
+  controller reconciliation test still owes it. G2 is not met until that
+  test exists.
 - G3. A lease claimant that lost its fence cannot commit a late result
   (`architecture.md` §7.5 step 4, invariant 8). Test: reclaim with a higher
   fence, then attempt the stale commit.

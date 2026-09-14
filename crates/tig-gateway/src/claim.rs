@@ -339,25 +339,6 @@ fn reconciled(
     }
 }
 
-/// What a benchmark commitment intent is owed (`tig_integration.md` §6.2).
-///
-/// A separate judgement from [`decide`], because §10 makes the two kinds
-/// reconcile differently and pretending otherwise would be the bug: "For
-/// benchmark and proof writes, `benchmark_id` makes reconciliation direct. A
-/// lost precommit HTTP response is harder because the client may not know the
-/// generated ID." A commitment already names its benchmark in the request, so
-/// there is no tuple search, no multi-candidate stop, and nothing for the
-/// response to teach the pool.
-///
-/// It is also not in the precommit lane. §10's single unresolved request is
-/// about precommits — the write whose identity is unknown until it answers —
-/// and §11's rule for the rest is narrower: "never send two concurrent writes
-/// for the same benchmark", which is what the intent's own attempts say.
-///
-/// `confirmed_benchmarks` is the set of `benchmark_id`s the pool has read as
-/// confirmed (§7: an entry in `get-benchmarks.benchmarks` with a non-null
-/// `state.block_confirmed`). Membership is the evidence, and its absence is
-/// not evidence of anything.
 /// A `get-benchmarks.benchmarks` entry the pool cannot read.
 #[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
 pub enum ConfirmedReadError {
@@ -414,6 +395,25 @@ impl ConfirmedBenchmarks {
     }
 }
 
+/// What a benchmark commitment intent is owed (`tig_integration.md` §6.2).
+///
+/// A separate judgement from [`decide`], because §10 makes the two kinds
+/// reconcile differently and pretending otherwise would be the bug: "For
+/// benchmark and proof writes, `benchmark_id` makes reconciliation direct. A
+/// lost precommit HTTP response is harder because the client may not know the
+/// generated ID." A commitment already names its benchmark in the request, so
+/// there is no tuple search, no multi-candidate stop, and nothing for the
+/// response to teach the pool.
+///
+/// It is also not in the precommit lane. §10's single unresolved request is
+/// about precommits — the write whose identity is unknown until it answers —
+/// and §11's rule for the rest is narrower: "never send two concurrent writes
+/// for the same benchmark", which is what the intent's own attempts say.
+///
+/// `confirmed_benchmarks` is a [`ConfirmedBenchmarks`], which is §7's test
+/// already applied — an entry in `get-benchmarks.benchmarks` with a non-null
+/// `state.block_confirmed`. Membership in it is the evidence, and its absence
+/// is not evidence of anything.
 pub fn decide_benchmark(
     intent: &WriteIntent,
     attempts: &[WriteAttempt],

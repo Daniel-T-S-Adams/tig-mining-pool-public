@@ -375,7 +375,13 @@ slice-1 configuration must name.
   recovery matches the `architecture.md` §12 row: after decision commit;
   after the attempt row but before the HTTP response; after the response but
   before the outcome commit; and after TIG state changed but before the local
-  transition. Each asserts a fake-tig server-side write count of exactly one.
+  transition. Each asserts a fake-tig server-side write count — **exactly one
+  where a write reached TIG, and exactly zero where it did not**. The middle
+  two points leave identical durable state (an attempt with a NULL outcome),
+  because the record cannot say whether the request left; one recovers by
+  finding the write and the other by refusing to guess, and the counts are
+  what tell them apart. The mapping from each point to its test is in
+  `crates/tig-gateway/src/drive.rs`'s test-module doc.
 - G3. A lease claimant that lost its fence cannot commit a late result
   (`architecture.md` §7.5 step 4, invariant 8). Test: reclaim with a higher
   fence, then attempt the stale commit.

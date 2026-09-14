@@ -502,6 +502,22 @@ async fn send_or_release(
 mod tests {
     //! The claim loop against a real database and a real fake-tig.
     //!
+    //! **G2's four crash points**, each killing the process at a different
+    //! moment and each asserting the fake's server-side write count, which is
+    //! what turns "recovered" into "recovered without a duplicate":
+    //!
+    //! | `architecture.md` §12 row | test | count |
+    //! |---|---|---|
+    //! | dies after decision commit | `a_crash_after_the_decision_leaves_the_intent_claimable` | 1 |
+    //! | dies after the attempt row, request never left | `a_crash_before_the_request_left_stops_rather_than_paying_twice` | 0 |
+    //! | dies after the attempt row, request landed | `a_crash_before_the_response_was_recorded_is_recovered_and_the_lane_reopens` | 1 |
+    //! | dies after TIG changed state | `a_lost_response_is_recovered_by_search_and_the_lane_reopens` | 1 |
+    //!
+    //! The two middle rows leave *identical* durable state — an attempt with
+    //! a NULL outcome — and that is the point: the record cannot say whether
+    //! the request left. One recovers by finding the write, the other by
+    //! refusing to guess, and neither sends a second time.
+    //!
     //! Inside the crate because a `TigApiKey` exists only through
     //! `credential::load`, which is crate-private on purpose. Requires
     //! `POOL_TEST_SUPERUSER_URL`; without it these skip.
@@ -519,6 +535,7 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::*;
+    use crate::claim::StopReason;
     use crate::credential;
     use crate::write_policy::WritePolicy;
 
@@ -1026,6 +1043,167 @@ mod tests {
         // the controller holds and the gateway does not.
         let _ = IntentState::Confirmed;
         let _ = SettledOutcome::Rejected;
+    }
+
+    #[tokio::test]
+    async fn a_crash_after_the_decision_leaves_the_intent_claimable() {
+        // G2's first crash point, and `architecture.md` §12's row for it:
+        // "Controller dies after decision commit — the write intent remains
+        // claimable; another controller uses the higher lease fence."
+        //
+        // Staged by admitting the decision and then taking — and losing —
+        // the lease under the dead process's name, which is what a process
+        // that died holding one leaves behind. The row and its fence outlive
+        // the process; the §12 row's "higher lease fence" is only meaningful
+        // against that baseline, so it is established rather than assumed.
+        //
+        // A *different* holder then runs: the fence advances past the dead
+        // process's, the write goes out once, and the count says once.
+        let Some(h) = Harness::new("drive_crash_decision").await else {
+            return;
+        };
+        let admitted = admit_precommit(&h.controller, &decision("w1", 1), 4)
+            .await
+            .unwrap();
+        assert_eq!(admitted.intent.state, IntentState::Prepared);
+
+        // What the dead process held. Released rather than left to expire,
+        // because the successor must advance the fence either way and this
+        // keeps the test off the clock.
+        let dead = pool_workflow::lease::claim(
+            &h.gateway,
+            Network::Testnet,
+            "w1",
+            pool_workflow::LeaseKind::PrecommitTransmit,
+            "gateway-dead",
+            60,
+        )
+        .await
+        .unwrap();
+        pool_workflow::lease::release(&h.gateway, &dead)
+            .await
+            .unwrap();
+        assert_eq!(
+            fake_state(&h.base).await["writes_received"]
+                .get("submit-precommit")
+                .cloned()
+                .unwrap_or(json!(0)),
+            json!(0),
+            "the dead process sent nothing"
+        );
+
+        // The successor, named differently so the fence it takes is its own.
+        let successor = Driver {
+            lease_owner: "gateway-successor",
+            ..h.driver()
+        };
+        let report = run_once(&successor, &[]).await.unwrap();
+        assert_eq!(report.outcomes.len(), 1, "{report:?}");
+        assert!(
+            matches!(
+                &report.outcomes[0].acted,
+                Acted::Transmitted {
+                    outcome: AttemptOutcome::Accepted,
+                    ..
+                }
+            ),
+            "{report:?}"
+        );
+        assert_eq!(
+            fake_state(&h.base).await["writes_received"]["submit-precommit"],
+            json!(1),
+            "exactly one write reached TIG"
+        );
+
+        // And the lease the successor took is recorded as its own, with a
+        // fence strictly above the one the dead process held. Compared
+        // against that captured value and not against a constant: the
+        // schema's own CHECK already guarantees `fence_token >= 1`, so a
+        // lower bound of 1 would hold however the claim behaved and would
+        // pin nothing.
+        let (owner, fence): (String, i64) = sqlx::query_as(
+            "SELECT lease_owner, fence_token FROM pool.work_lease
+              WHERE network = 'testnet' AND workflow_id = 'w1'",
+        )
+        .fetch_one(&h.gateway)
+        .await
+        .unwrap();
+        assert_eq!(owner, "gateway-successor");
+        assert!(
+            fence > dead.fence_token,
+            "the successor's fence {fence} must advance past the dead \
+             process's {}",
+            dead.fence_token
+        );
+    }
+
+    #[tokio::test]
+    async fn a_crash_before_the_request_left_stops_rather_than_paying_twice() {
+        // G2's crash point "after the attempt row but before the HTTP
+        // response", in the half where the request never left at all. The
+        // pool's durable state is identical to the half where it did — a
+        // NULL outcome — which is the whole difficulty: the record cannot
+        // distinguish "not sent" from "sent and unanswered".
+        //
+        // So the pool must not guess in the direction that pays. §10 refuses
+        // a blind resubmission and `claim` stops for an operator when the
+        // search accounts for nothing. The load-bearing assertion is the
+        // write count: it stays at zero, and no second fee is paid on a
+        // maybe.
+        let Some(h) = Harness::with_policy("drive_crash_unsent", fast_policy()).await else {
+            return;
+        };
+        let admitted = admit_precommit(&h.controller, &decision("w1", 1), 4)
+            .await
+            .unwrap();
+
+        // The crash: the attempt row exists under a fence, and nothing was
+        // sent.
+        let lease = pool_workflow::lease::claim(
+            &h.gateway,
+            Network::Testnet,
+            "w1",
+            pool_workflow::LeaseKind::PrecommitTransmit,
+            "crashed",
+            60,
+        )
+        .await
+        .unwrap();
+        let ledger = PostgresAttemptLedger::new(h.gateway.clone());
+        ledger
+            .begin_fenced(&admitted.intent.intent_id, &lease)
+            .await
+            .unwrap();
+        pool_workflow::lease::release(&h.gateway, &lease)
+            .await
+            .unwrap();
+
+        // Age it past the call timeout, so the driver is not merely waiting
+        // for a sender that might still be live.
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+
+        // The window has nothing: the write never happened. The run stops
+        // instead of resending.
+        let report = run_once(&h.driver(), &[]).await.unwrap();
+        let o = &report.outcomes[0];
+        assert!(
+            matches!(
+                &o.decision,
+                Some(ClaimDecision::StopForOperator {
+                    reason: StopReason::WriteUnaccountedFor
+                })
+            ),
+            "{o:?}"
+        );
+        assert!(report.needs_operator(), "an operator is owed this one");
+        assert_eq!(
+            fake_state(&h.base).await["writes_received"]
+                .get("submit-precommit")
+                .cloned()
+                .unwrap_or(json!(0)),
+            json!(0),
+            "nothing was sent, and nothing is sent now"
+        );
     }
 
     #[tokio::test]

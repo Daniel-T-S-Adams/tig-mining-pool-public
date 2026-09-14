@@ -10,10 +10,14 @@
 use std::collections::BTreeMap;
 
 use pool_domain::Network;
-use pool_workflow::{AttemptOutcome, IntentState, WriteAttempt, WriteIntent, WriteKind};
+use pool_workflow::payload::benchmark_digest;
+use pool_workflow::{
+    AttemptOutcome, BenchmarkSubmission, IntentState, WriteAttempt, WriteIntent, WriteKind,
+};
 use serde_json::json;
 use tig_gateway::claim::{
     ClaimDecision, OwningWorkflow, SiblingGenerations, SkipReason, StopReason, decide,
+    decide_benchmark,
 };
 use tig_gateway::reconcile::{PrecommitSubmission, TrackSettings};
 
@@ -589,4 +593,299 @@ fn an_accepted_attempt_reconciles_rather_than_reading_as_refused() {
         ClaimDecision::AwaitConfirmation,
         "accepted and not yet confirmed is waited for, not skipped"
     );
+}
+
+// ---- benchmark commitments (§6.2), which reconcile directly -----------------
+
+/// The body the artifact worker built for `bench_a`.
+fn commitment() -> BenchmarkSubmission {
+    BenchmarkSubmission {
+        benchmark_id: "bench_a".to_string(),
+        merkle_root: "ab".repeat(32),
+        solution_quality: vec![1, 2, 3, 4],
+    }
+}
+
+fn benchmark_intent(state: IntentState) -> WriteIntent {
+    WriteIntent {
+        intent_id: "11111111-1111-1111-1111-111111111111".to_string(),
+        network: Network::Testnet,
+        workflow_id: "w1".to_string(),
+        write_kind: WriteKind::Benchmark,
+        generation: 1,
+        benchmark_id: Some("bench_a".to_string()),
+        // Taken from the body rather than invented, so a decision that
+        // checks §7.3's binding digest is exercised against a body that
+        // genuinely is this intent's.
+        payload_digest: benchmark_digest(&commitment()),
+        payload_artifact_id: Some("artifact/w1/commitment".to_string()),
+        state,
+    }
+}
+
+fn live() -> OwningWorkflow {
+    OwningWorkflow {
+        state: "PRECOMMIT_CONFIRMED",
+        is_terminal: false,
+    }
+}
+
+fn ended() -> OwningWorkflow {
+    OwningWorkflow {
+        state: "EXPIRED",
+        is_terminal: true,
+    }
+}
+
+#[test]
+fn an_unsent_commitment_on_a_live_workflow_is_transmitted() {
+    assert_eq!(
+        decide_benchmark(
+            &benchmark_intent(IntentState::Prepared),
+            &[],
+            live(),
+            &[],
+            Some(&commitment())
+        ),
+        ClaimDecision::Transmit
+    );
+}
+
+#[test]
+fn a_body_that_is_not_this_intents_never_becomes_an_attempt() {
+    // §7.3's binding digest, and the reason it is checked before the
+    // decision rather than only at the send: `send_benchmark` refuses the
+    // same mismatch, but only once `begin_fenced` has written an attempt
+    // row. The only way to close that row is REJECTED, which every later
+    // pass reads as `Refused` — TIG answered and said no. It did not, and
+    // `mining_system.md` §8 forbids recording a pool fault as TIG's.
+    //
+    // The driver carries one commitment across every claimable benchmark
+    // intent, so this is what a second intent is handed in practice.
+    let other = BenchmarkSubmission {
+        benchmark_id: "bench_a".to_string(),
+        merkle_root: "cd".repeat(32),
+        solution_quality: vec![1, 2, 3, 4],
+    };
+    assert_eq!(
+        decide_benchmark(
+            &benchmark_intent(IntentState::Prepared),
+            &[],
+            live(),
+            &[],
+            Some(&other)
+        ),
+        ClaimDecision::StopForOperator {
+            reason: StopReason::PayloadNotTheRecordedOne
+        }
+    );
+}
+
+#[test]
+fn an_absent_body_is_the_same_answer_as_a_wrong_one() {
+    // Both mean "this intent's bytes are not here", and neither may become
+    // an attempt. Handled in `decide` so the stop is a decision the report
+    // carries, not an error raised from inside the send path.
+    assert_eq!(
+        decide_benchmark(
+            &benchmark_intent(IntentState::Prepared),
+            &[],
+            live(),
+            &[],
+            None
+        ),
+        ClaimDecision::StopForOperator {
+            reason: StopReason::PayloadNotTheRecordedOne
+        }
+    );
+}
+
+#[test]
+fn a_wrong_body_does_not_disturb_a_decision_that_never_reads_one() {
+    // The digest check sits just before `Transmit` and not where the
+    // precommit path puts it, because only that branch touches the body. A
+    // settled intent, a direct reconciliation and a wait all reason over the
+    // intent's own `benchmark_id`; stopping those for an operator would
+    // raise an alarm about a body none of them would have used.
+    let other = BenchmarkSubmission {
+        benchmark_id: "bench_a".to_string(),
+        merkle_root: "cd".repeat(32),
+        solution_quality: vec![1, 2, 3, 4],
+    };
+    assert_eq!(
+        decide_benchmark(
+            &benchmark_intent(IntentState::Confirmed),
+            &[],
+            live(),
+            &[],
+            Some(&other)
+        ),
+        ClaimDecision::Skip {
+            reason: SkipReason::AlreadySettled
+        }
+    );
+    assert_eq!(
+        decide_benchmark(
+            &benchmark_intent(IntentState::Prepared),
+            &[],
+            live(),
+            &["bench_a".to_string()],
+            Some(&other)
+        ),
+        ClaimDecision::AlreadyConfirmed {
+            benchmark_id: "bench_a".to_string()
+        }
+    );
+}
+
+#[test]
+fn a_confirmed_benchmark_is_reconciled_directly_and_never_resent() {
+    // §10: "For benchmark and proof writes, `benchmark_id` makes
+    // reconciliation direct." No tuple search, because the write named its
+    // benchmark in the request.
+    for attempts in [
+        vec![],
+        vec![attempt(None)],
+        vec![attempt(Some(AttemptOutcome::Ambiguous))],
+        vec![attempt(Some(AttemptOutcome::Accepted))],
+    ] {
+        assert_eq!(
+            decide_benchmark(
+                &benchmark_intent(IntentState::Prepared),
+                &attempts,
+                live(),
+                &["bench_a".to_string()],
+                Some(&commitment())
+            ),
+            ClaimDecision::AlreadyConfirmed {
+                benchmark_id: "bench_a".to_string()
+            },
+            "{attempts:?}"
+        );
+    }
+}
+
+#[test]
+fn a_write_in_flight_waits_for_the_read_whatever_the_response_said() {
+    // §11 forbids a second concurrent write for one benchmark, and §7 makes
+    // the confirmation a read. An ACCEPTED attempt waits exactly as an
+    // unresolved one does: the commitment stands at TIG or it does not, and
+    // the response is not what says so.
+    for outcome in [
+        None,
+        Some(AttemptOutcome::Ambiguous),
+        Some(AttemptOutcome::Accepted),
+    ] {
+        assert_eq!(
+            decide_benchmark(
+                &benchmark_intent(IntentState::Prepared),
+                &[attempt(outcome)],
+                live(),
+                &[],
+                Some(&commitment())
+            ),
+            ClaimDecision::AwaitConfirmation,
+            "{outcome:?}"
+        );
+    }
+}
+
+#[test]
+fn a_refused_commitment_is_not_searched_for_and_not_resent() {
+    // TIG answered and refused, so no benchmark was created. What the
+    // workflow is owed is `fail`, not another write.
+    assert_eq!(
+        decide_benchmark(
+            &benchmark_intent(IntentState::Prepared),
+            &[attempt(Some(AttemptOutcome::Rejected))],
+            live(),
+            &[],
+            Some(&commitment())
+        ),
+        ClaimDecision::Skip {
+            reason: SkipReason::Refused
+        }
+    );
+}
+
+#[test]
+fn reconciliation_comes_before_terminality() {
+    // A workflow that ended while its write was in flight still has an
+    // unresolved attempt, and only settling it says what became of the write.
+    assert_eq!(
+        decide_benchmark(
+            &benchmark_intent(IntentState::Prepared),
+            &[attempt(None)],
+            ended(),
+            &["bench_a".to_string()],
+            Some(&commitment())
+        ),
+        ClaimDecision::AlreadyConfirmed {
+            benchmark_id: "bench_a".to_string()
+        }
+    );
+    // With nothing in flight, the ended workflow gets no write.
+    assert_eq!(
+        decide_benchmark(
+            &benchmark_intent(IntentState::Prepared),
+            &[],
+            ended(),
+            &[],
+            Some(&commitment())
+        ),
+        ClaimDecision::Skip {
+            reason: SkipReason::WorkflowEnded { state: "EXPIRED" }
+        }
+    );
+}
+
+#[test]
+fn an_unknown_outcome_with_no_attempt_stops_rather_than_sending() {
+    // §7.3 writes both halves in one transaction, so one without the other
+    // is a contradiction — and sending on the missing half pays a second fee
+    // for a commitment that may already stand.
+    assert_eq!(
+        decide_benchmark(
+            &benchmark_intent(IntentState::OutcomeUnknown),
+            &[],
+            live(),
+            &[],
+            Some(&commitment())
+        ),
+        ClaimDecision::StopForOperator {
+            reason: StopReason::UnknownOutcomeWithNoAttempt
+        }
+    );
+}
+
+#[test]
+fn a_settled_intent_owes_nothing() {
+    for state in [IntentState::Confirmed, IntentState::Rejected] {
+        assert_eq!(
+            decide_benchmark(
+                &benchmark_intent(state),
+                &[],
+                live(),
+                &["bench_a".to_string()],
+                Some(&commitment())
+            ),
+            ClaimDecision::Skip {
+                reason: SkipReason::AlreadySettled
+            },
+            "{state:?}"
+        );
+    }
+}
+
+#[test]
+fn another_kind_of_intent_is_not_this_paths() {
+    let mut precommit = benchmark_intent(IntentState::Prepared);
+    precommit.write_kind = WriteKind::Precommit;
+    precommit.benchmark_id = None;
+    assert!(matches!(
+        decide_benchmark(&precommit, &[], live(), &[], Some(&commitment())),
+        ClaimDecision::Skip {
+            reason: SkipReason::NotAPrecommit { .. }
+        }
+    ));
 }

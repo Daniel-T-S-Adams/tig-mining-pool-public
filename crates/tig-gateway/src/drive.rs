@@ -16,13 +16,14 @@
 
 use pool_domain::Network;
 use pool_workflow::{
-    AttemptError, AttemptOutcome, IntentError, LeaseError, LeaseKind, PostgresAttemptLedger,
-    PostgresIntentRepository, PrecommitSubmission, TigWriteIntentRepository, WriteAttemptLedger,
-    WriteIntent, WriteKind, lease, payload_inputs, precommit_siblings, workflow,
+    AttemptError, AttemptOutcome, BenchmarkSubmission, IntentError, LeaseError, LeaseKind,
+    PostgresAttemptLedger, PostgresIntentRepository, PrecommitSubmission, TigWriteIntentRepository,
+    WriteAttemptLedger, WriteIntent, WriteKind, lease, payload_inputs, precommit_siblings,
+    workflow,
 };
 use sqlx::PgPool;
 
-use crate::claim::{ClaimDecision, OwningWorkflow, SiblingGenerations, decide};
+use crate::claim::{ClaimDecision, OwningWorkflow, SiblingGenerations, decide, decide_benchmark};
 use crate::credential::TigApiKey;
 use crate::lane::PostLane;
 use crate::transmit::{PrecommitTransmitter, TransmitError};
@@ -50,6 +51,17 @@ pub struct Driver<'a> {
     pub transmitter: &'a PrecommitTransmitter,
     /// §11's POST-lane pacing, shared across runs. See [`PostLane`].
     pub lane: &'a PostLane,
+    /// The §6.2 body the artifact worker built, for the benchmark pass.
+    ///
+    /// `None` for a driver that only runs the precommit pass. The gateway
+    /// never constructs one (`architecture.md` §3) — it is handed the bytes
+    /// and refuses them unless they digest to what the intent recorded, which
+    /// is what `migrations/0015`'s durable record makes checkable.
+    ///
+    /// One body rather than a map because slice 1 drives one commitment at a
+    /// time; the slice that reads derived payloads from the artifact store
+    /// (§9) replaces this with that read.
+    pub commitment: Option<&'a BenchmarkSubmission>,
     /// The `WRITE_READY` gate, consulted **per write**. Holding one permit for
     /// the driver's life would consult it once ever: §10.3 says losing
     /// readiness at runtime blocks *new* writes, and criterion B3 tests that,
@@ -158,15 +170,7 @@ pub async fn run_once(
     driver: &Driver<'_>,
     confirmed_precommits: &[serde_json::Value],
 ) -> Result<RunReport, DriveError> {
-    let call_timeout_secs = driver.lane.policy().call_timeout().as_secs();
-    if u64::try_from(driver.lease_secs).is_ok_and(|lease| lease > call_timeout_secs) {
-        // The lease outlasts any call made under it.
-    } else {
-        return Err(DriveError::LeaseShorterThanCall {
-            lease_secs: driver.lease_secs,
-            call_timeout_secs,
-        });
-    }
+    check_lease(driver)?;
     let intents = PostgresIntentRepository::new(driver.pool.clone());
     let claimable = intents
         .claimable(driver.network, WriteKind::Precommit)
@@ -198,6 +202,284 @@ pub async fn run_once(
     Ok(RunReport { outcomes })
 }
 
+/// §7.5: the lease must outlast any call made under it, or the next claimant
+/// could take over an attempt whose sender is still waiting on TIG.
+fn check_lease(driver: &Driver<'_>) -> Result<(), DriveError> {
+    let call_timeout_secs = driver.lane.policy().call_timeout().as_secs();
+    if u64::try_from(driver.lease_secs).is_ok_and(|lease| lease > call_timeout_secs) {
+        return Ok(());
+    }
+    Err(DriveError::LeaseShorterThanCall {
+        lease_secs: driver.lease_secs,
+        call_timeout_secs,
+    })
+}
+
+/// One pass over every claimable benchmark commitment intent
+/// (`tig_integration.md` §6.2).
+///
+/// A separate pass from [`run_once`] because §10 reconciles the two kinds
+/// differently — see [`decide_benchmark`] — and because they do not share a
+/// lane: §10's single unresolved request is the precommit's, and §11's rule
+/// for the rest is "never send two concurrent writes for the same
+/// benchmark", which the intent's own attempts answer.
+///
+/// They do share the POST lane's pacing: §11's minimum gap between initial
+/// writes is per IP, not per write kind, so both passes take a slot from the
+/// same [`PostLane`].
+///
+/// `confirmed_benchmarks` is the set of `benchmark_id`s the caller has read
+/// as confirmed (§7: a `get-benchmarks.benchmarks` entry with a non-null
+/// `state.block_confirmed`).
+pub async fn run_once_benchmarks(
+    driver: &Driver<'_>,
+    confirmed_benchmarks: &[String],
+) -> Result<RunReport, DriveError> {
+    check_lease(driver)?;
+    let intents = PostgresIntentRepository::new(driver.pool.clone());
+    let claimable = intents
+        .claimable(driver.network, WriteKind::Benchmark)
+        .await?;
+
+    let mut outcomes = Vec::with_capacity(claimable.len());
+    for intent in claimable {
+        let outcome = match handle_benchmark(driver, &intent, confirmed_benchmarks).await {
+            Ok((decision, acted)) => IntentOutcome {
+                intent_id: intent.intent_id.clone(),
+                workflow_id: intent.workflow_id.clone(),
+                generation: intent.generation,
+                decision,
+                acted,
+            },
+            // Fail closed for this intent, not for the run.
+            Err(e) => IntentOutcome {
+                intent_id: intent.intent_id.clone(),
+                workflow_id: intent.workflow_id.clone(),
+                generation: intent.generation,
+                decision: None,
+                acted: Acted::Failed {
+                    error: e.to_string(),
+                },
+            },
+        };
+        outcomes.push(outcome);
+    }
+    Ok(RunReport { outcomes })
+}
+
+async fn handle_benchmark(
+    driver: &Driver<'_>,
+    intent: &WriteIntent,
+    confirmed_benchmarks: &[String],
+) -> Result<(Option<ClaimDecision>, Acted), HandleError> {
+    // The same lease the precommit path takes, for the same reason: §7.5
+    // makes the fence — not the reads — what decides who may commit.
+    //
+    // Deliberately the *same* kind, not a benchmark-specific one. The lease
+    // is per (network, workflow, kind), so one kind across both writes is
+    // what stops two gateway passes working the same workflow at once; a
+    // second kind would let a precommit and a commitment for one workflow
+    // run concurrently, each holding a fence the other does not see.
+    //
+    // The name is therefore narrower than the meaning — it now protects
+    // every TIG transmit for a workflow, not only the precommit. Renaming it
+    // to something write-agnostic needs a migration (`0009` constrains
+    // `lease_kind` to a known set), so it is owed as its own change rather
+    // than smuggled into a review fix.
+    let held = match lease::claim(
+        driver.pool,
+        driver.network,
+        &intent.workflow_id,
+        LeaseKind::PrecommitTransmit,
+        driver.lease_owner,
+        driver.lease_secs,
+    )
+    .await
+    {
+        Ok(lease) => lease,
+        Err(LeaseError::StillHeld { .. }) => return Ok((None, Acted::LeaseHeldElsewhere)),
+        Err(e) => return Err(e.into()),
+    };
+    let result = handle_benchmark_held(driver, intent, confirmed_benchmarks, &held).await;
+    if let Err(e) = lease::release(driver.pool, &held).await {
+        tracing::warn!(
+            event = "gateway.lease.release_failed",
+            workflow_id = %intent.workflow_id,
+            error = %e,
+            "lease not released; it will expire"
+        );
+    }
+    result
+}
+
+async fn handle_benchmark_held(
+    driver: &Driver<'_>,
+    intent: &WriteIntent,
+    confirmed_benchmarks: &[String],
+    held: &pool_workflow::Lease,
+) -> Result<(Option<ClaimDecision>, Acted), HandleError> {
+    let ledger = PostgresAttemptLedger::new(driver.pool.clone());
+    let owning = workflow::find(driver.pool, driver.network, &intent.workflow_id)
+        .await?
+        .ok_or_else(|| HandleError::NoWorkflow {
+            intent_id: intent.intent_id.clone(),
+            workflow_id: intent.workflow_id.clone(),
+        })?;
+    let attempts = ledger.attempts_for(&intent.intent_id).await?;
+
+    let decision = decide_benchmark(
+        intent,
+        &attempts,
+        OwningWorkflow {
+            state: owning.state.as_str(),
+            is_terminal: owning.state.is_terminal(),
+        },
+        confirmed_benchmarks,
+        driver.commitment,
+    );
+
+    let acted = match &decision {
+        ClaimDecision::Transmit => {
+            // The body the artifact worker built. The gateway does not
+            // construct it (§3: "constructing commitments or proofs" is not
+            // the gateway's).
+            //
+            // `decide_benchmark` has already established that this body is
+            // present and digests to the intent's record, so reaching
+            // `Transmit` without one is a contradiction in this module rather
+            // than a state the pool can be in — hence an error, not an
+            // attempt row.
+            let Some(submission) = driver.commitment.as_ref() else {
+                return Err(HandleError::NoCommitment {
+                    intent_id: intent.intent_id.clone(),
+                });
+            };
+            let permit = match driver.gate.begin_write() {
+                Ok(permit) => permit,
+                Err(Blocked { revocation }) => {
+                    return Ok((
+                        Some(decision),
+                        Acted::WriteBlocked {
+                            category: revocation.category(),
+                        },
+                    ));
+                }
+            };
+            driver.lane.take_slot().await;
+            let attempt = match ledger.begin_fenced(&intent.intent_id, held).await {
+                Ok(attempt) => attempt,
+                // §11's per-benchmark rule, which is this write kind's
+                // contention and not a fault: `0004`'s unresolved index is
+                // per benchmark for a commitment, and `PrecommitLaneOccupied`
+                // cannot fire here at all — that index is
+                // `WHERE write_kind = 'precommit'`. Reported as ordinary
+                // contention so it does not fill the operator bucket on every
+                // pass while a write for the same benchmark is legitimately
+                // out.
+                Err(AttemptError::BenchmarkWriteInFlight { .. }) => {
+                    return Ok((Some(decision), Acted::LaneOccupied));
+                }
+                Err(AttemptError::FenceLost { .. }) => {
+                    return Ok((Some(decision), Acted::LeaseHeldElsewhere));
+                }
+                Err(e) => return Err(e.into()),
+            };
+            let sent = match driver
+                .transmitter
+                .send_benchmark(&permit, driver.key, intent, &attempt, submission)
+                .await
+            {
+                Ok(sent) => sent,
+                Err(refused) => {
+                    // Nothing left, and the attempt row exists. Closed for
+                    // the reason the precommit path closes its own: an
+                    // attempt with no outcome is one nothing can settle.
+                    if let Err(e) = ledger
+                        .resolve(
+                            &attempt.attempt_id,
+                            AttemptOutcome::Rejected,
+                            None,
+                            Some("not sent: refused before the request left"),
+                        )
+                        .await
+                    {
+                        tracing::warn!(
+                            event = "gateway.attempt.release_failed",
+                            attempt_id = %attempt.attempt_id,
+                            error = %e,
+                        );
+                    }
+                    return Err(refused.into());
+                }
+            };
+            ledger
+                .resolve(
+                    &attempt.attempt_id,
+                    sent.outcome,
+                    sent.http_status,
+                    Some(&sent.detail),
+                )
+                .await?;
+            drop(permit);
+            Acted::Transmitted {
+                attempt_id: attempt.attempt_id,
+                outcome: sent.outcome,
+                benchmark_id: sent.benchmark_id,
+            }
+        }
+        ClaimDecision::AlreadyConfirmed { benchmark_id } => {
+            // Direct reconciliation: the write named this benchmark, and the
+            // read says it confirmed. Settle the attempt so nothing waits on
+            // it; the workflow advances from the same read on the
+            // controller's next pass.
+            match attempts.iter().find(|a| a.is_unresolved()) {
+                // The same guard the precommit path applies, for the same
+                // reason: a NULL outcome younger than the call timeout may
+                // belong to a sender still waiting on TIG. Writing a
+                // fabricated ambiguity over a response about to be recorded
+                // loses the real status, and the real sender's `resolve`
+                // then fails as already-resolved and is reported as a
+                // failure. The lease should make that impossible — a run
+                // requires it to outlast a call — but the ledger's clock is
+                // the cheaper witness.
+                Some(a)
+                    if a.outcome.is_none()
+                        && a.age_secs
+                            < i64::try_from(call_timeout_secs(driver)).unwrap_or(i64::MAX) =>
+                {
+                    Acted::AwaitingSender {
+                        attempt_id: a.attempt_id.clone(),
+                    }
+                }
+                Some(a) => {
+                    if a.outcome.is_none() {
+                        ledger
+                            .resolve(
+                                &a.attempt_id,
+                                AttemptOutcome::Ambiguous,
+                                None,
+                                Some("response never recorded; found confirmed by §7's read"),
+                            )
+                            .await?;
+                    }
+                    ledger
+                        .reconcile(&a.attempt_id, AttemptOutcome::Accepted)
+                        .await?;
+                    Acted::AttemptSettled {
+                        attempt_id: a.attempt_id.clone(),
+                        benchmark_id: benchmark_id.clone(),
+                    }
+                }
+                None => Acted::Nothing,
+            }
+        }
+        ClaimDecision::AwaitConfirmation
+        | ClaimDecision::StopForOperator { .. }
+        | ClaimDecision::Skip { .. } => Acted::Nothing,
+    };
+    Ok((Some(decision), acted))
+}
+
 #[derive(Debug, thiserror::Error)]
 enum HandleError {
     #[error(transparent)]
@@ -221,6 +503,14 @@ enum HandleError {
         intent_id: String,
         workflow_id: String,
     },
+    /// A commitment is due and the driver was handed no body to send.
+    ///
+    /// The gateway does not build one: `architecture.md` §3 keeps
+    /// "constructing commitments or proofs" out of it, and §9 grants it
+    /// read-only access to derived payloads. A driver asked to run the
+    /// benchmark pass without the payload has nothing legitimate to send.
+    #[error("intent {intent_id} is due a commitment and the driver holds no built payload")]
+    NoCommitment { intent_id: String },
 }
 
 async fn handle(
@@ -779,6 +1069,7 @@ mod tests {
         gate: WriteGate,
         key: TigApiKey,
         lane: PostLane,
+        commitment: Option<BenchmarkSubmission>,
         _key_path: PathBuf,
     }
 
@@ -804,6 +1095,7 @@ mod tests {
                 gate: gate(),
                 key,
                 lane: PostLane::new(policy),
+                commitment: None,
                 _key_path: key_path,
             })
         }
@@ -819,6 +1111,7 @@ mod tests {
                 lease_secs: 120,
                 transmitter: &self.transmitter,
                 lane: &self.lane,
+                commitment: self.commitment.as_ref(),
                 gate: &self.gate,
                 key: &self.key,
             }
@@ -940,6 +1233,19 @@ mod tests {
             .await
             .unwrap();
         assert!(attempts.iter().all(|a| !a.is_unresolved()), "{attempts:?}");
+    }
+
+    /// The benchmark intent's id. A workflow at this point owns two intents
+    /// — its precommit and its commitment — so the kind has to be named.
+    async fn benchmark_intent_id(pool: &sqlx::PgPool, workflow: &str) -> String {
+        sqlx::query_scalar(
+            "SELECT intent_id::text FROM pool.tig_write_intent
+              WHERE workflow_id = $1 AND write_kind = 'benchmark'",
+        )
+        .bind(workflow)
+        .fetch_one(pool)
+        .await
+        .unwrap()
     }
 
     async fn attempt_id_intent(pool: &sqlx::PgPool, workflow: &str) -> String {
@@ -1370,6 +1676,312 @@ mod tests {
             .find(|o| o.workflow_id == "w2")
             .unwrap();
         assert!(matches!(w2.acted, Acted::Transmitted { .. }), "{w2:?}");
+    }
+
+    /// A workflow with a confirmed precommit, its preconditions recorded,
+    /// and a commitment intent ready to send. Returns the body.
+    async fn ready_to_commit(h: &Harness, workflow: &str) -> BenchmarkSubmission {
+        use pool_workflow::{
+            CommitmentPayload, PackageAcceptance, benchmark_digest, record_acceptance,
+            record_commitment_payload,
+        };
+        // The real path: send the precommit, let the fake confirm it on the
+        // next block, and take the benchmark id and `num_nonces` from what
+        // TIG published — §6.2 fixes the quality vector's length at the
+        // confirmed value, and inventing either would test a commitment TIG
+        // has no benchmark for.
+        admit_precommit(&h.controller, &decision(workflow, 1), 4)
+            .await
+            .unwrap();
+        run_once(&h.driver(), &[]).await.unwrap();
+        fake_post(&h.base, "/_fake/advance-block", None, None).await;
+
+        let entry = precommits_window(&h.base)
+            .await
+            .into_iter()
+            .find(|p| p["state"]["block_confirmed"].is_number())
+            .expect("the fake confirms on the next block");
+        let benchmark_id = entry["benchmark_id"].as_str().unwrap().to_owned();
+        let num_nonces = entry["details"]["num_nonces"].as_u64().unwrap();
+        let current = workflow::find(&h.controller, Network::Testnet, workflow)
+            .await
+            .unwrap()
+            .unwrap();
+        workflow::confirm_precommit(
+            &h.controller,
+            Network::Testnet,
+            workflow,
+            current.revision,
+            &workflow::ConfirmedPrecommit {
+                benchmark_id: benchmark_id.clone(),
+                track_id: entry["settings"]["track_id"].as_str().unwrap().to_owned(),
+                // As TIG serves them: settings and details are disjoint, and
+                // §6.2's length is a detail.
+                settings: entry["settings"].clone(),
+                num_nonces: Some(i64::try_from(num_nonces).unwrap()),
+                block_confirmed: entry["state"]["block_confirmed"].as_i64().unwrap(),
+                block_started: entry["details"]["block_started"].as_i64().unwrap(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let submission = BenchmarkSubmission {
+            benchmark_id: benchmark_id.clone(),
+            merkle_root: "ab".repeat(32),
+            solution_quality: (0..i64::try_from(num_nonces).unwrap()).collect(),
+        };
+        let artifact_id = format!("artifact/{workflow}/commitment");
+        record_acceptance(
+            &h.controller,
+            &PackageAcceptance {
+                network: Network::Testnet,
+                workflow_id: workflow.to_string(),
+                benchmark_id: benchmark_id.clone(),
+                package_sha256: [0x11; 32],
+                stub_origin: false,
+            },
+        )
+        .await
+        .unwrap();
+        record_commitment_payload(
+            &h.controller,
+            &CommitmentPayload {
+                network: Network::Testnet,
+                artifact_id: artifact_id.clone(),
+                workflow_id: workflow.to_string(),
+                benchmark_id: benchmark_id.clone(),
+                payload_digest: benchmark_digest(&submission),
+                stub_origin: false,
+            },
+        )
+        .await
+        .unwrap();
+        PostgresIntentRepository::new(h.controller.clone())
+            .create(pool_workflow::NewIntent {
+                network: Network::Testnet,
+                workflow_id: workflow.to_string(),
+                write_kind: WriteKind::Benchmark,
+                generation: 1,
+                benchmark_id: Some(benchmark_id),
+                payload_digest: benchmark_digest(&submission),
+                payload_artifact_id: Some(artifact_id),
+            })
+            .await
+            .unwrap();
+        submission
+    }
+
+    #[tokio::test]
+    async fn a_commitment_is_sent_once_and_then_reconciled_by_its_benchmark_id() {
+        // §6.2's write, and §10's direct reconciliation: the commitment names
+        // its benchmark, so a confirmed read settles it with no tuple search
+        // and no second send.
+        let Some(mut h) = Harness::new("drive_commitment").await else {
+            return;
+        };
+        let submission = ready_to_commit(&h, "w1").await;
+        h.commitment = Some(submission.clone());
+
+        let report = run_once_benchmarks(&h.driver(), &[]).await.unwrap();
+        assert_eq!(report.outcomes.len(), 1, "{report:?}");
+        let o = &report.outcomes[0];
+        assert_eq!(o.decision, Some(ClaimDecision::Transmit));
+        let Acted::Transmitted { outcome, .. } = &o.acted else {
+            panic!("{o:?}");
+        };
+        assert_eq!(*outcome, AttemptOutcome::Accepted);
+        assert_eq!(
+            fake_state(&h.base).await["writes_received"]["submit-benchmark"],
+            json!(1)
+        );
+
+        // Not yet confirmed: §7 makes the read the authority, so the pass
+        // waits rather than sending again.
+        let again = run_once_benchmarks(&h.driver(), &[]).await.unwrap();
+        assert_eq!(
+            again.outcomes[0].decision,
+            Some(ClaimDecision::AwaitConfirmation),
+            "{again:?}"
+        );
+        assert_eq!(
+            fake_state(&h.base).await["writes_received"]["submit-benchmark"],
+            json!(1),
+            "still exactly one"
+        );
+
+        // The read confirms it. The attempt settles; nothing is resent.
+        let confirmed = vec![submission.benchmark_id().to_string()];
+        let settled = run_once_benchmarks(&h.driver(), &confirmed).await.unwrap();
+        assert!(
+            matches!(
+                &settled.outcomes[0].acted,
+                Acted::AttemptSettled { .. } | Acted::Nothing
+            ),
+            "{settled:?}"
+        );
+        assert_eq!(
+            fake_state(&h.base).await["writes_received"]["submit-benchmark"],
+            json!(1)
+        );
+        assert!(!settled.needs_operator(), "{settled:?}");
+    }
+
+    #[tokio::test]
+    async fn a_commitment_pass_with_no_built_payload_records_no_attempt() {
+        // The gateway does not construct commitments (§3). A driver asked to
+        // run this pass without the built body has nothing legitimate to
+        // send, and stops for an operator *before* an attempt row exists.
+        //
+        // Where the stop happens is the point. `send_benchmark` refuses the
+        // same body, but only after `begin_fenced` has written the attempt —
+        // and the only way to close that row is REJECTED, which the next
+        // pass reads as `Refused`: TIG answered and said no. It did not.
+        // `mining_system.md` §8 keeps a pool fault from being recorded as
+        // TIG's, so the ledger must stay empty here.
+        let Some(h) = Harness::new("drive_commitment_nobody").await else {
+            return;
+        };
+        ready_to_commit(&h, "w1").await;
+        let intent = benchmark_intent_id(&h.controller, "w1").await;
+
+        let report = run_once_benchmarks(&h.driver(), &[]).await.unwrap();
+        assert_eq!(
+            report.outcomes[0].decision,
+            Some(ClaimDecision::StopForOperator {
+                reason: StopReason::PayloadNotTheRecordedOne
+            }),
+            "{report:?}"
+        );
+        assert!(
+            matches!(&report.outcomes[0].acted, Acted::Nothing),
+            "{report:?}"
+        );
+        assert!(report.needs_operator(), "{report:?}");
+
+        let ledger = PostgresAttemptLedger::new(h.gateway.clone());
+        assert!(
+            ledger.attempts_for(&intent).await.unwrap().is_empty(),
+            "no attempt row may exist for a body that could not be sent"
+        );
+        assert_eq!(
+            fake_state(&h.base).await["writes_received"]
+                .get("submit-benchmark")
+                .cloned()
+                .unwrap_or(json!(0)),
+            json!(0)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_body_built_for_another_benchmark_is_refused_before_any_attempt() {
+        // The driver carries one commitment across every claimable benchmark
+        // intent, so a second intent is handed a body built for the first.
+        // Same rule as an absent body, and the same reason it must be caught
+        // here: an attempt row written for bytes that cannot be sent can only
+        // be closed as a refusal TIG never made.
+        let Some(mut h) = Harness::new("drive_commitment_wrongbody").await else {
+            return;
+        };
+        ready_to_commit(&h, "w1").await;
+        let intent = benchmark_intent_id(&h.controller, "w1").await;
+        h.commitment = Some(BenchmarkSubmission {
+            benchmark_id: "some_other_benchmark".to_string(),
+            merkle_root: "cd".repeat(32),
+            solution_quality: vec![9, 9, 9, 9],
+        });
+
+        let report = run_once_benchmarks(&h.driver(), &[]).await.unwrap();
+        assert_eq!(
+            report.outcomes[0].decision,
+            Some(ClaimDecision::StopForOperator {
+                reason: StopReason::PayloadNotTheRecordedOne
+            }),
+            "{report:?}"
+        );
+        let ledger = PostgresAttemptLedger::new(h.gateway.clone());
+        assert!(
+            ledger.attempts_for(&intent).await.unwrap().is_empty(),
+            "{report:?}"
+        );
+        assert_eq!(
+            fake_state(&h.base).await["writes_received"]
+                .get("submit-benchmark")
+                .cloned()
+                .unwrap_or(json!(0)),
+            json!(0)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_confirmed_commitment_waits_for_a_sender_that_may_still_be_live() {
+        // The benchmark path's direct reconciliation, against an attempt
+        // whose response has not been recorded yet.
+        //
+        // §7.3 writes the attempt and its response separately, so a NULL
+        // outcome younger than the call timeout may belong to a sender still
+        // waiting on TIG. Writing the fabricated ambiguity over it would lose
+        // the real status, and the real sender's `resolve` would then fail as
+        // already-resolved and be reported as a failure. The precommit path
+        // has always refused that; this path did not, and nothing exercised
+        // the branch at all.
+        let Some(mut h) = Harness::with_policy("drive_commitment_young", fast_policy()).await
+        else {
+            return;
+        };
+        let submission = ready_to_commit(&h, "w1").await;
+        let benchmark_id = submission.benchmark_id().to_string();
+        h.commitment = Some(submission);
+
+        // The crash: an attempt row under a fence, no response recorded.
+        let intent = benchmark_intent_id(&h.controller, "w1").await;
+        let lease = pool_workflow::lease::claim(
+            &h.gateway,
+            Network::Testnet,
+            "w1",
+            pool_workflow::LeaseKind::PrecommitTransmit,
+            "crashed",
+            60,
+        )
+        .await
+        .unwrap();
+        let ledger = PostgresAttemptLedger::new(h.gateway.clone());
+        let pending = ledger.begin_fenced(&intent, &lease).await.unwrap();
+        pool_workflow::lease::release(&h.gateway, &lease)
+            .await
+            .unwrap();
+
+        // TIG's read says the benchmark confirmed. The attempt is seconds
+        // old, so the pass waits instead of settling it.
+        let confirmed = vec![benchmark_id.clone()];
+        let early = run_once_benchmarks(&h.driver(), &confirmed).await.unwrap();
+        assert!(
+            matches!(&early.outcomes[0].acted, Acted::AwaitingSender { attempt_id } if *attempt_id == pending.attempt_id),
+            "too young to presume the sender dead: {early:?}"
+        );
+        assert!(!early.needs_operator(), "{early:?}");
+        assert!(
+            ledger.attempts_for(&intent).await.unwrap()[0]
+                .outcome
+                .is_none(),
+            "the attempt must be left exactly as the sender left it"
+        );
+
+        // Past the call timeout no sender can still be waiting, so it settles.
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        let settled = run_once_benchmarks(&h.driver(), &confirmed).await.unwrap();
+        assert!(
+            matches!(&settled.outcomes[0].acted, Acted::AttemptSettled { .. }),
+            "{settled:?}"
+        );
+        assert_eq!(
+            fake_state(&h.base).await["writes_received"]
+                .get("submit-benchmark")
+                .cloned()
+                .unwrap_or(json!(0)),
+            json!(0),
+            "reconciliation never sends"
+        );
     }
 
     #[tokio::test]

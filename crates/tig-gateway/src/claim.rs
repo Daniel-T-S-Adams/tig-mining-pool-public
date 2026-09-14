@@ -20,7 +20,9 @@
 //! duplicated precommit costs a fee, creates a benchmark the pool cannot
 //! attribute, and breaks §10's permanent one-benchmark-per-workflow mapping.
 
-use pool_workflow::{AttemptOutcome, IntentState, WriteAttempt, WriteIntent, WriteKind};
+use pool_workflow::{
+    AttemptOutcome, BenchmarkSubmission, IntentState, WriteAttempt, WriteIntent, WriteKind,
+};
 
 use crate::reconcile::{PrecommitSubmission, ReconcileError, Reconciliation, reconcile_precommit};
 
@@ -320,4 +322,162 @@ fn reconciled(
             },
         },
     }
+}
+
+/// What a benchmark commitment intent is owed (`tig_integration.md` §6.2).
+///
+/// A separate judgement from [`decide`], because §10 makes the two kinds
+/// reconcile differently and pretending otherwise would be the bug: "For
+/// benchmark and proof writes, `benchmark_id` makes reconciliation direct. A
+/// lost precommit HTTP response is harder because the client may not know the
+/// generated ID." A commitment already names its benchmark in the request, so
+/// there is no tuple search, no multi-candidate stop, and nothing for the
+/// response to teach the pool.
+///
+/// It is also not in the precommit lane. §10's single unresolved request is
+/// about precommits — the write whose identity is unknown until it answers —
+/// and §11's rule for the rest is narrower: "never send two concurrent writes
+/// for the same benchmark", which is what the intent's own attempts say.
+///
+/// `confirmed_benchmarks` is the set of `benchmark_id`s the pool has read as
+/// confirmed (§7: an entry in `get-benchmarks.benchmarks` with a non-null
+/// `state.block_confirmed`). Membership is the evidence, and its absence is
+/// not evidence of anything.
+pub fn decide_benchmark(
+    intent: &WriteIntent,
+    attempts: &[WriteAttempt],
+    owning: OwningWorkflow,
+    confirmed_benchmarks: &[String],
+    submission: Option<&BenchmarkSubmission>,
+) -> ClaimDecision {
+    if intent.write_kind != WriteKind::Benchmark {
+        return ClaimDecision::Skip {
+            reason: SkipReason::NotAPrecommit {
+                kind: intent.write_kind.as_str(),
+            },
+        };
+    }
+    let Some(benchmark_id) = intent.benchmark_id.clone() else {
+        // §7.3 binds a benchmark write's generation to its benchmark, and
+        // `NewIntent` refuses one without it. A row here without it is a
+        // record the pool cannot act on rather than one to guess at.
+        return ClaimDecision::StopForOperator {
+            reason: StopReason::Unreadable {
+                reason: "a benchmark intent with no benchmark_id".to_string(),
+            },
+        };
+    };
+
+    // Settled first: §7.3 makes CONFIRMED and REJECTED terminal, and a
+    // settled intent owes nothing whatever the reads say.
+    if matches!(intent.state, IntentState::Confirmed | IntentState::Rejected) {
+        return ClaimDecision::Skip {
+            reason: SkipReason::AlreadySettled,
+        };
+    }
+
+    // The direct reconciliation §10 promises, and it comes before terminality
+    // for the reason the precommit path's does: a workflow that ended while
+    // its write was in flight still has an unresolved attempt, and only
+    // settling it says what became of the write.
+    if confirmed_benchmarks.contains(&benchmark_id) {
+        return ClaimDecision::AlreadyConfirmed { benchmark_id };
+    }
+
+    // TIG answered and refused. Nothing was created, so there is nothing to
+    // reconcile and nothing to resend — what the workflow is owed is `fail`.
+    if !attempts.is_empty()
+        && attempts
+            .iter()
+            .all(|a| a.outcome == Some(AttemptOutcome::Rejected))
+    {
+        return ClaimDecision::Skip {
+            reason: SkipReason::Refused,
+        };
+    }
+
+    // A write is out and TIG has not confirmed it. §11: never a second
+    // concurrent write for one benchmark, and §7 makes the confirmation a
+    // read rather than a response — so this waits, whatever the response
+    // said. An ACCEPTED attempt waits here just as an unresolved one does:
+    // the commitment exists at TIG or it does not, and only the read says.
+    if attempts
+        .iter()
+        .any(|a| a.is_unresolved() || a.outcome == Some(AttemptOutcome::Accepted))
+    {
+        return ClaimDecision::AwaitConfirmation;
+    }
+
+    // The intent's own record says a write may have reached TIG while no
+    // attempt row says so. §7.3 writes both in one transaction, so one
+    // without the other is a contradiction — and transmitting on the missing
+    // half would turn "may have been sent" into "send again", paying a second
+    // fee for a commitment that may already stand.
+    if intent.state == IntentState::OutcomeUnknown {
+        return ClaimDecision::StopForOperator {
+            reason: StopReason::UnknownOutcomeWithNoAttempt,
+        };
+    }
+
+    // Only now does terminality matter: nothing is in flight, so a workflow
+    // the pool has written off gets no write (issue #86, invariant 14).
+    if owning.is_terminal {
+        return ClaimDecision::Skip {
+            reason: SkipReason::WorkflowEnded {
+                state: owning.state,
+            },
+        };
+    }
+
+    // **Not checked here: §7.3's workflow-scoped half.** `decide` consults
+    // `SiblingGenerations` because a precommit workflow can hold several
+    // generations, and a newer one must not send while an older one may have
+    // reached TIG. This reasons only over the intent's own attempts.
+    //
+    // That is sound only while one benchmark generation can exist, and today
+    // exactly one can: `create_commitment_intent` writes `generation: 1`,
+    // nothing else writes a benchmark intent, and asking twice returns the
+    // same row rather than a second one. A superseding generation is D3's
+    // rule and D3 has not landed.
+    //
+    // **D3 must add the sibling read here**, because the per-benchmark
+    // unresolved index does not cover this: once the first generation's
+    // attempt is ACCEPTED it is resolved, the index stops blocking, and a
+    // second generation would decide `Transmit` and pay a second fee for one
+    // benchmark. A `benchmark_siblings` analogue of `precommit_siblings`,
+    // returning `SupersededByNewerGeneration` / `SiblingGenerationTransmitted`
+    // before `Transmit`, is what that needs. Writing it now would be untested
+    // against a state the schema cannot reach, which is how dead checks get
+    // in — the premise is pinned by a test instead
+    // (`a_second_commitment_intent_for_one_workflow_is_refused`).
+
+    // §7.3's binding digest, checked before the decision to transmit and so
+    // before any attempt row exists. `send_benchmark` refuses the same
+    // mismatch, but only after `begin_fenced` has written the attempt — and
+    // the caller then has an attempt it cannot settle except by closing it
+    // REJECTED, which every later pass reads as `Refused`: TIG answered and
+    // said no. It did not. `mining_system.md` §8 keeps a pool fault from
+    // being recorded as TIG's, and a durable false refusal is exactly that.
+    //
+    // Checked here rather than where `decide` checks it, because only this
+    // branch touches the body: a settled intent, a direct reconciliation and
+    // a wait all reason over the intent's own `benchmark_id`, and stopping
+    // those for an operator would raise an alarm about a body none of them
+    // would have used.
+    //
+    // An absent body is the same answer as a wrong one. The driver carries a
+    // single commitment, so a second claimable benchmark intent is handed a
+    // body built for the first; both cases mean "this intent's bytes are not
+    // here", and neither may become an attempt.
+    match submission {
+        Some(submission)
+            if crate::transmit::benchmark_digest(submission) == intent.payload_digest => {}
+        _ => {
+            return ClaimDecision::StopForOperator {
+                reason: StopReason::PayloadNotTheRecordedOne,
+            };
+        }
+    }
+
+    ClaimDecision::Transmit
 }

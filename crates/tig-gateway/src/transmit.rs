@@ -28,8 +28,11 @@ use serde_json::Value;
 use crate::credential::TigApiKey;
 use crate::write_gate::WritePermit;
 use crate::write_policy::WritePolicy;
-use pool_workflow::payload::PrecommitSubmission;
-pub use pool_workflow::payload::{precommit_body, precommit_digest};
+use pool_workflow::payload::{BenchmarkSubmission, PrecommitSubmission, benchmark_body};
+// Re-exported for the same reason `precommit_digest` is: `claim` checks
+// §7.3's binding digest before deciding to transmit, so the digest function
+// has a reader outside the send path.
+pub use pool_workflow::payload::{benchmark_digest, precommit_body, precommit_digest};
 
 /// What one transmission established.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -76,11 +79,12 @@ pub enum TransmitError {
         attempt_intent_id: String,
         intent_id: String,
     },
-    /// The intent is not a precommit.
-    #[error("intent {intent_id} is a {write_kind:?} intent; this path sends precommits")]
+    /// The intent is not the kind this path sends.
+    #[error("intent {intent_id} is a {write_kind:?} intent; this path sends {expected}")]
     NotAPrecommitIntent {
         intent_id: String,
         write_kind: WriteKind,
+        expected: &'static str,
     },
     /// The body does not hash to the intent's recorded payload.
     ///
@@ -152,6 +156,76 @@ impl PrecommitTransmitter {
         attempt: &WriteAttempt,
         submission: &PrecommitSubmission,
     ) -> Result<Transmitted, TransmitError> {
+        self.post(
+            permit,
+            key,
+            intent,
+            attempt,
+            WriteKind::Precommit,
+            "submit-precommit",
+            precommit_digest(submission),
+            &precommit_body(submission),
+            true,
+        )
+        .await
+    }
+
+    /// Send one §6.2 benchmark commitment, once.
+    ///
+    /// Same contract as [`Self::send`], and deliberately the same code
+    /// underneath: the pre-flight checks — the attempt is this intent's, the
+    /// kind is right, the bytes digest to what was recorded, the row has no
+    /// response yet — and the classification of what came back are §7.3's
+    /// rules about *a write*, not about a precommit. Two copies would be two
+    /// places for them to drift, and the second copy is exactly where the
+    /// digest check gets forgotten.
+    ///
+    /// What differs is only what §10 does afterwards: a lost precommit
+    /// response needs the tuple search because the pool may not know the
+    /// generated id, while a benchmark write already names its
+    /// `benchmark_id` and reconciles directly.
+    pub async fn send_benchmark(
+        &self,
+        permit: &WritePermit,
+        key: &TigApiKey,
+        intent: &WriteIntent,
+        attempt: &WriteAttempt,
+        submission: &BenchmarkSubmission,
+    ) -> Result<Transmitted, TransmitError> {
+        self.post(
+            permit,
+            key,
+            intent,
+            attempt,
+            WriteKind::Benchmark,
+            "submit-benchmark",
+            benchmark_digest(submission),
+            &benchmark_body(submission),
+            false,
+        )
+        .await
+    }
+
+    /// One write, once: the checks §7.3 requires before the request leaves,
+    /// the request, and the classification of what came back.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "every one is a §7.3 precondition of the send"
+    )]
+    async fn post(
+        &self,
+        permit: &WritePermit,
+        key: &TigApiKey,
+        intent: &WriteIntent,
+        attempt: &WriteAttempt,
+        expected_kind: WriteKind,
+        path: &str,
+        payload_digest: [u8; 32],
+        body: &Value,
+        // Whether an accepted response is expected to carry the
+        // `benchmark_id`, which only a precommit's does.
+        learns_benchmark_id: bool,
+    ) -> Result<Transmitted, TransmitError> {
         // Read so the permit is a live requirement rather than an unused
         // parameter: a write records the pin it was admitted under.
         let _admitted_under = permit.admitted_under();
@@ -162,16 +236,17 @@ impl PrecommitTransmitter {
                 intent_id: intent.intent_id.clone(),
             });
         }
-        if intent.write_kind != WriteKind::Precommit {
+        if intent.write_kind != expected_kind {
             return Err(TransmitError::NotAPrecommitIntent {
                 intent_id: intent.intent_id.clone(),
                 write_kind: intent.write_kind,
+                expected: expected_kind.as_str(),
             });
         }
         // §7.3's digest is recorded before the send; this is where it becomes
         // binding. Checked before the attempt's own state so a mismatched
         // payload is never sent, whatever the lane says.
-        if precommit_digest(submission) != intent.payload_digest {
+        if payload_digest != intent.payload_digest {
             return Err(TransmitError::PayloadNotTheRecordedOne {
                 intent_id: intent.intent_id.clone(),
             });
@@ -181,12 +256,12 @@ impl PrecommitTransmitter {
                 attempt_id: attempt.attempt_id.clone(),
             });
         }
-        let url = format!("{}/submit-precommit", self.base_url);
+        let url = format!("{}/{path}", self.base_url);
         let response = self
             .http
             .post(&url)
             .header("X-Api-Key", key.expose())
-            .json(&precommit_body(submission))
+            .json(body)
             .send()
             .await;
 
@@ -222,7 +297,8 @@ impl PrecommitTransmitter {
                     });
                 }
             };
-            let Some(benchmark_id) = body.get("benchmark_id").and_then(|v| v.as_str()) else {
+            let returned = body.get("benchmark_id").and_then(|v| v.as_str());
+            if learns_benchmark_id && returned.is_none() {
                 // A success status is TIG accepting the request for
                 // processing (§6.1, §7), so the precommit may exist and its
                 // fee may be paid. That the body did not carry the id back
@@ -231,18 +307,24 @@ impl PrecommitTransmitter {
                 // Calling it an error would licence the resend §10 forbids;
                 // the identical situation one branch above, a body that will
                 // not decode, is already ambiguous.
+                //
+                // Only a precommit is judged this way. A benchmark or proof
+                // write already names its `benchmark_id` in the request, so
+                // there is nothing for the response to teach it and nothing
+                // missing when the response does not repeat it — §6.2's
+                // reply carries no id at all.
                 return Ok(Transmitted {
                     outcome: AttemptOutcome::Ambiguous,
                     http_status,
                     detail: "accepted without a benchmark_id".to_string(),
                     benchmark_id: None,
                 });
-            };
+            }
             return Ok(Transmitted {
                 outcome: AttemptOutcome::Accepted,
                 http_status,
                 detail: "accepted".to_string(),
-                benchmark_id: Some(benchmark_id.to_string()),
+                benchmark_id: returned.map(str::to_string),
             });
         }
 

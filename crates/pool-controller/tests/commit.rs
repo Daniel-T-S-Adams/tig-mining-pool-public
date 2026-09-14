@@ -242,6 +242,48 @@ async fn the_quality_vector_must_be_the_length_the_confirmed_precommit_fixed() {
 }
 
 #[tokio::test]
+async fn a_second_commitment_intent_for_one_workflow_is_refused() {
+    // Pins a premise the gateway relies on. `claim::decide_benchmark` does
+    // not consult sibling generations the way the precommit path does, and
+    // that is only sound while one benchmark generation can exist.
+    //
+    // Two things make it so: this function writes `generation: 1` and nothing
+    // else writes a benchmark intent, and `0003`'s
+    // UNIQUE (network, workflow_id, write_kind, generation) refuses a second
+    // row at that generation. If D3 later makes a superseding generation
+    // reachable, this test fails — which is the signal that the gateway owes
+    // the sibling read before that lands, since the per-benchmark unresolved
+    // index stops blocking once the first attempt resolves.
+    let Some(db) = TempDb::migrated("commit_one_generation").await else {
+        return;
+    };
+    let pool = db.pool_as("pool_controller").await;
+    let submission = committed(4);
+    confirmed_workflow(&pool, Some(4)).await;
+    preconditions(&pool, &submission).await;
+
+    let first = create_commitment_intent(&pool, NET, &fake(), "w1", ARTIFACT, &submission)
+        .await
+        .expect("the first commitment is owed");
+    let again = create_commitment_intent(&pool, NET, &fake(), "w1", ARTIFACT, &submission)
+        .await
+        .expect("asking twice is not an error");
+
+    // The same row, not a second generation: the call is idempotent, which is
+    // what a controller retrying a pass needs.
+    assert_eq!(again.intent_id, first.intent_id);
+    assert_eq!(again.generation, 1);
+
+    let intents: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM pool.tig_write_intent WHERE write_kind = 'benchmark'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(intents, 1, "exactly one benchmark intent, ever");
+}
+
+#[tokio::test]
 async fn the_merkle_root_must_be_sixty_four_lowercase_hex_characters() {
     // §6.2 fixes the root's shape as well as the vector's length, and TIG
     // refuses a body of the wrong shape *after* the fee is paid — so it is

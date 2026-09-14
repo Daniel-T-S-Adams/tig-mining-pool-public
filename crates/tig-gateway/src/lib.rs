@@ -21,9 +21,12 @@ pub mod write_policy;
 
 pub use claim::{
     ClaimDecision, OwningWorkflow, SiblingGenerations, SkipReason, StopReason, decide,
+    decide_benchmark,
 };
 pub use credential::{CredentialError, TigApiKey};
-pub use drive::{Acted, DriveError, Driver, IntentOutcome, RunReport, run_once};
+pub use drive::{
+    Acted, DriveError, Driver, IntentOutcome, RunReport, run_once, run_once_benchmarks,
+};
 pub use lane::PostLane;
 pub use readiness::{Check, Evidence, Failure, Pins, WriteReady, evaluate};
 pub use reconcile::{PrecommitSubmission, Reconciliation, TrackSettings, reconcile_precommit};

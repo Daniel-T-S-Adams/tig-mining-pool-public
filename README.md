@@ -12,6 +12,26 @@ gateway and restart-safe protocol state machine — is specified in
 `docs/plans/slice-1-gateway.md`; `docs/pre_build_checklist.md` owns the
 remaining gates and the slice order.
 
+## A note on provenance
+
+This repository was developed privately and published from that history.
+Two things follow from that, and neither is an oversight:
+
+- **PR and issue numbers cited in `docs/` refer to the private development
+  repository** and do not resolve here. They are kept because they record
+  when and where a decision was made; rewriting them would remove that
+  evidence without adding any.
+- **Two retired TIG testnet addresses are deliberately not recorded** — a
+  superseded slice-1 candidate and the protocol spike's own identity. Both
+  accounts are retired, neither is of use to a reader, and the operator
+  holds them. The runs those documents describe are otherwise unchanged.
+  See `docs/plans/protocol-spike.md` §4.
+
+The current slice-1 identity *is* named, because `tig_integration.md` §13
+check 9 makes the gateway verify that the confirmed player ID matches its
+configured identity — a reader needs it to follow that check. A TIG player
+address is public by construction: the protocol publishes it in block data.
+
 ## Document authority
 
 - Protocol meaning is owned by `docs/mining_system.md`,

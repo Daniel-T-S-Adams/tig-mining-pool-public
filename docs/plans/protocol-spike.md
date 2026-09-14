@@ -83,8 +83,9 @@ The one step no agent performs. Runbook (`tig_integration.md` §4,
    pinned in this repository).
 6. Verify readiness: `get-player-data` for the address shows a positive
    `available_fee_balance`. Record the address (public, safe to commit) in
-   this plan when done: **pool testnet address:
-   `0xbeefbeefbeefbeefbeefbeefbeefbeefbeefbeef`** (verified 2026-08-03 at
+   this plan when done. The address itself is **deliberately not recorded
+   in this repository** — a retired identity is of no use to a reader and
+   this repository is public; the operator holds it. (Verified 2026-08-03 at
    height 1268954: `available_fee_balance = 10 TIG`, `total_fees_paid = 0`;
    API key stored at `secrets/tig-testnet-api-key`, mode 0600).
 

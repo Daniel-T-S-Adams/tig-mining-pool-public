@@ -14,7 +14,9 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use pool_config::TigConfig;
-use pool_controller::stub::{StubError, stub_acceptance, stub_canonical_payload};
+use pool_controller::stub::{
+    StubError, stub_acceptance, stub_canonical_payload, stub_commitment_payload,
+};
 use pool_domain::Network;
 use pool_test_support::TempDb;
 use pool_workflow::{NewIntent, PostgresIntentRepository, TigWriteIntentRepository, WriteKind};
@@ -62,6 +64,8 @@ async fn the_stub_satisfies_the_preconditions_it_stands_in_for() {
     .await
     .expect_err("invariant 4 is still in force");
 
+    // Acceptance alone is not enough: `migrations/0015` also requires the
+    // built commitment the gateway will check its bytes against.
     stub_acceptance(&pool, &fake(), NET, "w1", "bench_a")
         .await
         .unwrap();
@@ -72,10 +76,33 @@ async fn the_stub_satisfies_the_preconditions_it_stands_in_for() {
         generation: 1,
         benchmark_id: Some("bench_a".to_string()),
         payload_digest: PAYLOAD,
-        payload_artifact_id: None,
+        payload_artifact_id: Some("artifact/w1/commitment".to_string()),
     })
     .await
-    .expect("the precondition now holds");
+    .expect_err("acceptance without a built commitment is half a precondition");
+
+    stub_commitment_payload(
+        &pool,
+        &fake(),
+        NET,
+        "artifact/w1/commitment",
+        "w1",
+        "bench_a",
+        PAYLOAD,
+    )
+    .await
+    .unwrap();
+    repo.create(NewIntent {
+        network: NET,
+        workflow_id: "w1".to_string(),
+        write_kind: WriteKind::Benchmark,
+        generation: 1,
+        benchmark_id: Some("bench_a".to_string()),
+        payload_digest: PAYLOAD,
+        payload_artifact_id: Some("artifact/w1/commitment".to_string()),
+    })
+    .await
+    .expect("both halves now hold");
 
     stub_canonical_payload(
         &pool,
@@ -140,7 +167,24 @@ async fn the_stub_refuses_a_live_endpoint_and_writes_nothing() {
     .expect_err("nor a fabricated payload");
     assert!(matches!(error, StubError::NotFakeTig { .. }), "{error:?}");
 
-    for table in ["pool.package_acceptance", "pool.canonical_payload"] {
+    let error = stub_commitment_payload(
+        &pool,
+        &live(),
+        NET,
+        "artifact/w1/commitment",
+        "w1",
+        "bench_a",
+        PAYLOAD,
+    )
+    .await
+    .expect_err("nor a fabricated commitment");
+    assert!(matches!(error, StubError::NotFakeTig { .. }), "{error:?}");
+
+    for table in [
+        "pool.package_acceptance",
+        "pool.canonical_payload",
+        "pool.commitment_payload",
+    ] {
         let rows: i64 =
             sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT count(*) FROM {table}")))
                 .fetch_one(&pool)

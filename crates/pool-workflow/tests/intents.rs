@@ -38,8 +38,33 @@ fn benchmark(workflow: &str, generation: i32, benchmark_id: &str, digest: u8) ->
         generation,
         benchmark_id: Some(benchmark_id.to_string()),
         payload_digest: [digest; 32],
-        payload_artifact_id: None,
+        // §13 invariant 4's second half (`migrations/0015`): a commitment
+        // names the built payload it sends. Keyed by benchmark and digest, so
+        // each variation these tests create cites its own.
+        payload_artifact_id: Some(format!("artifact/{workflow}/{benchmark_id}/{digest:02x}")),
     }
+}
+
+/// Record what `migrations/0011` and `0015` require behind a benchmark
+/// intent, so these tests measure the intent *key* rules and not the
+/// preconditions.
+async fn seed_commitment_for(pool: &sqlx::PgPool, new: &NewIntent) {
+    let benchmark_id = new.benchmark_id.as_deref().expect("a commitment names one");
+    pool_test_support::seed_acceptances(
+        pool,
+        "testnet",
+        &[(new.workflow_id.as_str(), benchmark_id)],
+    )
+    .await;
+    pool_test_support::seed_commitment_payload(
+        pool,
+        "testnet",
+        new.payload_artifact_id.as_deref().expect("and a payload"),
+        &new.workflow_id,
+        benchmark_id,
+        new.payload_digest,
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -167,15 +192,17 @@ async fn a_generation_cannot_be_reused_across_a_different_benchmark() {
         &["w1", "w2", "w3", "author", "rearm", "terminal"],
     )
     .await;
-    // §13 invariant 4: 0011 refuses a benchmark write with no durable
-    // acceptance behind it. Both benchmarks below are accepted, so what this
-    // test measures is still the intent *key* rule and not the precondition.
-    pool_test_support::seed_acceptances(
-        &db.pool_as("pool_controller").await,
-        "testnet",
-        &[("w1", "bench-a"), ("w1", "bench-b")],
-    )
-    .await;
+    // §13 invariant 4: 0011 and 0015 refuse a benchmark write with no durable
+    // acceptance and no built commitment behind it. Both benchmarks below
+    // have theirs, so what this test measures is still the intent *key* rule
+    // and not the precondition.
+    let pool = db.pool_as("pool_controller").await;
+    for intent in [
+        benchmark("w1", 1, "bench-a", 0xab),
+        benchmark("w1", 1, "bench-b", 0xab),
+    ] {
+        seed_commitment_for(&pool, &intent).await;
+    }
     let repo = PostgresIntentRepository::new(db.pool_as("pool_controller").await);
 
     repo.create(benchmark("w1", 1, "bench-a", 0xab))

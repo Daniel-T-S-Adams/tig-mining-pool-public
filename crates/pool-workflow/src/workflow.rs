@@ -252,6 +252,10 @@ pub struct Workflow {
     /// TIG's `details.block_started`, once the precommit confirms. §8's
     /// deadlines are ages from here.
     pub block_started: Option<i64>,
+    /// TIG's `details.num_nonces`, once the precommit confirms.
+    /// `tig_integration.md` §6.2 fixes the commitment's quality vector at
+    /// this length.
+    pub confirmed_num_nonces: Option<i64>,
     pub terminal_reason: Option<String>,
 }
 
@@ -263,6 +267,15 @@ pub struct Workflow {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfirmedPrecommit {
     pub benchmark_id: String,
+    /// TIG's `details.num_nonces`, the length §6.2 fixes a commitment's
+    /// quality vector at.
+    ///
+    /// A precommit *detail* rather than a setting, so it does not arrive in
+    /// [`Self::settings`] — the same split `block_started` sits on. Optional
+    /// because a record TIG served without it is one the pool cannot invent a
+    /// length from; the commitment path refuses rather than building a body
+    /// against a number it does not have.
+    pub num_nonces: Option<i64>,
     pub block_confirmed: i64,
     /// TIG's `details.block_started`. Every guardrail in `tig_integration.md`
     /// §8 is an age measured from this, and it is TIG's value rather than one
@@ -409,7 +422,7 @@ pub async fn create(
          RETURNING workflow_id, network, state, revision, owner_kind, owner_id,
                    benchmark_id, unverified_from_block, unverified_to_block,
                    confirmed_track_id, confirmed_settings,
-                   precommit_confirmed_block, block_started, terminal_reason",
+                   precommit_confirmed_block, block_started, confirmed_num_nonces, terminal_reason",
     )
     .bind(workflow_id)
     .bind(network.as_str())
@@ -487,7 +500,7 @@ pub async fn find(
         "SELECT workflow_id, network, state, revision, owner_kind, owner_id,
                 benchmark_id, unverified_from_block, unverified_to_block,
                 confirmed_track_id, confirmed_settings,
-                precommit_confirmed_block, block_started, terminal_reason
+                precommit_confirmed_block, block_started, confirmed_num_nonces, terminal_reason
          FROM pool.workflow WHERE network = $1 AND workflow_id = $2",
     )
     .bind(network.as_str())
@@ -519,6 +532,7 @@ fn row_to_workflow(row: &sqlx::postgres::PgRow) -> Result<Workflow, WorkflowErro
             .try_get("precommit_confirmed_block")
             .map_err(unavailable)?,
         block_started: row.try_get("block_started").map_err(unavailable)?,
+        confirmed_num_nonces: row.try_get("confirmed_num_nonces").map_err(unavailable)?,
         terminal_reason: row.try_get("terminal_reason").map_err(unavailable)?,
     })
 }
@@ -618,6 +632,7 @@ pub async fn confirm_precommit(
             Ok(Fields {
                 benchmark_id: Some(evidence.benchmark_id.clone()),
                 block_started: Some(evidence.block_started),
+                confirmed_num_nonces: evidence.num_nonces,
                 confirmed: Some((
                     evidence.track_id.clone(),
                     evidence.settings.clone(),
@@ -971,6 +986,7 @@ fn expect_benchmark(
 struct Fields {
     benchmark_id: Option<String>,
     block_started: Option<i64>,
+    confirmed_num_nonces: Option<i64>,
     confirmed: Option<(String, serde_json::Value, i64)>,
     unverified_to_block: Option<i64>,
     terminal_reason: Option<String>,
@@ -1019,7 +1035,7 @@ async fn transition_guarded(
         "SELECT workflow_id, network, state, revision, owner_kind, owner_id,
                 benchmark_id, unverified_from_block, unverified_to_block,
                 confirmed_track_id, confirmed_settings,
-                precommit_confirmed_block, block_started, terminal_reason
+                precommit_confirmed_block, block_started, confirmed_num_nonces, terminal_reason
          FROM pool.workflow
          WHERE network = $1 AND workflow_id = $2
          FOR UPDATE",
@@ -1073,6 +1089,7 @@ async fn transition_guarded(
              confirmed_settings = COALESCE($6, confirmed_settings),
              precommit_confirmed_block = COALESCE($7, precommit_confirmed_block),
              block_started = COALESCE($11, block_started),
+             confirmed_num_nonces = COALESCE($13, confirmed_num_nonces),
              -- §6.1 closes the interval at the *earlier* of TIG verification
              -- or a terminal state, and nothing reopens it: COALESCE keeps the
              -- first close, so a later transition cannot move it. §7.6's
@@ -1087,7 +1104,7 @@ async fn transition_guarded(
          RETURNING workflow_id, network, state, revision, owner_kind, owner_id,
                    benchmark_id, unverified_from_block, unverified_to_block,
                    confirmed_track_id, confirmed_settings,
-                   precommit_confirmed_block, block_started, terminal_reason",
+                   precommit_confirmed_block, block_started, confirmed_num_nonces, terminal_reason",
     );
 
     let updated = sqlx::query(update)
@@ -1103,6 +1120,7 @@ async fn transition_guarded(
         .bind(at_revision)
         .bind(fields.block_started)
         .bind(require_no_write_in_flight)
+        .bind(fields.confirmed_num_nonces)
         .fetch_optional(&mut *tx)
         .await
         // A permanent conflict, not an outage: another workflow already owns this

@@ -164,6 +164,13 @@ fn precommits(body: &Value) -> Result<BTreeMap<String, ConfirmedPrecommit>, Wind
                 // §6.1: the pool submits every live track and TIG selects one,
                 // so this is TIG's answer and never the pool's proposal.
                 track_id: text(entry, &["settings", "track_id"], "precommits", index)?,
+                // §6.2's commitment is built to exactly this length. It is
+                // a *detail*, so `settings` below does not contain it and it
+                // is carried across explicitly, as `block_started` is.
+                num_nonces: entry
+                    .get("details")
+                    .and_then(|d| d.get("num_nonces"))
+                    .and_then(Value::as_i64),
                 // §7: "Confirmed settings/details replace proposed values."
                 // Carried whole rather than field by field, because the pool
                 // has no business deciding which of TIG's values matter.

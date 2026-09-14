@@ -75,6 +75,25 @@ pub struct CanonicalPayload {
     pub stub_origin: bool,
 }
 
+/// A built commitment payload for one benchmark (`migrations/0015`).
+///
+/// The mechanism §7.3's digest guard needs, not only a precondition: the
+/// gateway must be able to tell that the bytes it is about to send are the
+/// ones the intent recorded, and for a commitment those bytes are built from
+/// the accepted package rather than derivable from the decision.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitmentPayload {
+    pub network: Network,
+    /// The deterministic immutable key the payload is published under.
+    pub artifact_id: String,
+    pub workflow_id: String,
+    pub benchmark_id: String,
+    /// SHA-256 over the §6.2 body, which the intent must carry too.
+    pub payload_digest: [u8; 32],
+    /// Whether F4a's stub built this. See [`PackageAcceptance::stub_origin`].
+    pub stub_origin: bool,
+}
+
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum AcceptanceError {
     #[error("acceptance store unavailable: {0}")]
@@ -231,4 +250,106 @@ where
             "canonical payload neither inserted nor visible; retry".to_string(),
         )),
     }
+}
+
+/// Record that a commitment payload was built for this benchmark.
+///
+/// Same contract as [`record_canonical_payload`]: idempotent for an identical
+/// re-record, a refusal for a different one.
+pub async fn record_commitment_payload<'e, E>(
+    executor: E,
+    payload: &CommitmentPayload,
+) -> Result<(), AcceptanceError>
+where
+    E: sqlx::PgExecutor<'e>,
+{
+    let row: (bool, Option<bool>) = sqlx::query_as(
+        "WITH ins AS (
+             INSERT INTO pool.commitment_payload
+                 (network, artifact_id, workflow_id, benchmark_id,
+                  payload_digest, stub_origin)
+             VALUES ($1, $2, $3, $4, $5, $6)
+             ON CONFLICT (network, artifact_id) DO NOTHING
+             RETURNING 1
+         )
+         SELECT EXISTS (SELECT 1 FROM ins),
+                (SELECT workflow_id = $3 AND benchmark_id = $4
+                        AND payload_digest = $5 AND stub_origin = $6
+                   FROM pool.commitment_payload
+                  WHERE network = $1 AND artifact_id = $2)",
+    )
+    .bind(payload.network.as_str())
+    .bind(&payload.artifact_id)
+    .bind(&payload.workflow_id)
+    .bind(&payload.benchmark_id)
+    .bind(payload.payload_digest.as_slice())
+    .bind(payload.stub_origin)
+    .fetch_one(executor)
+    .await
+    .map_err(|e| {
+        // `0015`'s one-commitment-per-benchmark index. The ON CONFLICT above
+        // covers the primary key only, so a *second* payload for the same
+        // benchmark under a different artifact key lands here — and it is a
+        // permanent disagreement about what was built, not an outage.
+        // Reported as `Unavailable` it would be retried forever by a caller
+        // doing exactly what this module's contract tells it to.
+        if e.as_database_error()
+            .is_some_and(|db| db.constraint() == Some(ONE_COMMITMENT_PER_BENCHMARK))
+        {
+            return AcceptanceError::Conflict {
+                network: payload.network,
+                workflow_id: payload.workflow_id.clone(),
+                what: "commitment payload",
+            };
+        }
+        unavailable(e)
+    })?;
+
+    match row {
+        (true, _) => Ok(()),
+        (false, Some(true)) => Ok(()),
+        (false, Some(false)) => Err(AcceptanceError::Conflict {
+            network: payload.network,
+            workflow_id: payload.workflow_id.clone(),
+            what: "commitment payload",
+        }),
+        (false, None) => Err(AcceptanceError::Unavailable(
+            "commitment payload neither inserted nor visible; retry".to_string(),
+        )),
+    }
+}
+
+/// Name of the unique index in `migrations/0015_commitment_payload.sql`.
+const ONE_COMMITMENT_PER_BENCHMARK: &str = "commitment_payload_one_per_benchmark";
+
+/// Whether either precondition row for this benchmark was fabricated by
+/// F4a's stub.
+///
+/// F4d's accepting half reads this: creating a benchmark or proof write from
+/// a stubbed precondition is refused unless the TIG endpoint is a local
+/// `fake-tig`. Asked of the *rows*, not of the caller, because the caller
+/// that fabricated them may be long gone — `stub_origin` is immutable
+/// (`migrations/0012`, `0015`) precisely so this question keeps its answer.
+pub async fn benchmark_preconditions_are_stubbed(
+    pool: &sqlx::PgPool,
+    network: Network,
+    workflow_id: &str,
+    benchmark_id: &str,
+) -> Result<bool, AcceptanceError> {
+    let stubbed: bool = sqlx::query_scalar(
+        "SELECT COALESCE(bool_or(stub_origin), false) FROM (
+             SELECT stub_origin FROM pool.package_acceptance
+              WHERE network = $1 AND workflow_id = $2 AND benchmark_id = $3
+             UNION ALL
+             SELECT stub_origin FROM pool.commitment_payload
+              WHERE network = $1 AND workflow_id = $2 AND benchmark_id = $3
+         ) AS rows",
+    )
+    .bind(network.as_str())
+    .bind(workflow_id)
+    .bind(benchmark_id)
+    .fetch_one(pool)
+    .await
+    .map_err(unavailable)?;
+    Ok(stubbed)
 }

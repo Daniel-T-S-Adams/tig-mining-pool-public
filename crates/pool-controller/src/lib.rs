@@ -10,6 +10,7 @@
 //! gate in [`stub`].
 
 pub mod bind;
+pub mod commit;
 pub mod ingest;
 pub mod reconciler;
 pub mod service;

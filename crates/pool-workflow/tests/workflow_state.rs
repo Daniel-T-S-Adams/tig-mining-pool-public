@@ -38,6 +38,8 @@ fn precommit(benchmark: &str, block: i64) -> ConfirmedPrecommit {
         // TIG's own record of when the benchmark began; §8's deadlines are
         // ages from here, and it is a few blocks before confirmation.
         block_started: block - 2,
+        // A *detail*, like `block_started` — not one of the settings below.
+        num_nonces: Some(80),
         // TIG chose the track; the pool proposed every active one.
         track_id: "t002".to_string(),
         settings: json!({
@@ -996,13 +998,24 @@ async fn an_unsettled_benchmark_write_holds_the_deadline_off_too() {
     let started = w.block_started.unwrap();
     let long_past = started + i64::from(guardrails.workflow_expiry_age_blocks) + 99;
 
-    // §13 invariant 4: a benchmark write needs its acceptance recorded.
+    // §13 invariant 4: a benchmark write needs its acceptance recorded and
+    // its commitment built.
     pool_test_support::seed_acceptances(&pool, "testnet", &[("w1", "bench_a")]).await;
+    pool_test_support::seed_commitment_payload(
+        &pool,
+        "testnet",
+        "artifact/w1/commitment",
+        "w1",
+        "bench_a",
+        [0xab; 32],
+    )
+    .await;
     let intent_id: String = sqlx::query_scalar(
         "INSERT INTO pool.tig_write_intent
-             (network, workflow_id, write_kind, generation, payload_digest, benchmark_id)
+             (network, workflow_id, write_kind, generation, payload_digest, benchmark_id,
+              payload_artifact_id)
          VALUES ('testnet', 'w1', 'benchmark', 1,
-                 decode(repeat('ab', 32), 'hex'), 'bench_a')
+                 decode(repeat('ab', 32), 'hex'), 'bench_a', 'artifact/w1/commitment')
          RETURNING intent_id::text",
     )
     .fetch_one(&pool)

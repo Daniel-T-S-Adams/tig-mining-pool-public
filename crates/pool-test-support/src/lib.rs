@@ -91,6 +91,36 @@ pub async fn seed_acceptances(pool: &PgPool, network: &str, pairs: &[(&str, &str
     }
 }
 
+/// Invariant 4's other half (`migrations/0015`): the built commitment a
+/// benchmark intent must cite.
+///
+/// `payload_digest` is a parameter for the reason
+/// [`seed_canonical_payload`]'s is: the trigger requires it to equal the
+/// intent's.
+pub async fn seed_commitment_payload(
+    pool: &PgPool,
+    network: &str,
+    artifact_id: &str,
+    workflow_id: &str,
+    benchmark_id: &str,
+    payload_digest: [u8; 32],
+) {
+    sqlx::query(
+        "INSERT INTO pool.commitment_payload
+             (network, artifact_id, workflow_id, benchmark_id, payload_digest)
+         VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (network, artifact_id) DO NOTHING",
+    )
+    .bind(network)
+    .bind(artifact_id)
+    .bind(workflow_id)
+    .bind(benchmark_id)
+    .bind(payload_digest.as_slice())
+    .execute(pool)
+    .await
+    .expect("seeding a commitment payload");
+}
+
 /// The same for invariant 5: a canonical payload a proof intent may cite.
 ///
 /// Returns nothing — the caller already knows the artifact id, because it has

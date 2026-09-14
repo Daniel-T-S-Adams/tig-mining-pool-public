@@ -16,8 +16,8 @@ use pool_workflow::{
 };
 use serde_json::json;
 use tig_gateway::claim::{
-    ClaimDecision, ConfirmedBenchmarks, OwningWorkflow, SiblingGenerations, SkipReason, StopReason,
-    decide, decide_benchmark,
+    ClaimDecision, ConfirmedBenchmarks, ConfirmedReadError, OwningWorkflow, SiblingGenerations,
+    SkipReason, StopReason, decide, decide_benchmark,
 };
 use tig_gateway::reconcile::{PrecommitSubmission, TrackSettings};
 
@@ -607,6 +607,7 @@ fn confirmed_read() -> ConfirmedBenchmarks {
         "id": "bench_a",
         "state": { "block_confirmed": 42 }
     })])
+    .unwrap()
 }
 
 /// The same entry, present but not yet confirmed. §7 says this confirms
@@ -616,6 +617,7 @@ fn unconfirmed_read() -> ConfirmedBenchmarks {
         "id": "bench_a",
         "state": { "block_confirmed": serde_json::Value::Null }
     })])
+    .unwrap()
 }
 
 /// The body the artifact worker built for `bench_a`.
@@ -705,6 +707,31 @@ fn being_in_the_read_is_not_being_confirmed() {
             benchmark_id: "bench_a".to_string()
         },
     );
+}
+
+#[test]
+fn a_confirmed_entry_with_no_id_is_refused_rather_than_dropped() {
+    // The same rule `reconcile::candidate_of` and the controller's
+    // `benchmark_entries` apply to this collection, and for the reason
+    // `candidate_of` gives: the record nobody can read might be the pool's
+    // own. Dropping it turns "confirmed" into "not confirmed", and a
+    // commitment would then wait on a read that has in fact settled it —
+    // issue #13's unbounded wait, reached by a bug rather than by TIG.
+    let err = ConfirmedBenchmarks::from_read(&[
+        json!({ "id": "bench_a", "state": { "block_confirmed": 42 } }),
+        json!({ "state": { "block_confirmed": 43 } }),
+    ])
+    .expect_err("a confirmed entry that names nothing is unreadable");
+    assert_eq!(err, ConfirmedReadError::NoId { index: 1 });
+
+    // An *unconfirmed* entry with no id is not an error: §7 draws nothing
+    // from it either way, so the pool has no claim on its shape.
+    let ok = ConfirmedBenchmarks::from_read(&[
+        json!({ "id": "bench_a", "state": { "block_confirmed": 42 } }),
+        json!({ "state": { "block_confirmed": serde_json::Value::Null } }),
+    ])
+    .expect("an unconfirmed entry is not the pool's business");
+    assert_eq!(ok, confirmed_read());
 }
 
 #[test]

@@ -196,10 +196,6 @@ impl Candidate {
     }
 }
 
-/// Search precommits for the one the pool submitted.
-///
-/// `precommits` is the `precommits` array of a `get-benchmarks` response —
-/// §5's latest 120-block window, and §7's authority for confirmation.
 /// §7's confirmation test, in one place.
 ///
 /// `tig_integration.md` §7 maps a TIG record to confirmed by one rule: a
@@ -218,6 +214,10 @@ pub fn block_confirmed(record: &serde_json::Value) -> bool {
         .is_some_and(|v| !v.is_null())
 }
 
+/// Search precommits for the one the pool submitted.
+///
+/// `precommits` is the `precommits` array of a `get-benchmarks` response —
+/// §5's latest 120-block window, and §7's authority for confirmation.
 pub fn reconcile_precommit(
     precommits: &[serde_json::Value],
     submitted: &PrecommitSubmission,

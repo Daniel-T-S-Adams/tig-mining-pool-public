@@ -1821,7 +1821,8 @@ mod tests {
         let confirmed = ConfirmedBenchmarks::from_read(&[json!({
             "id": submission.benchmark_id(),
             "state": { "block_confirmed": 3 }
-        })]);
+        })])
+        .unwrap();
         let settled = run_once_benchmarks(&h.driver(), &confirmed).await.unwrap();
         assert!(
             matches!(
@@ -1978,7 +1979,8 @@ mod tests {
         let confirmed = ConfirmedBenchmarks::from_read(&[json!({
             "id": benchmark_id,
             "state": { "block_confirmed": 3 }
-        })]);
+        })])
+        .unwrap();
         let early = run_once_benchmarks(&h.driver(), &confirmed).await.unwrap();
         assert!(
             matches!(&early.outcomes[0].acted, Acted::AwaitingSender { attempt_id } if *attempt_id == pending.attempt_id),

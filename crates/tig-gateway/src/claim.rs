@@ -358,6 +358,14 @@ fn reconciled(
 /// confirmed (§7: an entry in `get-benchmarks.benchmarks` with a non-null
 /// `state.block_confirmed`). Membership is the evidence, and its absence is
 /// not evidence of anything.
+/// A `get-benchmarks.benchmarks` entry the pool cannot read.
+#[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
+pub enum ConfirmedReadError {
+    /// §7 says this entry is confirmed, but it does not say what.
+    #[error("benchmark at index {index} is confirmed but carries no `id`")]
+    NoId { index: usize },
+}
+
 /// The benchmarks §7 says are confirmed, and nothing else.
 ///
 /// `decide_benchmark` used to take `&[String]`, which left the caller to
@@ -374,17 +382,31 @@ pub struct ConfirmedBenchmarks(Vec<String>);
 impl ConfirmedBenchmarks {
     /// From `get-benchmarks.benchmarks`, keeping the entries §7 confirms.
     ///
-    /// An entry with no `id` is dropped rather than guessed at: it cannot
-    /// name what it confirms, so it confirms nothing.
-    pub fn from_read(benchmarks: &[serde_json::Value]) -> Self {
-        Self(
-            benchmarks
-                .iter()
-                .filter(|b| pool_workflow::block_confirmed(b))
-                .filter_map(|b| b.get("id").and_then(|v| v.as_str()))
-                .map(str::to_string)
-                .collect(),
-        )
+    /// A confirmed entry with no `id` is an error, not a silent drop. That
+    /// matches the other two readers of the same collection —
+    /// `reconcile::candidate_of` and the controller's `benchmark_entries`
+    /// both refuse a record they cannot read — and for the reason
+    /// `candidate_of` states: the unreadable record might be the pool's own,
+    /// so dropping it turns "confirmed" into "not confirmed". Here that
+    /// would leave a commitment waiting on a read that has in fact settled
+    /// it, which is the unbounded wait of issue #13 arrived at by a bug
+    /// rather than by TIG.
+    ///
+    /// An *unconfirmed* entry with no id is not an error: §7 draws nothing
+    /// from it either way, and the pool has no claim on its shape.
+    pub fn from_read(benchmarks: &[serde_json::Value]) -> Result<Self, ConfirmedReadError> {
+        let mut ids = Vec::new();
+        for (index, entry) in benchmarks.iter().enumerate() {
+            if !pool_workflow::block_confirmed(entry) {
+                continue;
+            }
+            let id = entry
+                .get("id")
+                .and_then(|v| v.as_str())
+                .ok_or(ConfirmedReadError::NoId { index })?;
+            ids.push(id.to_string());
+        }
+        Ok(Self(ids))
     }
 
     fn contains(&self, benchmark_id: &str) -> bool {

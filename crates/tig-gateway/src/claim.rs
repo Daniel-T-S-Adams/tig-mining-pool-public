@@ -20,7 +20,9 @@
 //! duplicated precommit costs a fee, creates a benchmark the pool cannot
 //! attribute, and breaks §10's permanent one-benchmark-per-workflow mapping.
 
-use pool_workflow::{AttemptOutcome, IntentState, WriteAttempt, WriteIntent, WriteKind};
+use pool_workflow::{
+    AttemptOutcome, BenchmarkSubmission, IntentState, WriteAttempt, WriteIntent, WriteKind,
+};
 
 use crate::reconcile::{PrecommitSubmission, ReconcileError, Reconciliation, reconcile_precommit};
 
@@ -346,6 +348,7 @@ pub fn decide_benchmark(
     attempts: &[WriteAttempt],
     owning: OwningWorkflow,
     confirmed_benchmarks: &[String],
+    submission: Option<&BenchmarkSubmission>,
 ) -> ClaimDecision {
     if intent.write_kind != WriteKind::Benchmark {
         return ClaimDecision::Skip {
@@ -424,6 +427,56 @@ pub fn decide_benchmark(
                 state: owning.state,
             },
         };
+    }
+
+    // **Not checked here: §7.3's workflow-scoped half.** `decide` consults
+    // `SiblingGenerations` because a precommit workflow can hold several
+    // generations, and a newer one must not send while an older one may have
+    // reached TIG. This reasons only over the intent's own attempts.
+    //
+    // That is sound only while one benchmark generation can exist, and today
+    // exactly one can: `create_commitment_intent` writes `generation: 1`,
+    // nothing else writes a benchmark intent, and asking twice returns the
+    // same row rather than a second one. A superseding generation is D3's
+    // rule and D3 has not landed.
+    //
+    // **D3 must add the sibling read here**, because the per-benchmark
+    // unresolved index does not cover this: once the first generation's
+    // attempt is ACCEPTED it is resolved, the index stops blocking, and a
+    // second generation would decide `Transmit` and pay a second fee for one
+    // benchmark. A `benchmark_siblings` analogue of `precommit_siblings`,
+    // returning `SupersededByNewerGeneration` / `SiblingGenerationTransmitted`
+    // before `Transmit`, is what that needs. Writing it now would be untested
+    // against a state the schema cannot reach, which is how dead checks get
+    // in — the premise is pinned by a test instead
+    // (`a_second_commitment_intent_for_one_workflow_is_refused`).
+
+    // §7.3's binding digest, checked before the decision to transmit and so
+    // before any attempt row exists. `send_benchmark` refuses the same
+    // mismatch, but only after `begin_fenced` has written the attempt — and
+    // the caller then has an attempt it cannot settle except by closing it
+    // REJECTED, which every later pass reads as `Refused`: TIG answered and
+    // said no. It did not. `mining_system.md` §8 keeps a pool fault from
+    // being recorded as TIG's, and a durable false refusal is exactly that.
+    //
+    // Checked here rather than where `decide` checks it, because only this
+    // branch touches the body: a settled intent, a direct reconciliation and
+    // a wait all reason over the intent's own `benchmark_id`, and stopping
+    // those for an operator would raise an alarm about a body none of them
+    // would have used.
+    //
+    // An absent body is the same answer as a wrong one. The driver carries a
+    // single commitment, so a second claimable benchmark intent is handed a
+    // body built for the first; both cases mean "this intent's bytes are not
+    // here", and neither may become an attempt.
+    match submission {
+        Some(submission)
+            if crate::transmit::benchmark_digest(submission) == intent.payload_digest => {}
+        _ => {
+            return ClaimDecision::StopForOperator {
+                reason: StopReason::PayloadNotTheRecordedOne,
+            };
+        }
     }
 
     ClaimDecision::Transmit

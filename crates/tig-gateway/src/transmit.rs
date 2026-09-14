@@ -28,10 +28,11 @@ use serde_json::Value;
 use crate::credential::TigApiKey;
 use crate::write_gate::WritePermit;
 use crate::write_policy::WritePolicy;
-use pool_workflow::payload::{
-    BenchmarkSubmission, PrecommitSubmission, benchmark_body, benchmark_digest,
-};
-pub use pool_workflow::payload::{precommit_body, precommit_digest};
+use pool_workflow::payload::{BenchmarkSubmission, PrecommitSubmission, benchmark_body};
+// Re-exported for the same reason `precommit_digest` is: `claim` checks
+// §7.3's binding digest before deciding to transmit, so the digest function
+// has a reader outside the send path.
+pub use pool_workflow::payload::{benchmark_digest, precommit_body, precommit_digest};
 
 /// What one transmission established.
 #[derive(Debug, Clone, PartialEq, Eq)]

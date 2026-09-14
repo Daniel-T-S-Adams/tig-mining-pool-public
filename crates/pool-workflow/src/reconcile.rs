@@ -151,10 +151,7 @@ fn candidate_of(index: usize, record: &serde_json::Value) -> Result<Candidate, R
         }
     };
 
-    let confirmed = record
-        .get("state")
-        .and_then(|s| s.get("block_confirmed"))
-        .is_some_and(|v| !v.is_null());
+    let confirmed = block_confirmed(record);
 
     Ok(Candidate {
         benchmark_id,
@@ -197,6 +194,30 @@ impl Candidate {
                         )
                 })
     }
+}
+
+/// §7's confirmation test, in one place.
+///
+/// `tig_integration.md` §7 maps a TIG record to confirmed by one rule: a
+/// matching entry in the read **with a non-null `state.block_confirmed`**.
+/// Presence in the collection is not the test — an entry can be there and
+/// unconfirmed — and every caller that reduces a read to "these are
+/// confirmed" is applying this and nothing else.
+///
+/// Stated here rather than at each reader because two readers that disagree
+/// about what confirmation means is how a workflow gets advanced on evidence
+/// TIG has not given.
+///
+/// This is the **boolean** half. The controller's `window` module wraps it to
+/// return the confirming height, and treats an entry this function calls
+/// confirmed whose height will not read as an integer as a shape error rather
+/// than as unconfirmed — so both readers classify the same entries the same
+/// way, which is the whole point of stating it once.
+pub fn block_confirmed(record: &serde_json::Value) -> bool {
+    record
+        .get("state")
+        .and_then(|s| s.get("block_confirmed"))
+        .is_some_and(|v| !v.is_null())
 }
 
 /// Search precommits for the one the pool submitted.

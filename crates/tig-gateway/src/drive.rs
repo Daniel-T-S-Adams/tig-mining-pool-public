@@ -23,7 +23,10 @@ use pool_workflow::{
 };
 use sqlx::PgPool;
 
-use crate::claim::{ClaimDecision, OwningWorkflow, SiblingGenerations, decide, decide_benchmark};
+use crate::claim::{
+    ClaimDecision, ConfirmedBenchmarks, OwningWorkflow, SiblingGenerations, decide,
+    decide_benchmark,
+};
 use crate::credential::TigApiKey;
 use crate::lane::PostLane;
 use crate::transmit::{PrecommitTransmitter, TransmitError};
@@ -233,7 +236,7 @@ fn check_lease(driver: &Driver<'_>) -> Result<(), DriveError> {
 /// `state.block_confirmed`).
 pub async fn run_once_benchmarks(
     driver: &Driver<'_>,
-    confirmed_benchmarks: &[String],
+    confirmed_benchmarks: &ConfirmedBenchmarks,
 ) -> Result<RunReport, DriveError> {
     check_lease(driver)?;
     let intents = PostgresIntentRepository::new(driver.pool.clone());
@@ -270,7 +273,7 @@ pub async fn run_once_benchmarks(
 async fn handle_benchmark(
     driver: &Driver<'_>,
     intent: &WriteIntent,
-    confirmed_benchmarks: &[String],
+    confirmed_benchmarks: &ConfirmedBenchmarks,
 ) -> Result<(Option<ClaimDecision>, Acted), HandleError> {
     // The same lease the precommit path takes, for the same reason: §7.5
     // makes the fence — not the reads — what decides who may commit.
@@ -315,7 +318,7 @@ async fn handle_benchmark(
 async fn handle_benchmark_held(
     driver: &Driver<'_>,
     intent: &WriteIntent,
-    confirmed_benchmarks: &[String],
+    confirmed_benchmarks: &ConfirmedBenchmarks,
     held: &pool_workflow::Lease,
 ) -> Result<(Option<ClaimDecision>, Acted), HandleError> {
     let ledger = PostgresAttemptLedger::new(driver.pool.clone());
@@ -835,7 +838,7 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::*;
-    use crate::claim::StopReason;
+    use crate::claim::{SkipReason, StopReason};
     use crate::credential;
     use crate::write_policy::WritePolicy;
 
@@ -1696,10 +1699,26 @@ mod tests {
         run_once(&h.driver(), &[]).await.unwrap();
         fake_post(&h.base, "/_fake/advance-block", None, None).await;
 
+        // The confirmed entry no workflow has bound yet. Taking the first
+        // confirmed one works for a single workflow and silently binds the
+        // first workflow's benchmark to the second, which `0011`'s one-owner
+        // rule then refuses — so the helper has to pick the pool's own
+        // unclaimed one, the way §10's search does by settings.
+        let bound: Vec<String> = sqlx::query_scalar(
+            "SELECT benchmark_id FROM pool.workflow WHERE benchmark_id IS NOT NULL",
+        )
+        .fetch_all(&h.controller)
+        .await
+        .unwrap();
         let entry = precommits_window(&h.base)
             .await
             .into_iter()
-            .find(|p| p["state"]["block_confirmed"].is_number())
+            .find(|p| {
+                p["state"]["block_confirmed"].is_number()
+                    && p["benchmark_id"]
+                        .as_str()
+                        .is_some_and(|id| !bound.iter().any(|b| b == id))
+            })
             .expect("the fake confirms on the next block");
         let benchmark_id = entry["benchmark_id"].as_str().unwrap().to_owned();
         let num_nonces = entry["details"]["num_nonces"].as_u64().unwrap();
@@ -1783,7 +1802,9 @@ mod tests {
         let submission = ready_to_commit(&h, "w1").await;
         h.commitment = Some(submission.clone());
 
-        let report = run_once_benchmarks(&h.driver(), &[]).await.unwrap();
+        let report = run_once_benchmarks(&h.driver(), &ConfirmedBenchmarks::default())
+            .await
+            .unwrap();
         assert_eq!(report.outcomes.len(), 1, "{report:?}");
         let o = &report.outcomes[0];
         assert_eq!(o.decision, Some(ClaimDecision::Transmit));
@@ -1798,7 +1819,9 @@ mod tests {
 
         // Not yet confirmed: §7 makes the read the authority, so the pass
         // waits rather than sending again.
-        let again = run_once_benchmarks(&h.driver(), &[]).await.unwrap();
+        let again = run_once_benchmarks(&h.driver(), &ConfirmedBenchmarks::default())
+            .await
+            .unwrap();
         assert_eq!(
             again.outcomes[0].decision,
             Some(ClaimDecision::AwaitConfirmation),
@@ -1811,7 +1834,11 @@ mod tests {
         );
 
         // The read confirms it. The attempt settles; nothing is resent.
-        let confirmed = vec![submission.benchmark_id().to_string()];
+        let confirmed = ConfirmedBenchmarks::from_read(&[json!({
+            "id": submission.benchmark_id(),
+            "state": { "block_confirmed": 3 }
+        })])
+        .unwrap();
         let settled = run_once_benchmarks(&h.driver(), &confirmed).await.unwrap();
         assert!(
             matches!(
@@ -1833,23 +1860,30 @@ mod tests {
         // run this pass without the built body has nothing legitimate to
         // send, and stops for an operator *before* an attempt row exists.
         //
-        // Where the stop happens is the point. `send_benchmark` refuses the
-        // same body, but only after `begin_fenced` has written the attempt —
-        // and the only way to close that row is REJECTED, which the next
-        // pass reads as `Refused`: TIG answered and said no. It did not.
+        // Where it is caught is the point. `send_benchmark` refuses the same
+        // body, but only after `begin_fenced` has written the attempt — and
+        // the only way to close that row is REJECTED, which the next pass
+        // reads as `Refused`: TIG answered and said no. It did not.
         // `mining_system.md` §8 keeps a pool fault from being recorded as
         // TIG's, so the ledger must stay empty here.
+        //
+        // And it is a `Skip`, not an operator stop: one driver holds one
+        // commitment while the pass claims every claimable benchmark intent,
+        // so this is the ordinary case for every intent but the one whose
+        // bytes are in hand. The next pass with the right body sends it.
         let Some(h) = Harness::new("drive_commitment_nobody").await else {
             return;
         };
         ready_to_commit(&h, "w1").await;
         let intent = benchmark_intent_id(&h.controller, "w1").await;
 
-        let report = run_once_benchmarks(&h.driver(), &[]).await.unwrap();
+        let report = run_once_benchmarks(&h.driver(), &ConfirmedBenchmarks::default())
+            .await
+            .unwrap();
         assert_eq!(
             report.outcomes[0].decision,
-            Some(ClaimDecision::StopForOperator {
-                reason: StopReason::PayloadNotTheRecordedOne
+            Some(ClaimDecision::Skip {
+                reason: SkipReason::NoBuiltPayload
             }),
             "{report:?}"
         );
@@ -1857,7 +1891,10 @@ mod tests {
             matches!(&report.outcomes[0].acted, Acted::Nothing),
             "{report:?}"
         );
-        assert!(report.needs_operator(), "{report:?}");
+        assert!(
+            !report.needs_operator(),
+            "an ordinary pass with no body for this intent must not page: {report:?}"
+        );
 
         let ledger = PostgresAttemptLedger::new(h.gateway.clone());
         assert!(
@@ -1874,24 +1911,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_body_built_for_another_benchmark_is_refused_before_any_attempt() {
-        // The driver carries one commitment across every claimable benchmark
-        // intent, so a second intent is handed a body built for the first.
-        // Same rule as an absent body, and the same reason it must be caught
-        // here: an attempt row written for bytes that cannot be sent can only
-        // be closed as a refusal TIG never made.
+    async fn a_body_that_names_this_benchmark_and_differs_is_refused_before_any_attempt() {
+        // The genuine integrity alarm: the body names this intent's benchmark
+        // and still digests differently. `0015` admits one commitment per
+        // benchmark, so nothing legitimate renders one benchmark's bytes two
+        // ways — and it must be caught before `begin_fenced`, because an
+        // attempt row for bytes that cannot be sent can only be closed as a
+        // refusal TIG never made.
         let Some(mut h) = Harness::new("drive_commitment_wrongbody").await else {
             return;
         };
-        ready_to_commit(&h, "w1").await;
+        let submission = ready_to_commit(&h, "w1").await;
         let intent = benchmark_intent_id(&h.controller, "w1").await;
         h.commitment = Some(BenchmarkSubmission {
-            benchmark_id: "some_other_benchmark".to_string(),
+            benchmark_id: submission.benchmark_id().to_string(),
             merkle_root: "cd".repeat(32),
             solution_quality: vec![9, 9, 9, 9],
         });
 
-        let report = run_once_benchmarks(&h.driver(), &[]).await.unwrap();
+        let report = run_once_benchmarks(&h.driver(), &ConfirmedBenchmarks::default())
+            .await
+            .unwrap();
         assert_eq!(
             report.outcomes[0].decision,
             Some(ClaimDecision::StopForOperator {
@@ -1899,6 +1939,7 @@ mod tests {
             }),
             "{report:?}"
         );
+        assert!(report.needs_operator(), "{report:?}");
         let ledger = PostgresAttemptLedger::new(h.gateway.clone());
         assert!(
             ledger.attempts_for(&intent).await.unwrap().is_empty(),
@@ -1910,6 +1951,68 @@ mod tests {
                 .cloned()
                 .unwrap_or(json!(0)),
             json!(0)
+        );
+    }
+
+    #[tokio::test]
+    async fn two_live_workflows_and_one_body_page_nobody() {
+        // What a second live workflow actually produces, end to end. The
+        // driver holds one built commitment; the pass claims both claimable
+        // benchmark intents and is handed that same body for each.
+        //
+        // The one it belongs to is sent. The other is an ordinary skip, and
+        // the report does not page — §13 invariant 4 guarantees that intent's
+        // own payload exists, and §10.3's discipline is that an alarm raised
+        // on every pass is one nobody reads. This is the case the previous
+        // round's split missed: it only answered a driver holding no body at
+        // all, which is not what two workflows produce.
+        let Some(mut h) = Harness::new("drive_two_commitments").await else {
+            return;
+        };
+        let first = ready_to_commit(&h, "w1").await;
+        ready_to_commit(&h, "w2").await;
+        let other_intent = benchmark_intent_id(&h.controller, "w2").await;
+        h.commitment = Some(first.clone());
+
+        let report = run_once_benchmarks(&h.driver(), &ConfirmedBenchmarks::default())
+            .await
+            .unwrap();
+        assert_eq!(report.outcomes.len(), 2, "{report:?}");
+        assert!(
+            !report.needs_operator(),
+            "one body and two intents is ordinary, not an operator condition: {report:?}"
+        );
+
+        let sent = report
+            .outcomes
+            .iter()
+            .find(|o| o.workflow_id == "w1")
+            .unwrap();
+        assert_eq!(sent.decision, Some(ClaimDecision::Transmit), "{sent:?}");
+
+        let skipped = report
+            .outcomes
+            .iter()
+            .find(|o| o.workflow_id == "w2")
+            .unwrap();
+        assert_eq!(
+            skipped.decision,
+            Some(ClaimDecision::Skip {
+                reason: SkipReason::NoBuiltPayload
+            }),
+            "{skipped:?}"
+        );
+
+        // Exactly one write, and nothing written down for the intent this
+        // pass held no bytes for.
+        assert_eq!(
+            fake_state(&h.base).await["writes_received"]["submit-benchmark"],
+            json!(1)
+        );
+        let ledger = PostgresAttemptLedger::new(h.gateway.clone());
+        assert!(
+            ledger.attempts_for(&other_intent).await.unwrap().is_empty(),
+            "{report:?}"
         );
     }
 
@@ -1953,7 +2056,11 @@ mod tests {
 
         // TIG's read says the benchmark confirmed. The attempt is seconds
         // old, so the pass waits instead of settling it.
-        let confirmed = vec![benchmark_id.clone()];
+        let confirmed = ConfirmedBenchmarks::from_read(&[json!({
+            "id": benchmark_id,
+            "state": { "block_confirmed": 3 }
+        })])
+        .unwrap();
         let early = run_once_benchmarks(&h.driver(), &confirmed).await.unwrap();
         assert!(
             matches!(&early.outcomes[0].acted, Acted::AwaitingSender { attempt_id } if *attempt_id == pending.attempt_id),

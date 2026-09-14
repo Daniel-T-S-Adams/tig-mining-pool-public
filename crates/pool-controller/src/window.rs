@@ -96,17 +96,39 @@ pub fn confirmed_window(benchmarks: &Value, block: &Value) -> Result<ConfirmedWi
 
 /// The one test §7 applies to every collection entry.
 ///
-/// Returns `None` for an entry that exists but has not confirmed. That is the
-/// distinction the whole table turns on, and collapsing it is how an HTTP 200
-/// becomes a confirmation: `get-benchmarks` lists the pool's *submitted*
+/// Returns `Ok(None)` for an entry that exists but has not confirmed. That is
+/// the distinction the whole table turns on, and collapsing it is how an HTTP
+/// 200 becomes a confirmation: `get-benchmarks` lists the pool's *submitted*
 /// precommits too, with a null `state.block_confirmed`, so an implementation
 /// that took presence for confirmation would advance a workflow the moment the
 /// write was accepted.
-fn block_confirmed(entry: &Value) -> Option<i64> {
+fn block_confirmed(
+    entry: &Value,
+    collection: &'static str,
+    index: usize,
+) -> Result<Option<i64>, WindowError> {
+    // The boolean half is `pool_workflow::block_confirmed`, not a second
+    // reading of it. That function is what `tig-gateway` applies to the same
+    // collections, and two readers that disagree about what §7 confirms is
+    // the failure both doc comments claim to prevent — so the disagreement is
+    // removed rather than described.
+    if !pool_workflow::block_confirmed(entry) {
+        return Ok(None);
+    }
+    // Confirmed, so §7 says there is a height. One that will not read as an
+    // integer is a shape error and not a silent "unconfirmed": treating it as
+    // unconfirmed is exactly the divergence — the gateway would settle a
+    // write the controller would leave waiting forever.
     entry
         .get("state")
         .and_then(|s| s.get("block_confirmed"))
         .and_then(Value::as_i64)
+        .map(Some)
+        .ok_or_else(|| WindowError::Shape {
+            collection,
+            index,
+            reason: "state.block_confirmed is confirmed but not an integer height".to_string(),
+        })
 }
 
 fn entries<'a>(body: &'a Value, collection: &'static str) -> &'a [Value] {
@@ -139,7 +161,7 @@ fn text(
 fn precommits(body: &Value) -> Result<BTreeMap<String, ConfirmedPrecommit>, WindowError> {
     let mut out = BTreeMap::new();
     for (index, entry) in entries(body, "precommits").iter().enumerate() {
-        let Some(block_confirmed) = block_confirmed(entry) else {
+        let Some(block_confirmed) = block_confirmed(entry, "precommits", index)? else {
             continue;
         };
         let benchmark_id = text(entry, &["benchmark_id"], "precommits", index)?;
@@ -184,7 +206,7 @@ fn precommits(body: &Value) -> Result<BTreeMap<String, ConfirmedPrecommit>, Wind
 fn benchmark_entries(body: &Value) -> Result<BTreeMap<String, ConfirmedBenchmark>, WindowError> {
     let mut out = BTreeMap::new();
     for (index, entry) in entries(body, "benchmarks").iter().enumerate() {
-        let Some(block_confirmed) = block_confirmed(entry) else {
+        let Some(block_confirmed) = block_confirmed(entry, "benchmarks", index)? else {
             continue;
         };
         // The benchmark collection keys on `id`, not `benchmark_id`; the
@@ -219,7 +241,7 @@ fn benchmark_entries(body: &Value) -> Result<BTreeMap<String, ConfirmedBenchmark
 fn proofs(body: &Value) -> Result<BTreeMap<String, ConfirmedProof>, WindowError> {
     let mut out = BTreeMap::new();
     for (index, entry) in entries(body, "proofs").iter().enumerate() {
-        let Some(block_confirmed) = block_confirmed(entry) else {
+        let Some(block_confirmed) = block_confirmed(entry, "proofs", index)? else {
             continue;
         };
         let benchmark_id = text(entry, &["benchmark_id"], "proofs", index)?;
@@ -237,7 +259,7 @@ fn proofs(body: &Value) -> Result<BTreeMap<String, ConfirmedProof>, WindowError>
 fn frauds(body: &Value) -> Result<BTreeMap<String, ConfirmedFraud>, WindowError> {
     let mut out = BTreeMap::new();
     for (index, entry) in entries(body, "frauds").iter().enumerate() {
-        let Some(block_confirmed) = block_confirmed(entry) else {
+        let Some(block_confirmed) = block_confirmed(entry, "frauds", index)? else {
             continue;
         };
         let benchmark_id = text(entry, &["benchmark_id"], "frauds", index)?;

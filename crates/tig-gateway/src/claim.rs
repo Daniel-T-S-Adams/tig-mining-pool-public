@@ -128,6 +128,25 @@ pub enum SkipReason {
     ///
     /// §7.3 makes both terminal, so there is no write left to make.
     AlreadySettled,
+    /// This pass holds no body for this intent's benchmark.
+    ///
+    /// §3 keeps commitment construction out of the gateway, so a pass is
+    /// handed bodies rather than building them — and a driver holding one
+    /// commitment claims every claimable benchmark intent, so the intents it
+    /// has no bytes for are the ordinary case, not a fault.
+    ///
+    /// Covers both shapes of that: no body at all, and a body built for
+    /// **another** benchmark. The second is what two live workflows actually
+    /// produce, and it is no more a fault than the first — `architecture.md`
+    /// §13 invariant 4 guarantees the other intent's own payload exists.
+    ///
+    /// Deliberately **not** `PayloadNotTheRecordedOne`, which is reserved for
+    /// a body that names *this* benchmark and still digests differently.
+    /// Reporting "no bytes this pass" as that alarm would raise it for every
+    /// other intent on every pass, and §10.3's discipline is that a bucket
+    /// which fills on every pass is one nobody reads. The next pass carrying
+    /// the right body resolves this with no operator involved.
+    NoBuiltPayload,
     /// The workflow this intent belongs to has ended.
     ///
     /// Issue #86: an expiry or a restart leaves a `PREPARED` intent behind,
@@ -324,6 +343,62 @@ fn reconciled(
     }
 }
 
+/// A `get-benchmarks.benchmarks` entry the pool cannot read.
+#[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
+pub enum ConfirmedReadError {
+    /// §7 says this entry is confirmed, but it does not say what.
+    #[error("benchmark at index {index} is confirmed but carries no `id`")]
+    NoId { index: usize },
+}
+
+/// The benchmarks §7 says are confirmed, and nothing else.
+///
+/// `decide_benchmark` used to take `&[String]`, which left the caller to
+/// remember the test — and a `Vec<String>` of precommit ids, or of every
+/// benchmark in the read regardless of state, would have type-checked. §7's
+/// rule is a **non-null `state.block_confirmed`**, not membership, and a
+/// commitment settled on mere membership would be settled on evidence TIG
+/// has not given.
+///
+/// The only constructor runs the test, so holding one of these is the proof.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ConfirmedBenchmarks(Vec<String>);
+
+impl ConfirmedBenchmarks {
+    /// From `get-benchmarks.benchmarks`, keeping the entries §7 confirms.
+    ///
+    /// A confirmed entry with no `id` is an error, not a silent drop. That
+    /// matches the other two readers of the same collection —
+    /// `reconcile::candidate_of` and the controller's `benchmark_entries`
+    /// both refuse a record they cannot read — and for the reason
+    /// `candidate_of` states: the unreadable record might be the pool's own,
+    /// so dropping it turns "confirmed" into "not confirmed". Here that
+    /// would leave a commitment waiting on a read that has in fact settled
+    /// it, which is the unbounded wait of issue #13 arrived at by a bug
+    /// rather than by TIG.
+    ///
+    /// An *unconfirmed* entry with no id is not an error: §7 draws nothing
+    /// from it either way, and the pool has no claim on its shape.
+    pub fn from_read(benchmarks: &[serde_json::Value]) -> Result<Self, ConfirmedReadError> {
+        let mut ids = Vec::new();
+        for (index, entry) in benchmarks.iter().enumerate() {
+            if !pool_workflow::block_confirmed(entry) {
+                continue;
+            }
+            let id = entry
+                .get("id")
+                .and_then(|v| v.as_str())
+                .ok_or(ConfirmedReadError::NoId { index })?;
+            ids.push(id.to_string());
+        }
+        Ok(Self(ids))
+    }
+
+    fn contains(&self, benchmark_id: &str) -> bool {
+        self.0.iter().any(|id| id == benchmark_id)
+    }
+}
+
 /// What a benchmark commitment intent is owed (`tig_integration.md` §6.2).
 ///
 /// A separate judgement from [`decide`], because §10 makes the two kinds
@@ -339,15 +414,15 @@ fn reconciled(
 /// and §11's rule for the rest is narrower: "never send two concurrent writes
 /// for the same benchmark", which is what the intent's own attempts say.
 ///
-/// `confirmed_benchmarks` is the set of `benchmark_id`s the pool has read as
-/// confirmed (§7: an entry in `get-benchmarks.benchmarks` with a non-null
-/// `state.block_confirmed`). Membership is the evidence, and its absence is
-/// not evidence of anything.
+/// `confirmed_benchmarks` is a [`ConfirmedBenchmarks`], which is §7's test
+/// already applied — an entry in `get-benchmarks.benchmarks` with a non-null
+/// `state.block_confirmed`. Membership in it is the evidence, and its absence
+/// is not evidence of anything.
 pub fn decide_benchmark(
     intent: &WriteIntent,
     attempts: &[WriteAttempt],
     owning: OwningWorkflow,
-    confirmed_benchmarks: &[String],
+    confirmed_benchmarks: &ConfirmedBenchmarks,
     submission: Option<&BenchmarkSubmission>,
 ) -> ClaimDecision {
     if intent.write_kind != WriteKind::Benchmark {
@@ -401,6 +476,16 @@ pub fn decide_benchmark(
     // read rather than a response — so this waits, whatever the response
     // said. An ACCEPTED attempt waits here just as an unresolved one does:
     // the commitment exists at TIG or it does not, and only the read says.
+    //
+    // **This wait is unbounded, and that is a known gap — issue #13.** An
+    // AMBIGUOUS attempt for a write TIG never applied waits for a read that
+    // will never name it, while `workflow::transition` refuses to expire the
+    // workflow past an unsettled attempt. Fail-closed is right — §10 forbids
+    // a blind resubmission, and a commitment reconciles directly, so absence
+    // from the read is not the evidence a tuple search's `NoCandidate` is —
+    // but nothing yet says the wait has gone on too long. `architecture.md`
+    // §10.3 already asks for that alert; it needs a target block time the
+    // pool does not configure yet.
     if attempts
         .iter()
         .any(|a| a.is_unresolved() || a.outcome == Some(AttemptOutcome::Accepted))
@@ -465,18 +550,34 @@ pub fn decide_benchmark(
     // those for an operator would raise an alarm about a body none of them
     // would have used.
     //
-    // An absent body is the same answer as a wrong one. The driver carries a
-    // single commitment, so a second claimable benchmark intent is handed a
-    // body built for the first; both cases mean "this intent's bytes are not
-    // here", and neither may become an attempt.
-    match submission {
-        Some(submission)
-            if crate::transmit::benchmark_digest(submission) == intent.payload_digest => {}
-        _ => {
-            return ClaimDecision::StopForOperator {
-                reason: StopReason::PayloadNotTheRecordedOne,
-            };
-        }
+    // Three cases, and only one of them is an alarm.
+    //
+    // The driver holds one built commitment while the pass claims every
+    // claimable benchmark intent, so an intent this pass holds no bytes for
+    // is the ordinary case — whether it was handed nothing at all, or a body
+    // plainly built for another benchmark. Both mean "not this intent's
+    // body, this pass", both are answered by the next pass carrying the
+    // right one, and §10.3's discipline is that a bucket filling on every
+    // pass is one nobody reads. With two live workflows, treating the second
+    // as an alarm would page on every pass while nothing is wrong:
+    // invariant 4 guarantees that intent's own payload exists.
+    //
+    // A body that **names this benchmark** and still digests differently is
+    // the third case and is not ordinary. Nothing legitimate produces it:
+    // `0015` admits one commitment per benchmark, so two different renderings
+    // of one benchmark's bytes is the disagreement §7.3's digest exists to
+    // catch, and it needs an operator.
+    let for_this_intent =
+        submission.filter(|s| Some(s.benchmark_id()) == intent.benchmark_id.as_deref());
+    let Some(submission) = for_this_intent else {
+        return ClaimDecision::Skip {
+            reason: SkipReason::NoBuiltPayload,
+        };
+    };
+    if crate::transmit::benchmark_digest(submission) != intent.payload_digest {
+        return ClaimDecision::StopForOperator {
+            reason: StopReason::PayloadNotTheRecordedOne,
+        };
     }
 
     ClaimDecision::Transmit

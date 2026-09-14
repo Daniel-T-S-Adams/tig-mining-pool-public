@@ -55,6 +55,32 @@ fn only_a_non_null_block_confirmed_is_confirmation() {
 }
 
 #[test]
+fn a_confirmed_entry_whose_height_is_not_an_integer_is_a_shape_error() {
+    // The two readers of §7's rule must classify the same entries the same
+    // way. `pool_workflow::block_confirmed` — which `tig-gateway` applies to
+    // these collections — says confirmed on any non-null value; this module
+    // needs the height as an integer.
+    //
+    // Where they could disagree is a non-null value that is not a number.
+    // Reading it as "unconfirmed" here while the gateway reads it as
+    // confirmed is the divergence: the gateway would settle a write this
+    // module leaves waiting forever. So it is a shape error, which is what
+    // this module already does with every other record it cannot read.
+    let body = json!({
+        "precommits": [precommit("bench_odd", None)],
+        "benchmarks": [],
+        "proofs": [],
+        "frauds": [],
+    });
+    let mut body = body;
+    body["precommits"][0]["state"]["block_confirmed"] = json!("100");
+
+    let err = confirmed_window(&body, &block(120, &[], &[]))
+        .expect_err("a confirmed entry with no readable height is unusable");
+    assert!(err.to_string().contains("not an integer height"), "{err}");
+}
+
+#[test]
 fn the_confirmed_precommit_carries_what_the_guardrails_and_transitions_need() {
     // §7: "Confirmed settings/details replace proposed values", and §8's
     // deadlines are ages from `details.block_started`.

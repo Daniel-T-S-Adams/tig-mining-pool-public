@@ -40,7 +40,7 @@ pub use payload::{
     benchmark_body, benchmark_digest, commitment_matches_confirmed, precommit_body,
     precommit_digest,
 };
-pub use reconcile::{ReconcileError, Reconciliation, reconcile_precommit};
+pub use reconcile::{ReconcileError, Reconciliation, block_confirmed, reconcile_precommit};
 pub use restart::{
     ConfirmedWindow, NeedsAttention, Reconciled, RestartReport, open_block_gaps,
     reconcile_after_restart, record_block_gap,

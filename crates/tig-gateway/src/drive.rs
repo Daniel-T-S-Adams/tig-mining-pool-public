@@ -24,7 +24,7 @@ use pool_workflow::{
 use sqlx::PgPool;
 
 use crate::claim::{
-    ClaimDecision, ConfirmedBenchmarks, OwningWorkflow, SiblingGenerations, decide,
+    ClaimDecision, ConfirmedBenchmarks, OwningWorkflow, SiblingGenerations, SkipReason, decide,
     decide_benchmark,
 };
 use crate::credential::TigApiKey;
@@ -475,6 +475,29 @@ async fn handle_benchmark_held(
                 }
                 None => Acted::Nothing,
             }
+        }
+        ClaimDecision::Skip {
+            reason: SkipReason::NoBuiltPayload,
+        } => {
+            // The one skip worth a record. It is ordinary for a pass — the
+            // driver holds one body and claims every claimable intent — but
+            // an intent that is *never* handed its body waits forever, and
+            // `needs_operator` ignores `Skip` by design. Until §10.3's
+            // age-based alert exists (issue #13), a line carrying the three
+            // ids is the only thing that would let an operator notice.
+            //
+            // At `debug`, deliberately: it fires on every pass for every
+            // intent this pass has no bytes for, which is the volume that
+            // makes a higher level useless. The alert is what has to key on
+            // age; this only has to make the age discoverable.
+            tracing::debug!(
+                event = "gateway.benchmark.no_built_payload",
+                workflow_id = %intent.workflow_id,
+                intent_id = %intent.intent_id,
+                benchmark_id = intent.benchmark_id.as_deref().unwrap_or(""),
+                "no built commitment for this intent this pass"
+            );
+            Acted::Nothing
         }
         ClaimDecision::AwaitConfirmation
         | ClaimDecision::StopForOperator { .. }

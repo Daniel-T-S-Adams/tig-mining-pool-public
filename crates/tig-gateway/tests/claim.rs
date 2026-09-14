@@ -758,6 +758,37 @@ fn an_intent_with_no_body_this_pass_is_skipped_not_alarmed() {
 }
 
 #[test]
+fn a_body_for_another_benchmark_is_an_ordinary_skip_not_an_alarm() {
+    // What two live workflows actually produce. The driver holds one built
+    // commitment and the pass claims every claimable benchmark intent, so the
+    // second intent is handed the first one's body — present, but plainly not
+    // its own.
+    //
+    // That is the same ordinary case as no body at all, and it must not page:
+    // `architecture.md` §13 invariant 4 guarantees the second intent's own
+    // payload exists, so nothing is corrupt, and §10.3's discipline is that an
+    // alarm raised on every pass is one nobody reads.
+    let other_benchmark = BenchmarkSubmission {
+        benchmark_id: "bench_b".to_string(),
+        merkle_root: "ab".repeat(32),
+        solution_quality: vec![1, 2, 3, 4],
+    };
+    assert_eq!(
+        decide_benchmark(
+            &benchmark_intent(IntentState::Prepared),
+            &[],
+            live(),
+            &ConfirmedBenchmarks::default(),
+            Some(&other_benchmark)
+        ),
+        ClaimDecision::Skip {
+            reason: SkipReason::NoBuiltPayload
+        },
+        "a body built for another benchmark is not this intent's body"
+    );
+}
+
+#[test]
 fn a_body_that_is_not_this_intents_never_becomes_an_attempt() {
     // §7.3's binding digest, and the reason it is checked before the
     // decision rather than only at the send: `send_benchmark` refuses the
@@ -768,7 +799,10 @@ fn a_body_that_is_not_this_intents_never_becomes_an_attempt() {
     //
     // The driver carries one commitment across every claimable benchmark
     // intent, so this is what a second intent is handed in practice.
-    let other = BenchmarkSubmission {
+    // Names *this* benchmark, and still digests differently. Nothing
+    // legitimate produces it: `0015` admits one commitment per benchmark, so
+    // two renderings of one benchmark's bytes is a genuine disagreement.
+    let same_benchmark_other_bytes = BenchmarkSubmission {
         benchmark_id: "bench_a".to_string(),
         merkle_root: "cd".repeat(32),
         solution_quality: vec![1, 2, 3, 4],
@@ -779,7 +813,7 @@ fn a_body_that_is_not_this_intents_never_becomes_an_attempt() {
             &[],
             live(),
             &ConfirmedBenchmarks::default(),
-            Some(&other)
+            Some(&same_benchmark_other_bytes)
         ),
         ClaimDecision::StopForOperator {
             reason: StopReason::PayloadNotTheRecordedOne

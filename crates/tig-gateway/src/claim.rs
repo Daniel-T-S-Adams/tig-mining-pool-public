@@ -128,20 +128,24 @@ pub enum SkipReason {
     ///
     /// §7.3 makes both terminal, so there is no write left to make.
     AlreadySettled,
-    /// No built body was supplied for this intent's benchmark.
+    /// This pass holds no body for this intent's benchmark.
     ///
     /// §3 keeps commitment construction out of the gateway, so a pass is
     /// handed bodies rather than building them — and a driver holding one
     /// commitment claims every claimable benchmark intent, so the intents it
     /// has no bytes for are the ordinary case, not a fault.
     ///
-    /// Deliberately **not** `PayloadNotTheRecordedOne`, which means a body
-    /// was present and disagreed with the intent's digest — a payload
-    /// integrity alarm. Reporting "no body this pass" as that alarm would
-    /// raise it for every other intent on every pass, and §10.3's discipline
-    /// is that a bucket which fills on every pass is one nobody reads. The
-    /// next pass carrying the right body resolves this with no operator
-    /// involved.
+    /// Covers both shapes of that: no body at all, and a body built for
+    /// **another** benchmark. The second is what two live workflows actually
+    /// produce, and it is no more a fault than the first — `architecture.md`
+    /// §13 invariant 4 guarantees the other intent's own payload exists.
+    ///
+    /// Deliberately **not** `PayloadNotTheRecordedOne`, which is reserved for
+    /// a body that names *this* benchmark and still digests differently.
+    /// Reporting "no bytes this pass" as that alarm would raise it for every
+    /// other intent on every pass, and §10.3's discipline is that a bucket
+    /// which fills on every pass is one nobody reads. The next pass carrying
+    /// the right body resolves this with no operator involved.
     NoBuiltPayload,
     /// The workflow this intent belongs to has ended.
     ///
@@ -546,15 +550,26 @@ pub fn decide_benchmark(
     // those for an operator would raise an alarm about a body none of them
     // would have used.
     //
-    // Absent and wrong are both "these are not this intent's bytes", and
-    // neither may become an attempt — but they are not the same *report*.
+    // Three cases, and only one of them is an alarm.
     //
-    // The driver holds one commitment and the pass claims every claimable
-    // benchmark intent, so being handed no body for this one is the ordinary
-    // case and the next pass with the right body settles it. A body that is
-    // present and digests differently is not ordinary: it is the disagreement
-    // §7.3's digest exists to catch, and it needs an operator.
-    let Some(submission) = submission else {
+    // The driver holds one built commitment while the pass claims every
+    // claimable benchmark intent, so an intent this pass holds no bytes for
+    // is the ordinary case — whether it was handed nothing at all, or a body
+    // plainly built for another benchmark. Both mean "not this intent's
+    // body, this pass", both are answered by the next pass carrying the
+    // right one, and §10.3's discipline is that a bucket filling on every
+    // pass is one nobody reads. With two live workflows, treating the second
+    // as an alarm would page on every pass while nothing is wrong:
+    // invariant 4 guarantees that intent's own payload exists.
+    //
+    // A body that **names this benchmark** and still digests differently is
+    // the third case and is not ordinary. Nothing legitimate produces it:
+    // `0015` admits one commitment per benchmark, so two different renderings
+    // of one benchmark's bytes is the disagreement §7.3's digest exists to
+    // catch, and it needs an operator.
+    let for_this_intent =
+        submission.filter(|s| Some(s.benchmark_id()) == intent.benchmark_id.as_deref());
+    let Some(submission) = for_this_intent else {
         return ClaimDecision::Skip {
             reason: SkipReason::NoBuiltPayload,
         };

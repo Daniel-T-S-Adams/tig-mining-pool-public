@@ -207,6 +207,12 @@ impl Candidate {
 /// Stated here rather than at each reader because two readers that disagree
 /// about what confirmation means is how a workflow gets advanced on evidence
 /// TIG has not given.
+///
+/// This is the **boolean** half. The controller's `window` module wraps it to
+/// return the confirming height, and treats an entry this function calls
+/// confirmed whose height will not read as an integer as a shape error rather
+/// than as unconfirmed — so both readers classify the same entries the same
+/// way, which is the whole point of stating it once.
 pub fn block_confirmed(record: &serde_json::Value) -> bool {
     record
         .get("state")

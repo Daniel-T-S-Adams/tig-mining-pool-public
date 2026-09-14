@@ -242,6 +242,54 @@ async fn the_quality_vector_must_be_the_length_the_confirmed_precommit_fixed() {
 }
 
 #[tokio::test]
+async fn the_merkle_root_must_be_sixty_four_lowercase_hex_characters() {
+    // §6.2 fixes the root's shape as well as the vector's length, and TIG
+    // refuses a body of the wrong shape *after* the fee is paid — so it is
+    // checked in the same place, and for the same reason, as the length.
+    //
+    // Both halves of the rule get a case, because a mutant that drops either
+    // half must fail a named test: a root of the right length in the wrong
+    // case is what a hex encoder that emits uppercase produces, and a root of
+    // the wrong length is a truncated or doubled digest.
+    //
+    // No precondition rows are seeded. The shape check runs before the
+    // payload is looked up at all, so a refusal here proves the pool stops
+    // before it touches anything durable — which is the point of checking
+    // where the body is built rather than where it is sent.
+    let Some(db) = TempDb::migrated("commit_merkle_shape").await else {
+        return;
+    };
+    let pool = db.pool_as("pool_controller").await;
+    confirmed_workflow(&pool, Some(4)).await;
+
+    for (label, root) in [
+        ("uppercase", "AB".repeat(32)),
+        ("too short", "ab".repeat(31)),
+        ("not hex", format!("{}zz", "ab".repeat(31))),
+    ] {
+        let wrong = BenchmarkSubmission {
+            merkle_root: root,
+            ..committed(4)
+        };
+        let err = match create_commitment_intent(&pool, NET, &fake(), "w1", ARTIFACT, &wrong).await
+        {
+            Ok(_) => panic!("a {label} merkle_root must be refused"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string().contains("64 lowercase hex"),
+            "{label}: {err}"
+        );
+    }
+
+    let intents: i64 = sqlx::query_scalar("SELECT count(*) FROM pool.tig_write_intent")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(intents, 0);
+}
+
+#[tokio::test]
 async fn a_workflow_with_no_confirmed_length_is_refused_rather_than_unchecked() {
     // §6.2 builds the body to TIG's `num_nonces`. Without it there is
     // nothing to check against, and treating that as permission is what made

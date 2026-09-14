@@ -116,23 +116,25 @@ obtained its API key through the official TIG testnet browser flow and
 installed it at the path above; the slice's live gateway run remains the
 credential-authentication acceptance evidence.
 
-The previous slice-1 candidate identity,
-`0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef`, was verified and funded but
+A previous slice-1 candidate identity — deliberately not named here, for
+the reason `protocol-spike.md` §4 gives — was verified and funded but
 replaced before the slice's live run. Its old key is no longer loaded by this
 repository; server-side revocation is not inferred from replacing a local
 file. The pool operator owns confirmation of old-key invalidation and any
 needed TIG coordination in
-[issue #61](https://github.com/Daniel-T-S-Adams/tig-mining-pool/issues/61).
+[issue #1](https://github.com/Daniel-T-S-Adams/tig-mining-pool-public/issues/1).
 
-This is **not** the spike's identity. The spike ran as
-`0xbeefbeefbeefbeefbeefbeefbeefbeefbeefbeef`
+This is **not** the spike's identity. The spike ran as its own address
 ([`protocol-spike.md`](protocol-spike.md) §4), whose API key was destroyed
 during slice-1 development; that account still exists and is funded, but is
-no longer used. `protocol_spike_report.md` and `protocol-spike.md` keep the
-old address because they record runs that genuinely used it — rewriting them
-would falsify the evidence. `tig_integration.md` §13 check 9 makes the
-gateway verify that the confirmed player ID matches its configured identity,
-so the address above is what slice-1 configuration must name.
+no longer used. Neither that address nor the superseded candidate is
+recorded in this repository: they identify retired accounts, they are of no
+use to a reader, and this repository is public. The runs they record are
+unchanged; only the addresses are withheld, and the operator holds them.
+
+`tig_integration.md` §13 check 9 makes the gateway verify that the confirmed
+player ID matches its configured identity, so the address above is what
+slice-1 configuration must name.
 
 ### A. Configuration and fail-closed startup
 
@@ -373,7 +375,21 @@ so the address above is what slice-1 configuration must name.
   recovery matches the `architecture.md` §12 row: after decision commit;
   after the attempt row but before the HTTP response; after the response but
   before the outcome commit; and after TIG state changed but before the local
-  transition. Each asserts a fake-tig server-side write count of exactly one.
+  transition. Each asserts a fake-tig server-side write count — **exactly one
+  where a write reached TIG, and exactly zero where it did not**. The middle
+  two points leave identical durable state (an attempt with a NULL outcome),
+  because the record cannot say whether the request left; one recovers by
+  finding the write and the other by refusing to guess, and the counts are
+  what tell them apart. The mapping from each point to its test is in
+  `crates/tig-gateway/src/drive.rs`'s test-module doc.
+
+  **Outstanding:** the fourth point's controller half. §12's guarantee there
+  is "reconciliation advances monotonically from confirmed TIG evidence",
+  which §6 makes a controller transition. The gateway tests settle the
+  *attempt* from the confirmed read, which is what reopens the lane;
+  advancing the workflow from that same evidence is the reconciler's, and a
+  controller reconciliation test still owes it. G2 is not met until that
+  test exists.
 - G3. A lease claimant that lost its fence cannot commit a late result
   (`architecture.md` §7.5 step 4, invariant 8). Test: reclaim with a higher
   fence, then attempt the stale commit.

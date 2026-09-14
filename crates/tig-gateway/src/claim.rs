@@ -128,6 +128,21 @@ pub enum SkipReason {
     ///
     /// §7.3 makes both terminal, so there is no write left to make.
     AlreadySettled,
+    /// No built body was supplied for this intent's benchmark.
+    ///
+    /// §3 keeps commitment construction out of the gateway, so a pass is
+    /// handed bodies rather than building them — and a driver holding one
+    /// commitment claims every claimable benchmark intent, so the intents it
+    /// has no bytes for are the ordinary case, not a fault.
+    ///
+    /// Deliberately **not** `PayloadNotTheRecordedOne`, which means a body
+    /// was present and disagreed with the intent's digest — a payload
+    /// integrity alarm. Reporting "no body this pass" as that alarm would
+    /// raise it for every other intent on every pass, and §10.3's discipline
+    /// is that a bucket which fills on every pass is one nobody reads. The
+    /// next pass carrying the right body resolves this with no operator
+    /// involved.
+    NoBuiltPayload,
     /// The workflow this intent belongs to has ended.
     ///
     /// Issue #86: an expiry or a restart leaves a `PREPARED` intent behind,
@@ -343,11 +358,45 @@ fn reconciled(
 /// confirmed (§7: an entry in `get-benchmarks.benchmarks` with a non-null
 /// `state.block_confirmed`). Membership is the evidence, and its absence is
 /// not evidence of anything.
+/// The benchmarks §7 says are confirmed, and nothing else.
+///
+/// `decide_benchmark` used to take `&[String]`, which left the caller to
+/// remember the test — and a `Vec<String>` of precommit ids, or of every
+/// benchmark in the read regardless of state, would have type-checked. §7's
+/// rule is a **non-null `state.block_confirmed`**, not membership, and a
+/// commitment settled on mere membership would be settled on evidence TIG
+/// has not given.
+///
+/// The only constructor runs the test, so holding one of these is the proof.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ConfirmedBenchmarks(Vec<String>);
+
+impl ConfirmedBenchmarks {
+    /// From `get-benchmarks.benchmarks`, keeping the entries §7 confirms.
+    ///
+    /// An entry with no `id` is dropped rather than guessed at: it cannot
+    /// name what it confirms, so it confirms nothing.
+    pub fn from_read(benchmarks: &[serde_json::Value]) -> Self {
+        Self(
+            benchmarks
+                .iter()
+                .filter(|b| pool_workflow::block_confirmed(b))
+                .filter_map(|b| b.get("id").and_then(|v| v.as_str()))
+                .map(str::to_string)
+                .collect(),
+        )
+    }
+
+    fn contains(&self, benchmark_id: &str) -> bool {
+        self.0.iter().any(|id| id == benchmark_id)
+    }
+}
+
 pub fn decide_benchmark(
     intent: &WriteIntent,
     attempts: &[WriteAttempt],
     owning: OwningWorkflow,
-    confirmed_benchmarks: &[String],
+    confirmed_benchmarks: &ConfirmedBenchmarks,
     submission: Option<&BenchmarkSubmission>,
 ) -> ClaimDecision {
     if intent.write_kind != WriteKind::Benchmark {
@@ -401,6 +450,16 @@ pub fn decide_benchmark(
     // read rather than a response — so this waits, whatever the response
     // said. An ACCEPTED attempt waits here just as an unresolved one does:
     // the commitment exists at TIG or it does not, and only the read says.
+    //
+    // **This wait is unbounded, and that is a known gap — issue #13.** An
+    // AMBIGUOUS attempt for a write TIG never applied waits for a read that
+    // will never name it, while `workflow::transition` refuses to expire the
+    // workflow past an unsettled attempt. Fail-closed is right — §10 forbids
+    // a blind resubmission, and a commitment reconciles directly, so absence
+    // from the read is not the evidence a tuple search's `NoCandidate` is —
+    // but nothing yet says the wait has gone on too long. `architecture.md`
+    // §10.3 already asks for that alert; it needs a target block time the
+    // pool does not configure yet.
     if attempts
         .iter()
         .any(|a| a.is_unresolved() || a.outcome == Some(AttemptOutcome::Accepted))
@@ -465,18 +524,23 @@ pub fn decide_benchmark(
     // those for an operator would raise an alarm about a body none of them
     // would have used.
     //
-    // An absent body is the same answer as a wrong one. The driver carries a
-    // single commitment, so a second claimable benchmark intent is handed a
-    // body built for the first; both cases mean "this intent's bytes are not
-    // here", and neither may become an attempt.
-    match submission {
-        Some(submission)
-            if crate::transmit::benchmark_digest(submission) == intent.payload_digest => {}
-        _ => {
-            return ClaimDecision::StopForOperator {
-                reason: StopReason::PayloadNotTheRecordedOne,
-            };
-        }
+    // Absent and wrong are both "these are not this intent's bytes", and
+    // neither may become an attempt — but they are not the same *report*.
+    //
+    // The driver holds one commitment and the pass claims every claimable
+    // benchmark intent, so being handed no body for this one is the ordinary
+    // case and the next pass with the right body settles it. A body that is
+    // present and digests differently is not ordinary: it is the disagreement
+    // §7.3's digest exists to catch, and it needs an operator.
+    let Some(submission) = submission else {
+        return ClaimDecision::Skip {
+            reason: SkipReason::NoBuiltPayload,
+        };
+    };
+    if crate::transmit::benchmark_digest(submission) != intent.payload_digest {
+        return ClaimDecision::StopForOperator {
+            reason: StopReason::PayloadNotTheRecordedOne,
+        };
     }
 
     ClaimDecision::Transmit

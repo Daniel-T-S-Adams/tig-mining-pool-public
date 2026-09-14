@@ -151,10 +151,7 @@ fn candidate_of(index: usize, record: &serde_json::Value) -> Result<Candidate, R
         }
     };
 
-    let confirmed = record
-        .get("state")
-        .and_then(|s| s.get("block_confirmed"))
-        .is_some_and(|v| !v.is_null());
+    let confirmed = block_confirmed(record);
 
     Ok(Candidate {
         benchmark_id,
@@ -203,6 +200,24 @@ impl Candidate {
 ///
 /// `precommits` is the `precommits` array of a `get-benchmarks` response —
 /// §5's latest 120-block window, and §7's authority for confirmation.
+/// §7's confirmation test, in one place.
+///
+/// `tig_integration.md` §7 maps a TIG record to confirmed by one rule: a
+/// matching entry in the read **with a non-null `state.block_confirmed`**.
+/// Presence in the collection is not the test — an entry can be there and
+/// unconfirmed — and every caller that reduces a read to "these are
+/// confirmed" is applying this and nothing else.
+///
+/// Stated here rather than at each reader because two readers that disagree
+/// about what confirmation means is how a workflow gets advanced on evidence
+/// TIG has not given.
+pub fn block_confirmed(record: &serde_json::Value) -> bool {
+    record
+        .get("state")
+        .and_then(|s| s.get("block_confirmed"))
+        .is_some_and(|v| !v.is_null())
+}
+
 pub fn reconcile_precommit(
     precommits: &[serde_json::Value],
     submitted: &PrecommitSubmission,

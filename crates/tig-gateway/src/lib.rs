@@ -20,8 +20,8 @@ pub mod write_gate;
 pub mod write_policy;
 
 pub use claim::{
-    ClaimDecision, OwningWorkflow, SiblingGenerations, SkipReason, StopReason, decide,
-    decide_benchmark,
+    ClaimDecision, ConfirmedBenchmarks, OwningWorkflow, SiblingGenerations, SkipReason, StopReason,
+    decide, decide_benchmark,
 };
 pub use credential::{CredentialError, TigApiKey};
 pub use drive::{

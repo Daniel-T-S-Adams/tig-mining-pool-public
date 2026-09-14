@@ -16,8 +16,8 @@ use pool_workflow::{
 };
 use serde_json::json;
 use tig_gateway::claim::{
-    ClaimDecision, OwningWorkflow, SiblingGenerations, SkipReason, StopReason, decide,
-    decide_benchmark,
+    ClaimDecision, ConfirmedBenchmarks, OwningWorkflow, SiblingGenerations, SkipReason, StopReason,
+    decide, decide_benchmark,
 };
 use tig_gateway::reconcile::{PrecommitSubmission, TrackSettings};
 
@@ -597,6 +597,27 @@ fn an_accepted_attempt_reconciles_rather_than_reading_as_refused() {
 
 // ---- benchmark commitments (§6.2), which reconcile directly -----------------
 
+/// `get-benchmarks.benchmarks` as TIG returns it, with `bench_a` confirmed.
+///
+/// Built as the read rather than as a list of ids, so the test exercises §7's
+/// actual test — a non-null `state.block_confirmed` — and not a caller's
+/// memory of it.
+fn confirmed_read() -> ConfirmedBenchmarks {
+    ConfirmedBenchmarks::from_read(&[json!({
+        "id": "bench_a",
+        "state": { "block_confirmed": 42 }
+    })])
+}
+
+/// The same entry, present but not yet confirmed. §7 says this confirms
+/// nothing, and membership alone must not settle a commitment.
+fn unconfirmed_read() -> ConfirmedBenchmarks {
+    ConfirmedBenchmarks::from_read(&[json!({
+        "id": "bench_a",
+        "state": { "block_confirmed": serde_json::Value::Null }
+    })])
+}
+
 /// The body the artifact worker built for `bench_a`.
 fn commitment() -> BenchmarkSubmission {
     BenchmarkSubmission {
@@ -644,10 +665,68 @@ fn an_unsent_commitment_on_a_live_workflow_is_transmitted() {
             &benchmark_intent(IntentState::Prepared),
             &[],
             live(),
-            &[],
+            &ConfirmedBenchmarks::default(),
             Some(&commitment())
         ),
         ClaimDecision::Transmit
+    );
+}
+
+#[test]
+fn being_in_the_read_is_not_being_confirmed() {
+    // §7's test is a non-null `state.block_confirmed`, not membership. An
+    // entry can be in `get-benchmarks.benchmarks` and not yet confirmed, and
+    // settling a commitment on its presence would settle it on evidence TIG
+    // has not given.
+    //
+    // This is why the argument is a `ConfirmedBenchmarks` and not a
+    // `Vec<String>`: the test runs in the only constructor, so a caller
+    // cannot forget it and a list of ids cannot be passed by mistake.
+    assert_eq!(
+        decide_benchmark(
+            &benchmark_intent(IntentState::Prepared),
+            &[attempt(Some(AttemptOutcome::Accepted))],
+            live(),
+            &unconfirmed_read(),
+            Some(&commitment())
+        ),
+        ClaimDecision::AwaitConfirmation,
+        "present but unconfirmed settles nothing"
+    );
+    assert_eq!(
+        decide_benchmark(
+            &benchmark_intent(IntentState::Prepared),
+            &[attempt(Some(AttemptOutcome::Accepted))],
+            live(),
+            &confirmed_read(),
+            Some(&commitment())
+        ),
+        ClaimDecision::AlreadyConfirmed {
+            benchmark_id: "bench_a".to_string()
+        },
+    );
+}
+
+#[test]
+fn an_intent_with_no_body_this_pass_is_skipped_not_alarmed() {
+    // The driver holds one commitment and the pass claims every claimable
+    // benchmark intent, so "no bytes for this one" is the ordinary case. It
+    // is a `Skip`, which `needs_operator` does not count — §10.3's rule is
+    // that a bucket filling on every pass is one nobody reads.
+    //
+    // `PayloadNotTheRecordedOne` stays reserved for a body that is present
+    // and disagrees with the digest, which is a genuine integrity alarm.
+    assert_eq!(
+        decide_benchmark(
+            &benchmark_intent(IntentState::Prepared),
+            &[],
+            live(),
+            &ConfirmedBenchmarks::default(),
+            None
+        ),
+        ClaimDecision::Skip {
+            reason: SkipReason::NoBuiltPayload
+        }
     );
 }
 
@@ -672,27 +751,8 @@ fn a_body_that_is_not_this_intents_never_becomes_an_attempt() {
             &benchmark_intent(IntentState::Prepared),
             &[],
             live(),
-            &[],
+            &ConfirmedBenchmarks::default(),
             Some(&other)
-        ),
-        ClaimDecision::StopForOperator {
-            reason: StopReason::PayloadNotTheRecordedOne
-        }
-    );
-}
-
-#[test]
-fn an_absent_body_is_the_same_answer_as_a_wrong_one() {
-    // Both mean "this intent's bytes are not here", and neither may become
-    // an attempt. Handled in `decide` so the stop is a decision the report
-    // carries, not an error raised from inside the send path.
-    assert_eq!(
-        decide_benchmark(
-            &benchmark_intent(IntentState::Prepared),
-            &[],
-            live(),
-            &[],
-            None
         ),
         ClaimDecision::StopForOperator {
             reason: StopReason::PayloadNotTheRecordedOne
@@ -717,7 +777,7 @@ fn a_wrong_body_does_not_disturb_a_decision_that_never_reads_one() {
             &benchmark_intent(IntentState::Confirmed),
             &[],
             live(),
-            &[],
+            &ConfirmedBenchmarks::default(),
             Some(&other)
         ),
         ClaimDecision::Skip {
@@ -729,7 +789,7 @@ fn a_wrong_body_does_not_disturb_a_decision_that_never_reads_one() {
             &benchmark_intent(IntentState::Prepared),
             &[],
             live(),
-            &["bench_a".to_string()],
+            &confirmed_read(),
             Some(&other)
         ),
         ClaimDecision::AlreadyConfirmed {
@@ -754,7 +814,7 @@ fn a_confirmed_benchmark_is_reconciled_directly_and_never_resent() {
                 &benchmark_intent(IntentState::Prepared),
                 &attempts,
                 live(),
-                &["bench_a".to_string()],
+                &confirmed_read(),
                 Some(&commitment())
             ),
             ClaimDecision::AlreadyConfirmed {
@@ -781,7 +841,7 @@ fn a_write_in_flight_waits_for_the_read_whatever_the_response_said() {
                 &benchmark_intent(IntentState::Prepared),
                 &[attempt(outcome)],
                 live(),
-                &[],
+                &ConfirmedBenchmarks::default(),
                 Some(&commitment())
             ),
             ClaimDecision::AwaitConfirmation,
@@ -799,7 +859,7 @@ fn a_refused_commitment_is_not_searched_for_and_not_resent() {
             &benchmark_intent(IntentState::Prepared),
             &[attempt(Some(AttemptOutcome::Rejected))],
             live(),
-            &[],
+            &ConfirmedBenchmarks::default(),
             Some(&commitment())
         ),
         ClaimDecision::Skip {
@@ -817,7 +877,7 @@ fn reconciliation_comes_before_terminality() {
             &benchmark_intent(IntentState::Prepared),
             &[attempt(None)],
             ended(),
-            &["bench_a".to_string()],
+            &confirmed_read(),
             Some(&commitment())
         ),
         ClaimDecision::AlreadyConfirmed {
@@ -830,7 +890,7 @@ fn reconciliation_comes_before_terminality() {
             &benchmark_intent(IntentState::Prepared),
             &[],
             ended(),
-            &[],
+            &ConfirmedBenchmarks::default(),
             Some(&commitment())
         ),
         ClaimDecision::Skip {
@@ -849,7 +909,7 @@ fn an_unknown_outcome_with_no_attempt_stops_rather_than_sending() {
             &benchmark_intent(IntentState::OutcomeUnknown),
             &[],
             live(),
-            &[],
+            &ConfirmedBenchmarks::default(),
             Some(&commitment())
         ),
         ClaimDecision::StopForOperator {
@@ -866,7 +926,7 @@ fn a_settled_intent_owes_nothing() {
                 &benchmark_intent(state),
                 &[],
                 live(),
-                &["bench_a".to_string()],
+                &confirmed_read(),
                 Some(&commitment())
             ),
             ClaimDecision::Skip {
@@ -883,7 +943,13 @@ fn another_kind_of_intent_is_not_this_paths() {
     precommit.write_kind = WriteKind::Precommit;
     precommit.benchmark_id = None;
     assert!(matches!(
-        decide_benchmark(&precommit, &[], live(), &[], Some(&commitment())),
+        decide_benchmark(
+            &precommit,
+            &[],
+            live(),
+            &ConfirmedBenchmarks::default(),
+            Some(&commitment()),
+        ),
         ClaimDecision::Skip {
             reason: SkipReason::NotAPrecommit { .. }
         }

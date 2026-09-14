@@ -34,6 +34,44 @@ use pool_workflow::payload::{BenchmarkSubmission, PrecommitSubmission, benchmark
 // has a reader outside the send path.
 pub use pool_workflow::payload::{benchmark_digest, precommit_body, precommit_digest};
 
+/// What a 2xx means, given whether this write kind learns its id from the
+/// reply.
+///
+/// Its own function because it is the only place two write kinds are judged
+/// differently, and because the judgement is otherwise unreachable from a
+/// test: TIG's §6.2 reply carries no `benchmark_id` at all, so no end-to-end
+/// run against a faithful fake can tell a rule that ignores a returned id
+/// from one that passes it through.
+///
+/// - **A precommit learns its id here.** A success status is TIG accepting
+///   the request for processing (§6.1, §7), so the precommit may exist and
+///   its fee may be paid. A body that did not carry the id back says nothing
+///   about whether the write landed — only that this attempt cannot learn
+///   the id from the response. Calling it an error would licence the resend
+///   §10 forbids, so it is ambiguous, exactly as an undecodable body is.
+/// - **A commitment or proof learns nothing here.** It named its
+///   `benchmark_id` in the request, so a missing id in the reply is not
+///   missing, and an id that *is* echoed is not evidence: surfacing it would
+///   put a response-derived identity into a field whose meaning is "TIG
+///   assigned this". TIG does not echo one today, which is precisely why the
+///   rule has to be stated rather than left to the shape of the reply.
+fn classify_success(
+    returned: Option<&str>,
+    learns_benchmark_id: bool,
+) -> (AttemptOutcome, &'static str, Option<String>) {
+    if !learns_benchmark_id {
+        return (AttemptOutcome::Accepted, "accepted", None);
+    }
+    match returned {
+        Some(id) => (AttemptOutcome::Accepted, "accepted", Some(id.to_string())),
+        None => (
+            AttemptOutcome::Ambiguous,
+            "accepted without a benchmark_id",
+            None,
+        ),
+    }
+}
+
 /// What one transmission established.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Transmitted {
@@ -298,33 +336,12 @@ impl PrecommitTransmitter {
                 }
             };
             let returned = body.get("benchmark_id").and_then(|v| v.as_str());
-            if learns_benchmark_id && returned.is_none() {
-                // A success status is TIG accepting the request for
-                // processing (§6.1, §7), so the precommit may exist and its
-                // fee may be paid. That the body did not carry the id back
-                // says nothing about whether the write landed — it only
-                // means this attempt cannot learn the id from the response.
-                // Calling it an error would licence the resend §10 forbids;
-                // the identical situation one branch above, a body that will
-                // not decode, is already ambiguous.
-                //
-                // Only a precommit is judged this way. A benchmark or proof
-                // write already names its `benchmark_id` in the request, so
-                // there is nothing for the response to teach it and nothing
-                // missing when the response does not repeat it — §6.2's
-                // reply carries no id at all.
-                return Ok(Transmitted {
-                    outcome: AttemptOutcome::Ambiguous,
-                    http_status,
-                    detail: "accepted without a benchmark_id".to_string(),
-                    benchmark_id: None,
-                });
-            }
+            let (outcome, detail, benchmark_id) = classify_success(returned, learns_benchmark_id);
             return Ok(Transmitted {
-                outcome: AttemptOutcome::Accepted,
+                outcome,
                 http_status,
-                detail: "accepted".to_string(),
-                benchmark_id: returned.map(str::to_string),
+                detail: detail.to_string(),
+                benchmark_id,
             });
         }
 
@@ -852,6 +869,48 @@ mod tests {
 
         assert!(matches!(error, TransmitError::NotAPrecommitIntent { .. }));
         assert_eq!(writes_received(&base).await, 0);
+    }
+
+    #[test]
+    fn only_a_write_that_learns_its_id_reports_one() {
+        // The one place two write kinds are judged differently, and the one
+        // rule no end-to-end run can pin: TIG's §6.2 reply carries no
+        // `benchmark_id`, so against a faithful fake a rule that ignores a
+        // returned id and one that passes it through look identical.
+        //
+        // A precommit learns its id here, and its absence is ambiguous
+        // rather than an error — §10 forbids the resend that calling it an
+        // error would licence.
+        assert_eq!(
+            classify_success(Some("bench_a"), true),
+            (
+                AttemptOutcome::Accepted,
+                "accepted",
+                Some("bench_a".to_string())
+            )
+        );
+        assert_eq!(
+            classify_success(None, true),
+            (
+                AttemptOutcome::Ambiguous,
+                "accepted without a benchmark_id",
+                None
+            )
+        );
+
+        // A commitment named its benchmark in the request. A missing id is
+        // not missing, and an echoed one is not evidence — surfacing it
+        // would put a response-derived identity in a field meaning "TIG
+        // assigned this".
+        assert_eq!(
+            classify_success(None, false),
+            (AttemptOutcome::Accepted, "accepted", None)
+        );
+        assert_eq!(
+            classify_success(Some("something_the_reply_echoed"), false),
+            (AttemptOutcome::Accepted, "accepted", None),
+            "an echoed id is still not an id the pool learned"
+        );
     }
 
     #[test]

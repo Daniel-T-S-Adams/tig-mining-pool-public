@@ -61,7 +61,7 @@ second run's driver is preserved verbatim at
 (the gateway role); `spike-member` and `spike-pool` never see it.
 
 ```bash
-PLAYER=0xbeefbeefbeefbeefbeefbeefbeefbeefbeefbeef
+PLAYER=<the spike testnet address; held outside this repository>
 KEY=secrets/tig-testnet-api-key           # never printed, copied, or committed
 GW=data/<run>/gateway MEMBER=data/<run>/member POOL=data/<run>/pool
 COMMON=(--player "$PLAYER" --api-key-file "$KEY" --data-dir "$GW")
@@ -98,7 +98,7 @@ block-age limits) come from `config/tig_integration.json`, never hard-coded.
 Run on 2026-08-04 from a **fresh, empty data directory**
 (`data/spike-report/`) using only the commands in §2, with no state carried
 from any earlier phase: benchmark **`818b03c19fc7c28d71c59c9c09791ef8`**,
-player `0xbeefbeefbeefbeefbeefbeefbeefbeefbeefbeef`, c008/`c008_a001`, track
+the spike player identity, c008/`c008_a001`, track
 `s=baseline` (TIG-selected), 1 bundle × 10 nonces, `aws_t4g`. One precommit,
 0.001 TIG (`available_fee_balance` 9.996 → 9.995 TIG, recorded before/after
 from public reads). The run completed precommit → ACTIVE → deletion with no

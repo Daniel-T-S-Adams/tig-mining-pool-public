@@ -366,9 +366,10 @@ Section completion criteria:
   deterministic suites ran entirely offline against them (PR #30)
 - [x] The expected values are reviewed before generated implementation tests
   are accepted as evidence.
-  — owner sign-off recorded 2026-08-23:
-  [PR #47 comment](https://github.com/Daniel-T-S-Adams/tig-mining-pool/pull/47#issuecomment-5385619569).
-  Fixture residuals stay recorded in each set's README and in issue #31.
+  — owner sign-off recorded 2026-08-23 in review of the fixture PR. That
+  review thread predates this repository and is not reproduced here;
+  the reviewed values themselves are the fixtures under `fixtures/`.
+  Fixture residuals stay recorded in each set's README.
 
 ## 7. Complete one end-to-end protocol spike
 
@@ -391,7 +392,8 @@ testnet precommit
 ```
 
 - [x] Create and fund the testnet Benchmarker identity required for the spike.
-  — PR #25 (plan §4: address `0xbeefbeefbeefbeefbeefbeefbeefbeefbeefbeef`)
+  — PR #25 (plan §4; the spike identity is recorded outside this
+    repository, see the note in `plans/protocol-spike.md` §4)
 - [x] Submit a valid precommit through the pool's TIG gateway.
   — PR #26 (S1); repeated in every live run
   ([spike report §4](protocol_spike_report.md))

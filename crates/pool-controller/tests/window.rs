@@ -73,6 +73,17 @@ fn the_confirmed_precommit_carries_what_the_guardrails_and_transitions_need() {
     // values matter, and a field-by-field copy would silently drop whatever a
     // later TIG release added.
     assert_eq!(p.settings["challenge_id"], json!("c001"));
+    // §6.2's commitment is built to exactly `details.num_nonces`, which is a
+    // *detail* and so is not inside `settings`. Carried explicitly, and
+    // asserted here because the field currently has no reader: a consumer
+    // that later confirms from the window would find `None` and — treating
+    // absence as permission, the way the first version of the commitment
+    // path did — build a body against a length nobody checked.
+    assert_eq!(p.num_nonces, Some(80));
+    assert!(
+        p.settings.get("num_nonces").is_none(),
+        "settings and details are disjoint objects"
+    );
 }
 
 #[test]

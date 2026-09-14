@@ -31,26 +31,25 @@
 //! fake, and a guard keyed to it would pass in the one case it exists to
 //! prevent.
 //!
-//! **Half of F4d is here, and half is not.** The criterion refuses "creating
-//! **or accepting**" a stub record against a live endpoint. This module is the
-//! creating half. The accepting half — refusing to build a benchmark or proof
-//! write *from* a fabricated row — belongs on the intent-creation path, and
-//! slice 1 has no such path yet: nothing outside tests creates a benchmark or
-//! proof intent, so there is nothing to guard and a guard written now would be
-//! shaped by guesses about the caller F4's lifecycle drive will actually
-//! introduce.
+//! **Both halves of F4d now exist, in different places.** The criterion
+//! refuses "creating **or accepting**" a stub record against a live endpoint.
+//! This module is the creating half, and it is compiled out of a default
+//! build (F4c). The accepting half is `crate::commit`'s, on the path that
+//! turns a fabricated row into a TIG write, and it is in *every* build —
+//! because the row it refuses may have been written by a build that had the
+//! stub (a developer's database promoted, a dump restored) and the endpoint
+//! is what decides whether acting on it is safe.
 //!
-//! What could not wait is the *evidence*. `stub_origin` on both rows lands
-//! here, with the stub, because a fabricated row written without it is
-//! indistinguishable from a real acceptance for the rest of the database's
-//! life and no later migration recovers what it was. F4's PR adds the guard
-//! that reads it.
+//! `stub_origin` on each row is what makes the accepting half possible: a
+//! fabricated row written without it is indistinguishable from a real
+//! acceptance for the rest of the database's life, and no later migration
+//! recovers what it was.
 
 use pool_config::TigConfig;
 use pool_domain::Network;
 use pool_workflow::{
-    AcceptanceError, CanonicalPayload, PackageAcceptance, record_acceptance,
-    record_canonical_payload,
+    AcceptanceError, CanonicalPayload, CommitmentPayload, PackageAcceptance, record_acceptance,
+    record_canonical_payload, record_commitment_payload,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -136,6 +135,40 @@ where
             workflow_id: workflow_id.to_string(),
             benchmark_id: benchmark_id.to_string(),
             sample_digest: STUB_SAMPLE_DIGEST,
+            payload_digest,
+            stub_origin: true,
+        },
+    )
+    .await?;
+    Ok(())
+}
+
+/// Record a stub commitment payload, satisfying `migrations/0015`.
+///
+/// `payload_digest` is the caller's, for the reason
+/// [`stub_canonical_payload`]'s is: the trigger requires it to equal the
+/// intent's, and a stub that chose its own would make every commitment test
+/// pass without the body ever being the one submitted.
+pub async fn stub_commitment_payload<'e, E>(
+    executor: E,
+    tig: &TigConfig,
+    network: Network,
+    artifact_id: &str,
+    workflow_id: &str,
+    benchmark_id: &str,
+    payload_digest: [u8; 32],
+) -> Result<(), StubError>
+where
+    E: sqlx::PgExecutor<'e>,
+{
+    guard(tig, "a commitment payload")?;
+    record_commitment_payload(
+        executor,
+        &CommitmentPayload {
+            network,
+            artifact_id: artifact_id.to_string(),
+            workflow_id: workflow_id.to_string(),
+            benchmark_id: benchmark_id.to_string(),
             payload_digest,
             stub_origin: true,
         },

@@ -22,6 +22,8 @@ fn precommit(benchmark: &str, block: i64) -> ConfirmedPrecommit {
         // TIG's own record of when the benchmark began; §8's deadlines are
         // ages from here, and it is a few blocks before confirmation.
         block_started: block - 2,
+        // A *detail*, like `block_started` — not one of the settings below.
+        num_nonces: Some(80),
         track_id: "t002".to_string(),
         settings: json!({ "num_bundles": 5 }),
     }
@@ -193,15 +195,26 @@ async fn an_accepted_attempt_with_no_confirmation_advances_nothing() {
     assert_eq!(w.state, WorkflowState::PrecommitConfirmed);
 
     // A real accepted attempt: TIG answered 200 and the ledger says so.
-    // §13 invariant 4 first — 0011 refuses a benchmark write with no durable
-    // acceptance, and this test's subject is what an *accepted attempt* does
-    // to a workflow, not what precedes the intent.
+    // §13 invariant 4 first — 0011 and 0015 refuse a benchmark write with no
+    // durable acceptance and no built commitment behind it, and this test's
+    // subject is what an *accepted attempt* does to a workflow, not what
+    // precedes the intent.
     pool_test_support::seed_acceptances(&pool, "testnet", &[("w1", "bench_a")]).await;
+    pool_test_support::seed_commitment_payload(
+        &pool,
+        "testnet",
+        "artifact/w1/commitment",
+        "w1",
+        "bench_a",
+        [0xab; 32],
+    )
+    .await;
     let intent_id: String = sqlx::query_scalar(
         "INSERT INTO pool.tig_write_intent
-             (network, workflow_id, write_kind, generation, benchmark_id, payload_digest)
+             (network, workflow_id, write_kind, generation, benchmark_id,
+              payload_digest, payload_artifact_id)
          VALUES ('testnet', 'w1', 'benchmark', 1, 'bench_a',
-                 decode(repeat('ab', 32), 'hex'))
+                 decode(repeat('ab', 32), 'hex'), 'artifact/w1/commitment')
          RETURNING intent_id::text",
     )
     .fetch_one(&pool)

@@ -1051,11 +1051,14 @@ mod tests {
         // "Controller dies after decision commit — the write intent remains
         // claimable; another controller uses the higher lease fence."
         //
-        // Staged by admitting the decision and then doing nothing, which is
-        // exactly what a process that died between the decision transaction
-        // and its first claim leaves behind. A *different* holder then runs:
-        // the fence advances, the write goes out once, and the count says
-        // once.
+        // Staged by admitting the decision and then taking — and losing —
+        // the lease under the dead process's name, which is what a process
+        // that died holding one leaves behind. The row and its fence outlive
+        // the process; the §12 row's "higher lease fence" is only meaningful
+        // against that baseline, so it is established rather than assumed.
+        //
+        // A *different* holder then runs: the fence advances past the dead
+        // process's, the write goes out once, and the count says once.
         let Some(h) = Harness::new("drive_crash_decision").await else {
             return;
         };
@@ -1063,6 +1066,23 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(admitted.intent.state, IntentState::Prepared);
+
+        // What the dead process held. Released rather than left to expire,
+        // because the successor must advance the fence either way and this
+        // keeps the test off the clock.
+        let dead = pool_workflow::lease::claim(
+            &h.gateway,
+            Network::Testnet,
+            "w1",
+            pool_workflow::LeaseKind::PrecommitTransmit,
+            "gateway-dead",
+            60,
+        )
+        .await
+        .unwrap();
+        pool_workflow::lease::release(&h.gateway, &dead)
+            .await
+            .unwrap();
         assert_eq!(
             fake_state(&h.base).await["writes_received"]
                 .get("submit-precommit")
@@ -1096,7 +1116,11 @@ mod tests {
         );
 
         // And the lease the successor took is recorded as its own, with a
-        // fence above whatever the dead process would have held.
+        // fence strictly above the one the dead process held. Compared
+        // against that captured value and not against a constant: the
+        // schema's own CHECK already guarantees `fence_token >= 1`, so a
+        // lower bound of 1 would hold however the claim behaved and would
+        // pin nothing.
         let (owner, fence): (String, i64) = sqlx::query_as(
             "SELECT lease_owner, fence_token FROM pool.work_lease
               WHERE network = 'testnet' AND workflow_id = 'w1'",
@@ -1105,7 +1129,12 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(owner, "gateway-successor");
-        assert!(fence >= 1, "the fence advanced with the claim");
+        assert!(
+            fence > dead.fence_token,
+            "the successor's fence {fence} must advance past the dead \
+             process's {}",
+            dead.fence_token
+        );
     }
 
     #[tokio::test]

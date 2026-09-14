@@ -146,6 +146,17 @@ pub enum SkipReason {
     /// other intent on every pass, and §10.3's discipline is that a bucket
     /// which fills on every pass is one nobody reads. The next pass carrying
     /// the right body resolves this with no operator involved.
+    ///
+    /// **The other half of that trade is a known gap — issue #13.** An intent
+    /// whose body *never* arrives — a pool bug binding the wrong
+    /// `benchmark_id`, an artifact worker that never publishes — now waits
+    /// with nothing raising it: `RunReport::needs_operator` ignores `Skip` by
+    /// design, and `slice-1-gateway.md` I4 puts §10.3's age-based job alert
+    /// out of slice-1 scope. The driver emits a `debug` event carrying the
+    /// intent's ids so a persistent one is at least discoverable until that
+    /// alert exists. The same issue owns the unbounded `AwaitConfirmation`
+    /// wait, for the same missing reason: a target block time to measure age
+    /// against.
     NoBuiltPayload,
     /// The workflow this intent belongs to has ended.
     ///

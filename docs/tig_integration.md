@@ -1187,7 +1187,9 @@ without this process.
 automatically", so a gate that re-pinned itself from upstream would defeat the
 pin entirely.
 
-It does read live TIG — checks 5, 6 and 9 cannot be answered otherwise. The
+It does read live TIG — checks 4, 5, 6 and 9 cannot be answered otherwise:
+check 4 fetches the published specification and hashes it, and the other three
+read the API. The
 distinction is what it does with what it reads: it compares against the pin
 and refuses, never adopts. Check 6 is the sharpest case. It compares the live
 active challenges against the pinned runtimes and **fails** when one the

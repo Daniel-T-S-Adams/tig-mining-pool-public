@@ -21,22 +21,25 @@ use tig_client::TigReadClient;
 /// §13 check 9: the pool player ID returned by confirmed data matches the
 /// configured identity.
 ///
-/// **What is verified is that TIG holds a player for this id**, not that the
-/// reply repeated it. `get-player-data` takes `player_id` as a parameter, so
-/// comparing the echoed id against the configured one would compare a value
-/// with itself — the circularity §13.1 rejects for check 2 and a reviewer
-/// caught in check 1.
+/// **What is verified is that TIG holds a player for this id** (§13.3), not
+/// that the reply repeated it. `get-player-data` takes `player_id` as a
+/// parameter, so comparing the echoed id against the configured one would
+/// compare a value with itself — the circularity §13.1 rejects for check 2
+/// and a reviewer caught in check 1.
 ///
 /// Existence is not circular. A typo, a mainnet identity against a testnet
 /// endpoint, or an account that was retired all produce a reply with no
 /// player, and the deployment cannot write until its identity is one TIG
 /// actually serves.
 ///
-/// **A missing player is HTTP 200, not 404** — verified against live testnet
-/// on 2026-09-15: an unknown id returns `{"player": null, ...}` with a
-/// success status. A check written as "did the request succeed" would pass
-/// for an identity that does not exist, which is the case this exists to
-/// catch.
+/// **A missing player is HTTP 200, not 404** (§14.3, observed on live testnet
+/// 2026-09-15). A check written as "did the request succeed" passes for an
+/// identity that does not exist, which is the case this exists to catch.
+///
+/// §13.3 records what this establishes and what it does not — in particular
+/// that it says nothing about whether the loaded API key belongs to the
+/// player, which §10's byte-for-byte `settings.player_id` comparison catches
+/// later and by different means.
 pub async fn confirmed_pool_player_id(
     reader: &TigReadClient,
     block_id: &str,

@@ -732,7 +732,9 @@ So the two sides are these:
 
 A mismatch means a binary was deployed beside a configuration that has moved
 on, and the gateway refuses to write rather than transmit under a snapshot
-nobody built it against.
+nobody built it against. §15 step 9 is what keeps the two moving together: an
+upgrade restates the declaration in every deployment and rebuilds, and one that
+does not is exactly the case this check exists to stop.
 
 **What this does not establish** is that the declared commit was reviewed at
 all: the declaration and the pin can be wrong together and the check still
@@ -988,8 +990,19 @@ Changing any pin requires a reviewed integration upgrade:
 4. resolve new image tags to immutable multi-platform digests;
 5. update explicit models, live-value routing and deterministic fixtures;
 6. run read compatibility tests against testnet;
-7. rerun the end-to-end protocol spike; and
-8. update the machine-readable config and this document in the same change.
+7. rerun the end-to-end protocol spike;
+8. update the machine-readable config and this document in the same change;
+   and
+9. restate `[tig].acquired_upstream_commit` to the new commit in **every**
+   deployment's configuration, and rebuild the binaries so they carry the new
+   compiled-in pin.
+
+Step 9 is not bookkeeping. §13.1 makes those two values the opposite sides of
+check 2, so a deployment left on the old declaration fails the check and the
+gateway refuses to write. That is the intended behaviour — it is what catches
+a binary deployed beside a configuration that moved on — but an operator who
+followed steps 1 to 8 and stopped would meet it as a mystery rather than as
+the step they skipped.
 
 No production upgrade follows upstream `main`, `latest`, or a mutable image tag
 without this process.

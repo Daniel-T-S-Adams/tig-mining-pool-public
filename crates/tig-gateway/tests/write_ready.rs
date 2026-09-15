@@ -8,9 +8,10 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use pool_domain::Network;
+use serde_json::json;
 use tig_gateway::readiness::{
     ActiveChallengeRuntime, ApiKeyPlacement, Check, Evidence, FixtureOutcome, ModelValidation,
-    OpenApiObservation, Pins, ResolvedImage, acquired_upstream_commit, evaluate,
+    OpenApiObservation, Pins, ResolvedImage, acquired_upstream_commit, evaluate, pinned_network,
 };
 
 /// Makes one piece of evidence ungatherable, for the fail-closed cases.
@@ -27,12 +28,13 @@ type BreakEvidence = Box<dyn Fn(&mut Evidence)>;
 /// prevent, one level up. `Pins::compiled_in` is now the only reader, so a
 /// shipped config that lost a pinned digest fails here too.
 ///
-/// The platform is the test's, because it is the deployment's everywhere: the
-/// pinned manifests are multi-platform, so nothing in the file answers "which
-/// one does this host need".
+/// The platform is the test's because it is the deployment's everywhere: §2
+/// records the pinned manifests as multi-platform, so the file names the
+/// reviewed architecture set and the host answers which of them it is. The
+/// network is *not* a parameter — it comes from the pin, so check 1 has
+/// something to disagree with.
 fn pins() -> Pins {
     let pins = Pins::compiled_in(
-        Network::Testnet,
         // Test data, not a pin source: the gate compares observed identity
         // against whatever a deployment configures, and these pins are
         // self-consistent. The real slice-1 testnet identity is recorded in
@@ -160,6 +162,42 @@ fn check_2_an_upstream_commit_that_moved() {
     let mut evidence = passing(&pins);
     evidence.upstream_commit = Ok("0000000000000000000000000000000000000000".to_string());
     only(evidence, Check::UpstreamCommit);
+}
+
+#[test]
+fn the_pinned_network_comes_from_the_pin_so_check_1_can_disagree() {
+    // Check 1 has two halves: the network must be `testnet` absolutely, and
+    // it must agree with the pin. The second is worth something only if the
+    // pin is a different artifact from the thing being checked — otherwise it
+    // compares a deployment's TOML value against itself, which is the
+    // circularity §13.1 rejects for check 2.
+    //
+    // Tested through `pinned_network` rather than through `compiled_in`,
+    // because `compiled_in` reads one fixed document. Asserting that its
+    // network equals the shipped `network.name` looks like a test and is not:
+    // a body returning `Testnet` outright satisfies it too, since the shipped
+    // name is testnet. That version was written first and a mutant walked
+    // straight through it.
+    assert_eq!(
+        pinned_network(&json!({ "network": { "name": "mainnet" } })).unwrap(),
+        Network::Mainnet,
+        "the network must come from the file, not from what this build expects"
+    );
+    assert_eq!(
+        pinned_network(&json!({ "network": { "name": "testnet" } })).unwrap(),
+        Network::Testnet
+    );
+
+    // A build that does not know the network it is pinned to cannot check
+    // anything about it, so an unknown or absent name fails rather than
+    // defaulting.
+    assert!(pinned_network(&json!({ "network": { "name": "devnet" } })).is_err());
+    assert!(pinned_network(&json!({})).is_err());
+
+    // And the constructor uses it, so the two cannot drift apart.
+    let shipped: serde_json::Value =
+        serde_json::from_str(include_str!("../../../config/tig_integration.json")).unwrap();
+    assert_eq!(pins().network, pinned_network(&shipped).unwrap());
 }
 
 #[test]

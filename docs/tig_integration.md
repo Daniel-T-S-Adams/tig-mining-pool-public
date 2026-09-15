@@ -840,23 +840,6 @@ These known discrepancies do not authorize accepting new mismatches. They are
 handled by the explicit v0 models and must have regression fixtures before
 writes are enabled.
 
-### 14.3 An absent player is a success, not a 404
-
-`GET /get-player-data?block_id=…&player_id=…` answers an id TIG does not hold
-with **HTTP 200** and a null player, not a 404 or an error:
-
-```json
-{ "player": null, "deposits": [], "round_earnings": [], "topups": [] }
-```
-
-Observed on live testnet 2026-09-15. A present player carries the same
-envelope with `player` populated.
-
-This matters because §13 check 9 and any later reader of this endpoint cannot
-treat transport success as evidence that the player exists. `fake-tig` models
-the same answer, so a check that made that mistake fails against the fake
-rather than only against TIG.
-
 ### 14.1 Method-report penalty configuration block (S5 determination)
 
 Phase S5 of the protocol spike (issue #14) determined, from the pinned commit
@@ -1051,6 +1034,27 @@ The lowercase wire casing matches the enum-casing discrepancy the spike
 already recorded (`protocol_spike_report.md` §9 item 6); `tig-structs`
 declares the variants in Rust casing and they serialize lowercase.
 
+### 14.3 An absent player is a success, not a 404
+
+`GET /get-player-data?block_id=…&player_id=…` answers an id TIG does not hold
+with **HTTP 200** and a null player, not a 404 or an error:
+
+```json
+{ "player": null, "deposits": [], "round_earnings": [], "topups": [] }
+```
+
+Observed on live testnet 2026-09-15. A present player carries the same
+envelope with `player` populated.
+
+This matters because §13 check 9 and any later reader of this endpoint cannot
+treat transport success as evidence that the player exists. `fake-tig` returns
+this exact envelope for an id it does not hold, so a check that made that
+mistake fails against the fake rather than only against TIG.
+
+Its *present*-player reply still carries the v1 fixture's shape, which predates
+the top-level `deposits` and `round_earnings` arrays recorded above — the same
+gap §14 notes for spike S1, closed by the v2 fixture in
+[issue #4](https://github.com/Daniel-T-S-Adams/tig-mining-pool-public/issues/4).
 ## 15. Upgrade procedure
 
 Changing any pin requires a reviewed integration upgrade:

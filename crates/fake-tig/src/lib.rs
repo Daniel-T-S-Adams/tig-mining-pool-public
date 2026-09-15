@@ -768,15 +768,25 @@ async fn get_player_data(
     // `get_benchmarks` is §7's sole confirmation read — the stricter place to
     // have settled it.
     if !requested.eq_ignore_ascii_case(held) {
-        // §14.3: the same envelope with a null player, which is what live
-        // testnet returns. A second shape here would make this endpoint two
-        // endpoints, and the fake is the fidelity reference §13 check 5's
-        // model validation is written against.
-        let mut absent = w.fixture.player.clone();
-        if let Some(object) = absent.as_object_mut() {
-            object.insert("player".to_string(), Value::Null);
-        }
-        return Ok(Json(absent));
+        // §14.3's envelope, built rather than derived from the fixture.
+        //
+        // Cloning the present-player fixture and nulling `player` looks
+        // tidier and is wrong twice. The v1 fixture carries only `player`, so
+        // the reply would lose `deposits`, `round_earnings` and `topups` —
+        // the very keys §14.3 records live testnet returning. And a later
+        // fixture that *did* carry the pool's balances would serve them to a
+        // caller asking about somebody else, under a null player.
+        //
+        // The present branch still answers with the fixture's own shape,
+        // which predates those arrays (§14, spike S1; v2 is issue #31). The
+        // two branches therefore differ until that fixture exists, and this
+        // is the one that matches what TIG actually sends.
+        return Ok(Json(json!({
+            "player": Value::Null,
+            "deposits": [],
+            "round_earnings": [],
+            "topups": [],
+        })));
     }
     Ok(Json(w.fixture.player.clone()))
 }

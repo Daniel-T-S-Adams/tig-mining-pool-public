@@ -15,6 +15,21 @@
 //! without reading, and `tig_client`'s `TigReader::Gateway` share exists for
 //! exactly this. Choosing work stays the controller's.
 //!
+//! **Nothing in this module reads configuration.** The crate does depend on
+//! `pool-config`, and one library module reads a `Config`: `service::run`,
+//! which is the crate's single entry point and lives in the library rather
+//! than in `main.rs` only because `credential::load` is crate-private and the
+//! key must not leave. Everywhere else — every function below, and every
+//! function in `readiness` — takes what it needs as an argument.
+//!
+//! That is a testability property, not a boundary the compiler holds: a
+//! gathering function that read a `Config` could only be tested against the
+//! config the crate ships, whereas one that takes its inputs can be handed the
+//! failing case. Worth stating carefully, because two earlier versions of this
+//! comment overclaimed — first that the crate *could not* see configuration,
+//! then that no library code touched a `Config` — and each stopped being true
+//! in the commit that added the dependency and the run loop respectively.
+//!
 //! Check 4 reads too, and not through that share: the published specification
 //! lives on the swagger host rather than the API, so it is fetched with this
 //! crate's own client. ADR-0006 allocates a share of *the API*, and counting
@@ -28,7 +43,8 @@ use serde_json::Value;
 use tig_client::TigReadClient;
 
 use crate::readiness::{
-    ActiveChallengeRuntime, ApiKeyPlacement, FixtureOutcome, ModelValidation, OpenApiObservation,
+    ActiveChallengeRuntime, ApiKeyPlacement, FixtureOutcome, ImageObservation, ModelValidation,
+    OpenApiObservation,
 };
 
 /// §13 check 9: the pool player ID returned by confirmed data matches the
@@ -550,4 +566,60 @@ pub async fn response_models(
         });
     }
     Ok(out)
+}
+
+/// §13 check 3's observation, from the deployment's acknowledgement.
+///
+/// No registry is contacted. §13.2 records why and what that costs: the ten
+/// pinned images are what members run, slice 1 runs none, and resolving them
+/// at startup would verify containers nothing here uses. The acknowledgement
+/// is the only way the check passes, and it must carry a reason — which
+/// `pool-config` refuses to load empty and `evaluate` refuses to accept
+/// empty, so neither layer can be the only one holding the rule.
+pub fn unresolved_containers(acknowledged: Option<&str>) -> ImageObservation {
+    ImageObservation {
+        resolved: None,
+        reviewed_unresolved: acknowledged.map(str::to_string),
+    }
+}
+
+/// The block every anchored read in the gate is taken against.
+///
+/// One block for all of them. §9's whole discipline is that reads which
+/// disagree about which block they describe cannot be compared, and a gate
+/// that asked three questions at three heights would be judging a state that
+/// never existed.
+pub async fn anchor_block(reader: &TigReadClient) -> Result<(String, u64), String> {
+    let body = reader
+        .get_json("/get-block?include_data=true")
+        .await
+        .map_err(|e| format!("get-block failed: {e}"))?;
+    let block = body
+        .get("block")
+        .ok_or_else(|| "get-block returned no block".to_string())?;
+    let id = block
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "the block carries no id".to_string())?
+        .to_string();
+    let round = block
+        .get("details")
+        .and_then(|d| d.get("round"))
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "the block carries no details.round".to_string())?;
+    Ok((id, round))
+}
+
+/// The URL the pinned file names for the published specification.
+pub fn pinned_openapi_url() -> Result<String, String> {
+    const PINNED: &str = include_str!("../../../config/tig_integration.json");
+    let value: Value =
+        serde_json::from_str(PINNED).map_err(|e| format!("pinned file is not JSON: {e}"))?;
+    value
+        .get("upstream")
+        .and_then(|u| u.get("openapi"))
+        .and_then(|o| o.get("url"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| "the pinned file has no upstream.openapi.url".to_string())
 }

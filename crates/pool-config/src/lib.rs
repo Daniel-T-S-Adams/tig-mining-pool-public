@@ -266,6 +266,45 @@ impl TigConfig {
     }
 }
 
+/// The gateway's own settings: the credential, the lease, and the scope §13
+/// check 6 judges.
+///
+/// Gateway-only, the way `[orchestration]` is controller-only. A controller
+/// config carrying it would read as though the controller held the API key,
+/// which `architecture.md` §2.2 says it does not.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GatewayConfig {
+    /// Where the TIG API key is read from.
+    ///
+    /// The path, never the key. `architecture.md` §9 keeps secrets out of
+    /// configuration and §2.2 makes this file the only place the key exists;
+    /// naming the file is what lets check 8 judge who can read it.
+    pub api_key_file: PathBuf,
+    /// How long a transmit lease is held.
+    ///
+    /// No default: `run_once` refuses a lease shorter than a write's call
+    /// timeout, because a claimant could otherwise take over an attempt whose
+    /// sender is still waiting on TIG. A compiled fallback would be a value
+    /// reached exactly when the operator did not think about it.
+    pub lease_secs: i64,
+    /// The platform the pinned container digests must resolve for.
+    ///
+    /// A fact about this host. §2 records the pinned images as multi-platform,
+    /// so the file cannot answer which one this machine needs. `linux/<arch>`,
+    /// matching what a registry reports.
+    pub platform: String,
+    /// The compute types this deployment serves, for §13 check 6.
+    ///
+    /// §13.5 is the contract: "considered by the decision engine" resolves to
+    /// the compute this deployment serves, so this is what scopes the check.
+    /// **Required, and required to be explicit** — a gateway that defaulted it
+    /// to empty would pass check 6 by saying nothing. An empty list is
+    /// therefore a deliberate statement that this deployment mines nothing,
+    /// which is what slice 1 is.
+    pub served_compute: Vec<String>,
+}
+
 /// The controller's orchestration policy.
 ///
 /// `mining_system.md` §11 lists `internal_pool_unverified_limit` among the
@@ -310,6 +349,7 @@ pub struct Config {
     /// Present for `pool-controller` and absent for every other binary, which
     /// `validate_for` enforces in both directions.
     pub orchestration: Option<OrchestrationConfig>,
+    pub gateway: Option<GatewayConfig>,
 }
 
 /// Which binary is loading, so cross-field rules can differ where the
@@ -628,6 +668,60 @@ impl Config {
             (other, Some(_)) => {
                 return Err(invalid(format!(
                     "[orchestration] belongs to pool-controller; {} must not carry it",
+                    other.as_str()
+                )));
+            }
+            (_, None) => {}
+        }
+
+        // The same shape for `[gateway]`, and both directions matter for the
+        // same reason: a gateway with no credential path cannot load the key
+        // §2.2 says only it holds, and a controller carrying one would read
+        // as though it did.
+        match (binary, &self.gateway) {
+            (Binary::TigGateway, None) => {
+                return Err(invalid(
+                    "tig-gateway requires [gateway] with api_key_file, lease_secs, \
+                     platform and served_compute; none has a default because each \
+                     is a fact about this deployment that a fallback would answer \
+                     on its behalf"
+                        .into(),
+                ));
+            }
+            (Binary::TigGateway, Some(gateway)) => {
+                if gateway.lease_secs < 1 {
+                    return Err(invalid(format!(
+                        "gateway.lease_secs must be at least 1, found {}",
+                        gateway.lease_secs
+                    )));
+                }
+                // `linux/<arch>`, matching what a registry reports and what
+                // §13 check 3 compares byte for byte. A bare "arm64" would
+                // never equal a resolved platform and would fail check 3 for
+                // a reason no operator could act on.
+                if !gateway.platform.starts_with("linux/") || gateway.platform.len() < 8 {
+                    return Err(invalid(format!(
+                        "gateway.platform must be `linux/<arch>`, found {:?}: §13 \
+                         check 3 compares it against what a registry reports",
+                        gateway.platform
+                    )));
+                }
+                if gateway
+                    .served_compute
+                    .iter()
+                    .any(|compute| compute.trim().is_empty())
+                {
+                    return Err(invalid(
+                        "gateway.served_compute must not contain an empty entry; an \
+                         empty string matches no challenge and would scope §13 \
+                         check 6 to nothing"
+                            .into(),
+                    ));
+                }
+            }
+            (other, Some(_)) => {
+                return Err(invalid(format!(
+                    "[gateway] belongs to tig-gateway; {} must not carry it",
                     other.as_str()
                 )));
             }

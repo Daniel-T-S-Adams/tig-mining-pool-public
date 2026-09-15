@@ -1,0 +1,70 @@
+# Local development configuration for `tig-gateway`.
+#
+# Non-secret by construction (docs/architecture.md §9): this file names the
+# paths of a password file and an API key file, never their contents.
+# `scripts/dev-db.sh` generates the former into the untracked `secrets/`
+# directory; the API key is placed there by a person, since nothing here can
+# mint one.
+#
+# Usage:
+#   ./scripts/dev-db.sh
+#   cargo run -p pool-admin -- --config config/pool-admin.dev.toml migrate
+#   cargo run -p fake-tig -- --fixture fixtures/tig/v1 --port 8080 \
+#       --player 0x2935a721068da756b28cba896efdb64e8909dfae
+#   cargo run -p tig-gateway -- --config config/tig-gateway.dev.toml check
+#   cargo run -p tig-gateway -- --config config/tig-gateway.dev.toml run
+#
+# `check` gathers §13's nine observations, prints the verdict and exits without
+# claiming work or sending anything. Run it first: `run` performs the same gate
+# and refuses to open on a failure, so `check` is how you see why.
+
+network = "testnet"
+
+[database]
+host = "127.0.0.1"
+port = 5433
+name = "pool_dev"
+# The gateway's own least-privilege role, refused if another is named.
+user = "pool_gateway"
+password_file = "secrets/db-gateway-password"
+statement_timeout_ms = 30000
+
+[telemetry]
+format = "json"
+level = "info"
+deployment = "local-dev"
+
+[tig]
+# A local `fake-tig`. Note that §13 check 5 does not pass against the fixture
+# (issue #28: the v1 fixture's `get-algorithms` collections were derived
+# wrong), so `check` against this endpoint reports a failure the live API does
+# not. That is a fixture defect, not a gate defect — the same binary passes all
+# nine against testnet.
+base_url = "http://127.0.0.1:8080"
+player_id = "0x2935a721068da756b28cba896efdb64e8909dfae"
+acquired_upstream_commit = "ad08d1ea001a73ff5aab3b556d7f59246fece14e"
+# §13 check 8 asks whether the pinned container images resolve. Slice 1 runs no
+# container, so there is nothing to resolve and the check would otherwise block
+# the gate for ever on a question that does not apply yet (tig_integration.md
+# §13.5). Acknowledged rather than skipped: the gate reports it at `warn` on
+# every open, so it cannot be forgotten. Issue #20 removes this.
+unresolved_containers_acknowledged = "slice 1 runs no pinned container; issue #20"
+
+[gateway]
+# The only file in the pool that holds the TIG API key, and the only component
+# permitted to read one (docs/architecture.md §2.2). Untracked; place it
+# yourself. A testnet key — mainnet credentials are human-only and never local.
+api_key_file = "secrets/tig-testnet-api-key"
+# Must outlast a write's call timeout, which `config/tig_integration.json` pins
+# at 60s: a lease that expires while a sender is still waiting on TIG lets the
+# next claimant take over an attempt that may yet land (§7.5). `tig-gateway`
+# refuses to start otherwise, so this is 120 rather than a value that merely
+# parses.
+lease_secs = 120
+# §13 check 8 compares the pinned images against what this host can run.
+platform = "linux/arm64"
+# Explicitly empty: the pool serves no compute of its own in slice 1
+# (tig_integration.md §13.5). An absent list would be indistinguishable from an
+# unanswered question, so the section requires the key and permits it to be
+# empty.
+served_compute = []

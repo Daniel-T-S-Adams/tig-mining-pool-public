@@ -2425,8 +2425,12 @@ name = "tig-gateway"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "clap",
  "fake-tig",
+ "getrandom 0.3.4",
+ "pool-config",
  "pool-domain",
+ "pool-telemetry",
  "pool-test-support",
  "pool-workflow",
  "reqwest",

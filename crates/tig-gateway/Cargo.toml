@@ -7,7 +7,14 @@ publish.workspace = true
 version = "0.1.0"
 
 [dependencies]
+clap = { version = "4", features = ["derive"] }
+# §7.5's lease owner must be distinct across processes, and the environment
+# that defeats hostname-and-pid is the one with no working clock either. Drawn
+# from the OS instead: see `service::startup_nonce`.
+getrandom = "0.3"
+pool-config = { path = "../pool-config" }
 pool-domain = { path = "../pool-domain" }
+pool-telemetry = { path = "../pool-telemetry" }
 pool-workflow = { path = "../pool-workflow" }
 # §13 checks 5, 6 and 9 read the TIG API, and `TigReader::Gateway` is the
 # share ADR-0006 gives this process for it. Check 4 is not among them: it
@@ -28,8 +35,14 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 thiserror = "2"
-# The POST lane's pacing sleeps between initial writes; `time` only.
-tokio = { version = "1", default-features = false, features = ["time"] }
+# The POST lane's pacing sleeps between initial writes, which is `time`. The
+# binary needs a runtime to sleep on: `rt-multi-thread` and `macros` are for
+# `src/main.rs`, not for the library, which still touches neither.
+tokio = { version = "1", default-features = false, features = [
+    "time",
+    "rt-multi-thread",
+    "macros",
+] }
 tracing = "0.1"
 
 [dev-dependencies]

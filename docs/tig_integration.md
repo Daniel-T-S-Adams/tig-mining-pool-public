@@ -627,6 +627,12 @@ enough to be implemented wrongly:
   constants. A caller needing a read to complete within a block imposes that
   bound itself from live configuration.
 
+The budget covers requests to the **API host**. §13 check 4's fetch of the
+published specification goes to the swagger host named in
+`config/tig_integration.json`, a different origin, and is outside it — so a
+reader of the ceiling does not have to wonder whether a startup schema fetch
+spends a share of it.
+
 These are client policy, not claims about server capacity. The spike records
 observed headers, latency and throttling and may propose reviewed changes.
 
@@ -1201,7 +1207,8 @@ meeting that refusal should find it documented rather than mysterious.
 
 What no check asks, because none of them may, is the question in the other
 direction: *has TIG moved since the review behind this pin?* A gate answers
-"may this process write now"; nothing answered "is the pin still current". It went unasked long enough for the pin to fall 45 commits
+"may this process write now"; nothing answered "is the pin still current".
+It went unasked long enough for the pin to fall 45 commits
 behind and a new CPU challenge to go live unnoticed.
 
 `scripts/pin-drift.sh` asks it. Four comparisons against live TIG, all public

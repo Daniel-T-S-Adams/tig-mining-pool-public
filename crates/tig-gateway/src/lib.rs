@@ -16,6 +16,7 @@ pub mod evidence;
 pub mod lane;
 pub mod readiness;
 pub mod reconcile;
+pub mod service;
 pub mod transmit;
 pub mod write_gate;
 pub mod write_policy;

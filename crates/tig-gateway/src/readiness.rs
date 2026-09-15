@@ -223,6 +223,32 @@ pub struct ResolvedImage {
     pub platform: String,
 }
 
+/// What was observed about the pinned containers.
+///
+/// Two shapes, the way [`OpenApiObservation`] has two: the digests a registry
+/// actually reported, or an explicit acknowledgement that this deployment
+/// resolved none.
+///
+/// §13 check 4 offers that second shape itself — "or an explicit reviewed
+/// local schema override is active". **Check 3 does not**, so accepting one
+/// here is a documented deviation and not a reading of the rule; see §13.2,
+/// which records what is and is not verified while it stands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageObservation {
+    /// What a registry reported, when resolution ran at all.
+    pub resolved: Option<Vec<ResolvedImage>>,
+    /// An explicit, reviewed acknowledgement that this deployment resolves no
+    /// container digests, and why.
+    ///
+    /// Absent by default, so a deployment that says nothing fails check 3
+    /// rather than passing it. The reason is carried through to
+    /// [`WriteReady`] instead of being consumed here: a check that passes on
+    /// an acknowledgement should leave the acknowledgement visible at every
+    /// point the pass is relied on, or it becomes indistinguishable from a
+    /// check that was performed.
+    pub reviewed_unresolved: Option<String>,
+}
+
 /// What was observed about the OpenAPI document.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpenApiObservation {
@@ -285,7 +311,7 @@ const REQUIRED_MODELS: &[&str] = &[
 pub struct Evidence {
     pub config_network: Result<Network, String>,
     pub upstream_commit: Result<String, String>,
-    pub resolved_images: Result<Vec<ResolvedImage>, String>,
+    pub resolved_images: Result<ImageObservation, String>,
     pub openapi: Result<OpenApiObservation, String>,
     pub response_models: Result<Vec<ModelValidation>, String>,
     pub active_challenges: Result<Vec<ActiveChallengeRuntime>, String>,
@@ -298,7 +324,8 @@ pub struct Evidence {
 ///
 /// §13 asks for "the acquired upstream source commit". Nothing in this
 /// repository acquires TIG's source — §15 makes the upgrade a reviewed
-/// human procedure that ends by editing `config/tig_integration.json` — so the
+/// human procedure that ends by editing `config/tig_integration.json`,
+/// restating the declaration in every deployment and rebuilding — so the
 /// acquired commit is a fact only the person who performed that review holds.
 /// `[tig].acquired_upstream_commit` is where they state it, and this returns
 /// it for [`evaluate`] to compare against the compiled-in pin.
@@ -338,6 +365,7 @@ pub fn acquired_upstream_commit(declared: &str) -> Result<String, String> {
 pub struct WriteReady {
     network: Network,
     upstream_commit: String,
+    containers_unresolved: Option<String>,
 }
 
 impl WriteReady {
@@ -350,6 +378,16 @@ impl WriteReady {
     /// under.
     pub fn upstream_commit(&self) -> &str {
         &self.upstream_commit
+    }
+
+    /// Why check 3 passed without resolving anything, when it did.
+    ///
+    /// `Some` means the gate was satisfied by an acknowledgement rather than
+    /// by evidence, and every caller holding this proof is entitled to know
+    /// which. A binary should say so at startup: a deviation nobody can see
+    /// from the outside is one that outlives the reason for it.
+    pub fn containers_unresolved(&self) -> Option<&str> {
+        self.containers_unresolved.as_deref()
     }
 }
 
@@ -403,12 +441,35 @@ pub fn evaluate(pins: &Pins, evidence: &Evidence) -> Result<WriteReady, Vec<Fail
 
     // 3. Every required container resolves to its pinned digest, for the
     //    pinned platform.
+    let mut containers_unresolved: Option<String> = None;
     match &evidence.resolved_images {
         Err(e) => fail(
             Check::ContainerDigests,
             format!("could not resolve container digests: {e}"),
         ),
-        Ok(resolved) => {
+        // Neither resolved nor acknowledged. Not "nothing to check": §13
+        // wants every required container compared against its pin, and a
+        // deployment silent about having done none of that is the case this
+        // fails for.
+        Ok(ImageObservation {
+            resolved: None,
+            reviewed_unresolved: None,
+        }) => fail(
+            Check::ContainerDigests,
+            "no container digests were resolved and no reviewed acknowledgement is \
+             active; see tig_integration.md §13.2"
+                .to_string(),
+        ),
+        // Acknowledged. The check passes and the reason travels with the
+        // permission it granted — see §13.2 for why this exists at all.
+        Ok(ImageObservation {
+            resolved: None,
+            reviewed_unresolved: Some(reason),
+        }) => containers_unresolved = Some(reason.clone()),
+        Ok(ImageObservation {
+            resolved: Some(resolved),
+            ..
+        }) => {
             let by_reference: BTreeMap<&str, &ResolvedImage> = resolved
                 .iter()
                 .map(|image| (image.reference.as_str(), image))
@@ -612,6 +673,7 @@ pub fn evaluate(pins: &Pins, evidence: &Evidence) -> Result<WriteReady, Vec<Fail
         Ok(WriteReady {
             network,
             upstream_commit,
+            containers_unresolved,
         })
     } else {
         failures.sort_by_key(|f| f.check);

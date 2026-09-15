@@ -161,7 +161,7 @@ pub struct TigConfig {
     ///
     /// Nothing in this repository acquires TIG's source: §15 makes the
     /// upgrade a reviewed human procedure that ends by editing the pinned
-    /// file. The acquired commit is therefore a fact only a person holds, and
+    /// file, restating this value in every deployment and rebuilding (§15). The acquired commit is therefore a fact only a person holds, and
     /// this is where they state it. A deployment stating one the binary was
     /// not built against fails check 2 rather than writing to TIG under a
     /// snapshot nobody built it against.
@@ -171,6 +171,22 @@ pub struct TigConfig {
     /// verifies the deployment against the build, not the build against
     /// upstream.
     pub acquired_upstream_commit: String,
+    /// Why this deployment resolves no pinned container digests, if it does
+    /// not — §13 check 3, and the deviation `tig_integration.md` §13.2
+    /// records.
+    ///
+    /// Absent by default, and absence **fails** check 3: a deployment that
+    /// has said nothing about the check has not passed it. Present, the
+    /// gateway may write and the reason travels with the permission, so a
+    /// deviation nobody can see from the outside does not outlive the reason
+    /// for it.
+    ///
+    /// Not a boolean. A flag records that someone toggled something; a reason
+    /// records what they believed, which is what the next operator needs in
+    /// order to decide whether it still holds. Issue #20 owns removing this
+    /// field along with the check it stands in for.
+    #[serde(default)]
+    pub unresolved_containers_acknowledged: Option<String>,
 }
 
 impl TigConfig {
@@ -511,6 +527,22 @@ impl Config {
                         "tig.acquired_upstream_commit must be a full 40-character lowercase \
                          hex commit, not an abbreviation: §13 check 2 compares it against the \
                          compiled-in pin byte for byte"
+                            .into(),
+                    ));
+                }
+                // An empty reason is the shape of an operator who wanted the
+                // check to stop failing without saying why. It would satisfy
+                // `Some(_)` and pass check 3 while recording nothing, which
+                // is the outcome §13.2 exists to prevent.
+                if tig
+                    .unresolved_containers_acknowledged
+                    .as_deref()
+                    .is_some_and(|reason| reason.trim().is_empty())
+                {
+                    return Err(invalid(
+                        "tig.unresolved_containers_acknowledged must say why, not just be \
+                         present: it is what a later operator reads to decide whether the \
+                         deviation still holds (tig_integration.md §13.2)"
                             .into(),
                     ));
                 }

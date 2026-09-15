@@ -846,23 +846,6 @@ These known discrepancies do not authorize accepting new mismatches. They are
 handled by the explicit v0 models and must have regression fixtures before
 writes are enabled.
 
-### 14.3 An absent player is a success, not a 404
-
-`GET /get-player-data?block_id=…&player_id=…` answers an id TIG does not hold
-with **HTTP 200** and a null player, not a 404 or an error:
-
-```json
-{ "player": null, "deposits": [], "round_earnings": [], "topups": [] }
-```
-
-Observed on live testnet 2026-09-15. A present player carries the same
-envelope with `player` populated.
-
-This matters because §13 check 9 and any later reader of this endpoint cannot
-treat transport success as evidence that the player exists. `fake-tig` models
-the same answer, so a check that made that mistake fails against the fake
-rather than only against TIG.
-
 ### 14.1 Method-report penalty configuration block (S5 determination)
 
 Phase S5 of the protocol spike (issue #14) determined, from the pinned commit

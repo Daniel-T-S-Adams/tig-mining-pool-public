@@ -462,6 +462,24 @@ pub fn evaluate(pins: &Pins, evidence: &Evidence) -> Result<WriteReady, Vec<Fail
         ),
         // Acknowledged. The check passes and the reason travels with the
         // permission it granted — see §13.2 for why this exists at all.
+        // An acknowledgement that says nothing is silence wearing the shape
+        // of an answer. §13.2 permits the deviation on the ground that a
+        // later operator can read *why*; a blank reason gives them the
+        // permission without the reason.
+        //
+        // Enforced here rather than only where the value is loaded, because
+        // this is the function that grants the pass. `pool-config` refuses it
+        // earlier and more helpfully, but it is one possible source of an
+        // `Evidence`, and the rule cannot depend on which one was used.
+        Ok(ImageObservation {
+            resolved: None,
+            reviewed_unresolved: Some(reason),
+        }) if reason.trim().is_empty() => fail(
+            Check::ContainerDigests,
+            "the container acknowledgement gives no reason; §13.2 requires one, because it \
+             is what a later operator reads to decide whether the deviation still holds"
+                .to_string(),
+        ),
         Ok(ImageObservation {
             resolved: None,
             reviewed_unresolved: Some(reason),

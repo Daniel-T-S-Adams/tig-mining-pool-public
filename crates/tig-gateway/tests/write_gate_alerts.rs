@@ -38,17 +38,29 @@ fn pins() -> Pins {
 }
 
 fn ready() -> WriteReady {
+    ready_with(None)
+}
+
+/// A gate proof whose check 3 passed on an acknowledgement rather than on
+/// resolved digests, when `acknowledgement` is `Some`.
+fn ready_with(acknowledgement: Option<&str>) -> WriteReady {
     let pins = pins();
     let evidence = Evidence {
         config_network: Ok(Network::Testnet),
         upstream_commit: Ok(pins.upstream_commit.clone()),
-        resolved_images: Ok(ImageObservation {
-            resolved: Some(vec![ResolvedImage {
-                reference: "img".to_string(),
-                manifest_digest: "sha256:aa".to_string(),
-                platform: "linux/arm64".to_string(),
-            }]),
-            reviewed_unresolved: None,
+        resolved_images: Ok(match acknowledgement {
+            None => ImageObservation {
+                resolved: Some(vec![ResolvedImage {
+                    reference: "img".to_string(),
+                    manifest_digest: "sha256:aa".to_string(),
+                    platform: "linux/arm64".to_string(),
+                }]),
+                reviewed_unresolved: None,
+            },
+            Some(reason) => ImageObservation {
+                resolved: None,
+                reviewed_unresolved: Some(reason.to_string()),
+            },
         }),
         openapi: Ok(OpenApiObservation {
             hosted_sha256: Some("abc".to_string()),
@@ -105,6 +117,73 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Capture {
     fn make_writer(&'a self) -> Self::Writer {
         self.clone()
     }
+}
+
+#[test]
+fn a_gate_opened_on_an_acknowledgement_says_so_every_time() {
+    // `tig_integration.md` §13.2 permits check 3 to pass unperformed on one
+    // ground: the acknowledgement stays visible, so a pass granted without
+    // resolving a digest never looks like one granted with.
+    //
+    // An accessor nobody calls does not make it visible. The first version
+    // shipped exactly that while §13.2 asserted the gateway reported it, and
+    // a reviewer caught the document describing a safety property the code
+    // did not have. This is that property, asserted.
+    let capture = Capture::default();
+    let subscriber = tracing_subscriber::fmt()
+        .json()
+        .with_max_level(tracing::Level::DEBUG)
+        .with_writer(capture.clone())
+        .finish();
+
+    tracing::subscriber::with_default(subscriber, || {
+        let gate = WriteGate::open(ready_with(Some(
+            "slice 1 runs no pinned container; issue #20",
+        )));
+        // Both entry points, because a gate lost and restored is still a gate
+        // granting permission on an acknowledgement.
+        gate.revoke(Revocation::Authentication {
+            detail: "TIG returned 401".to_string(),
+        });
+        assert!(gate.restore(ready_with(Some(
+            "slice 1 runs no pinned container; issue #20"
+        ))));
+    });
+
+    let logged = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
+    let reported: Vec<&str> = logged
+        .lines()
+        .filter(|l| l.contains("container_digests"))
+        .collect();
+    assert_eq!(
+        reported.len(),
+        2,
+        "once per gate opening, at both entry points: {logged}"
+    );
+    for line in &reported {
+        assert!(line.contains("issue #20"), "the reason must travel: {line}");
+        assert!(
+            line.contains("WARN"),
+            "not below an operator's threshold: {line}"
+        );
+    }
+
+    // And a gate opened on resolved digests says nothing, or the signal means
+    // nothing.
+    let capture = Capture::default();
+    let subscriber = tracing_subscriber::fmt()
+        .json()
+        .with_max_level(tracing::Level::DEBUG)
+        .with_writer(capture.clone())
+        .finish();
+    tracing::subscriber::with_default(subscriber, || {
+        let _gate = WriteGate::open(ready());
+    });
+    let logged = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
+    assert!(
+        !logged.contains("container_digests"),
+        "a check actually performed must not report a deviation: {logged}"
+    );
 }
 
 #[test]

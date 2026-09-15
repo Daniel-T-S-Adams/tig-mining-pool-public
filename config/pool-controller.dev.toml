@@ -47,7 +47,7 @@ player_id = "0x2935a721068da756b28cba896efdb64e8909dfae"
 # into the binary from `config/tig_integration.json`, so the two are different
 # artifacts and a mismatch means a binary was deployed beside a configuration
 # that moved on. Stated by a person because nothing here acquires the source —
-# §15 makes that an eight-step human review.
+# §15 makes that a reviewed human procedure.
 acquired_upstream_commit = "ad08d1ea001a73ff5aab3b556d7f59246fece14e"
 
 [orchestration]

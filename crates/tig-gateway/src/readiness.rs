@@ -297,8 +297,8 @@ pub struct Evidence {
 /// The §13 check-2 observation this deployment can actually make.
 ///
 /// §13 asks for "the acquired upstream source commit". Nothing in this
-/// repository acquires TIG's source — §15 makes the upgrade an eight-step
-/// human review that ends by editing `config/tig_integration.json` — so the
+/// repository acquires TIG's source — §15 makes the upgrade a reviewed
+/// human procedure that ends by editing `config/tig_integration.json` — so the
 /// acquired commit is a fact only the person who performed that review holds.
 /// `[tig].acquired_upstream_commit` is where they state it, and this returns
 /// it for [`evaluate`] to compare against the compiled-in pin.

@@ -717,8 +717,8 @@ branch or container tag is never accepted automatically.
 
 Check 2 is written as a comparison between the commit that was *acquired* and
 the commit that is *pinned*. Nothing in this repository acquires TIG's source:
-§15 makes an upgrade an eight-step human review that ends by editing
-`config/tig_integration.json`. There is therefore no machine-produced record
+§15 makes an upgrade a reviewed human procedure that ends by editing
+`config/tig_integration.json`, restating the declaration and rebuilding. There is therefore no machine-produced record
 of what a build was made against, and a check comparing the pinned file to
 itself would pass however wrong it was.
 

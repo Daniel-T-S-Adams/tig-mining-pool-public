@@ -519,6 +519,87 @@ fn an_acknowledgement_that_says_nothing_does_not_load() {
 }
 
 #[test]
+fn the_gateway_section_is_required_by_the_gateway_and_forbidden_elsewhere() {
+    let scratch = Scratch::new("gateway-section");
+    let base = |role: &str| {
+        let mut toml = valid_toml(&scratch.password_file())
+            .replace("user = \"pool_migration\"", &format!("user = \"{role}\""));
+        toml.push_str(TIG);
+        toml
+    };
+
+    // Required. Every field is a fact about this deployment, and a gateway
+    // without them cannot load the key §2.2 says only it holds.
+    let Err(err) = Config::load(scratch.write(&base("pool_gateway")), Binary::TigGateway) else {
+        panic!("a gateway with no [gateway] must not load");
+    };
+    assert_invalid(err, "tig-gateway requires [gateway]");
+
+    // And forbidden elsewhere: a controller carrying it would read as though
+    // the controller held the API key.
+    let mut toml = base("pool_controller");
+    toml.push_str(ORCHESTRATION);
+    toml.push_str(GATEWAY);
+    let Err(err) = Config::load(scratch.write(&toml), Binary::PoolController) else {
+        panic!("a controller carrying [gateway] must not load");
+    };
+    assert_invalid(err, "[gateway] belongs to tig-gateway");
+}
+
+#[test]
+fn a_gateway_section_with_an_unusable_value_does_not_load() {
+    let scratch = Scratch::new("gateway-values");
+    let load = |section: &str| {
+        let mut toml = valid_toml(&scratch.password_file())
+            .replace("user = \"pool_migration\"", "user = \"pool_gateway\"");
+        toml.push_str(TIG);
+        toml.push_str(section);
+        Config::load(scratch.write(&toml), Binary::TigGateway)
+    };
+
+    // A lease of zero can hold nothing, which is a misconfiguration rather
+    // than a policy.
+    let Err(err) = load(
+        "\n[gateway]\napi_key_file = \"/dev/null\"\nlease_secs = 0\n\
+         platform = \"linux/arm64\"\nserved_compute = []\n",
+    ) else {
+        panic!("lease_secs = 0 must not load");
+    };
+    assert_invalid(err, "lease_secs must be at least 1");
+
+    // §13 check 3 compares the platform byte for byte against what a registry
+    // reports, so a bare architecture would fail it for a reason no operator
+    // could act on.
+    for bad in ["arm64", "linux/", ""] {
+        let Err(err) = load(&format!(
+            "\n[gateway]\napi_key_file = \"/dev/null\"\nlease_secs = 60\n\
+             platform = \"{bad}\"\nserved_compute = []\n"
+        )) else {
+            panic!("platform {bad:?} must not load");
+        };
+        assert_invalid(err, "must be `linux/<arch>`");
+    }
+
+    // An empty served entry matches no challenge and would scope §13 check 6
+    // to nothing — the failure §13.5 warns about, reached by a stray comma.
+    let Err(err) = load(
+        "\n[gateway]\napi_key_file = \"/dev/null\"\nlease_secs = 60\n\
+         platform = \"linux/arm64\"\nserved_compute = [\"cpu\", \"\"]\n",
+    ) else {
+        panic!("an empty served_compute entry must not load");
+    };
+    assert_invalid(err, "must not contain an empty entry");
+
+    // And the shape that does load, so the rejections above are not passing
+    // for some unrelated reason.
+    load(
+        "\n[gateway]\napi_key_file = \"/dev/null\"\nlease_secs = 60\n\
+         platform = \"linux/arm64\"\nserved_compute = []\n",
+    )
+    .expect("a well-formed [gateway] loads");
+}
+
+#[test]
 fn database_url_is_built_from_the_password_file() {
     let scratch = Scratch::new("url");
     let config = Config::load(

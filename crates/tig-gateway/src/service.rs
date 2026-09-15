@@ -61,6 +61,23 @@ pub async fn run(config: &Config, check_only: bool) -> Result<(), String> {
         read_policy.for_reader(TigReader::Gateway),
     )?;
 
+    // §7.5's rule, checked here rather than discovered per pass. `run_once`
+    // refuses a lease shorter than a write's call timeout, and both values are
+    // known now — so a misconfigured gateway that only found out inside the
+    // loop would log "write gate open" and then transmit nothing, for ever.
+    // `architecture.md` §9 requires exiting before serving on a cross-field
+    // error, and `main.rs`'s own doc names a process that started but cannot
+    // write as the more dangerous of the two.
+    let call_timeout = write_policy.call_timeout().as_secs();
+    if gateway.lease_secs < i64::try_from(call_timeout).unwrap_or(i64::MAX) {
+        return Err(format!(
+            "gateway.lease_secs is {}, shorter than a write's call timeout of \
+             {call_timeout}s: a claimant could take over an attempt whose sender \
+             is still waiting on TIG (architecture.md §7.5)",
+            gateway.lease_secs
+        ));
+    }
+
     // §13, before anything else. `WriteReady` has no public constructor, so
     // the gate below cannot be opened by a path that skipped this.
     let ready = gate_evidence(&reader, tig, gateway, network, &key).await?;
@@ -94,10 +111,18 @@ pub async fn run(config: &Config, check_only: bool) -> Result<(), String> {
 
     // Who holds a lease. Stable across this process's life and distinct
     // across processes, which is what §7.5's fence rests on.
+    // Unique by construction. Falling back to `@unknown` when `/proc` is
+    // unreadable let two containerised gateways — both PID 1, both without a
+    // readable hostname — share an owner, and `work_lease`'s claim re-enters
+    // on a matching owner: each could take over the other's unexpired lease
+    // mid-call, which is precisely what the lease-outlasts-the-call rule
+    // exists to prevent. The nonce is what makes the string distinct; the
+    // host and pid are there to make it legible to a human reading the row.
     let lease_owner = format!(
-        "tig-gateway/{}@{}",
+        "tig-gateway/{}@{}/{}",
         std::process::id(),
-        hostname().unwrap_or_else(|| "unknown".to_string())
+        hostname().unwrap_or_else(|| "unknown".to_string()),
+        startup_nonce()
     );
 
     tracing::info!(
@@ -162,12 +187,6 @@ async fn gate_evidence(
     key: &credential::TigApiKey,
 ) -> Result<WriteReady, String> {
     let pins = Pins::compiled_in(tig.player_id.clone(), gateway.platform.clone())?;
-    if pins.network != network {
-        return Err(format!(
-            "configured network {network} is not the pinned {}",
-            pins.network
-        ));
-    }
 
     // One block for every anchored read below. §9's discipline: reads that
     // disagree about which block they describe cannot be compared, and a gate
@@ -180,7 +199,15 @@ async fn gate_evidence(
         resolved_images: Ok(evidence::unresolved_containers(
             tig.unresolved_containers_acknowledged.as_deref(),
         )),
-        openapi: evidence::openapi_checksum(&evidence::pinned_openapi_url()?).await,
+        // A pinned file with no specification URL is a check-4 failure, not a
+        // reason to stop gathering: `?` here would report one broken pin and
+        // hide the other eight answers, which is what this function exists
+        // not to do. `evaluate` compares `config_network` against the pin, so
+        // a network mismatch reports as check 1 for the same reason.
+        openapi: match evidence::pinned_openapi_url() {
+            Ok(url) => evidence::openapi_checksum(&url).await,
+            Err(e) => Err(e),
+        },
         response_models: match &anchor {
             Ok((block, _)) => evidence::response_models(reader, block, &tig.player_id).await,
             Err(e) => Err(e.clone()),
@@ -257,4 +284,17 @@ fn hostname() -> Option<String> {
         .ok()
         .map(|name| name.trim().to_string())
         .filter(|name| !name.is_empty())
+}
+
+/// A value distinct for every start of this process.
+///
+/// Not randomness for its own sake: two gateways that cannot read a hostname
+/// and share a pid would otherwise produce the same owner string, and §7.5's
+/// fence rests on owners being distinct across processes. The system clock at
+/// startup, in nanoseconds, distinguishes them without a dependency.
+fn startup_nonce() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default()
 }

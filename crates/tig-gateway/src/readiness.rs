@@ -355,9 +355,13 @@ pub struct Evidence {
 /// a second, human-supplied source necessary rather than redundant. Closing
 /// the remaining gap needs the build to acquire the source itself — see the
 /// issue named in `docs/tig_integration.md` §13.
-/// Takes the declared value rather than reading configuration itself: this
-/// crate holds the API key and deliberately does not depend on `pool-config`,
-/// so the binary is what joins the two.
+/// Takes the declared value rather than reading configuration itself, so the
+/// gate's rule does not depend on which source supplied the `Evidence`.
+///
+/// Not because the crate cannot see configuration — it depends on
+/// `pool-config` now that it carries a binary, and `evidence`'s module doc
+/// records what that changed. The §2.2 boundary is held by `credential::load`
+/// being crate-private, not by the absence of a config crate.
 pub fn acquired_upstream_commit(declared: &str) -> Result<String, String> {
     if declared.is_empty() {
         // Not reachable through `pool-config`, which refuses a malformed

@@ -133,10 +133,15 @@ pub struct WriteGate {
 /// takes permission to write while a §13 check went unperformed; once per
 /// gate opening is not a volume that buries anything, and a lower level
 /// would put it beneath the threshold an operator runs in production.
-fn report_unresolved_containers(ready: &WriteReady, event: &'static str) {
+fn report_unresolved_containers(ready: &WriteReady) {
     if let Some(reason) = ready.containers_unresolved() {
         tracing::warn!(
-            event,
+            // Its own event name, not the opening's. Reusing
+            // `gateway.write_ready.restored` put two records under one name
+            // on every restore with an acknowledgement active, so a
+            // dashboard counting restorations (§10.2) double-counted in
+            // exactly the deviation case.
+            event = "gateway.write_ready.containers_unresolved",
             check = "container_digests",
             reason,
             "writes enabled with §13 check 3 unperformed; see tig_integration.md §13.2"
@@ -150,7 +155,7 @@ impl WriteGate {
     /// Takes [`WriteReady`], which has no public constructor, so a gate
     /// cannot be opened by code that skipped the compatibility evaluation.
     pub fn open(ready: WriteReady) -> Self {
-        report_unresolved_containers(&ready, "gateway.write_ready.opened");
+        report_unresolved_containers(&ready);
         Self {
             inner: Arc::new(Mutex::new(Inner {
                 state: State::Ready(Box::new(ready)),
@@ -238,7 +243,7 @@ impl WriteGate {
             event = "gateway.write_ready.restored",
             in_flight = inner.in_flight,
         );
-        report_unresolved_containers(&ready, "gateway.write_ready.restored");
+        report_unresolved_containers(&ready);
         inner.state = State::Ready(Box::new(ready));
         true
     }

@@ -9,8 +9,10 @@ version = "0.1.0"
 [dependencies]
 pool-domain = { path = "../pool-domain" }
 pool-workflow = { path = "../pool-workflow" }
-# §13 checks 4, 5, 6 and 9 cannot be answered without reading TIG, and
-# `TigReader::Gateway` is the share ADR-0006 gives this process for it.
+# §13 checks 5, 6 and 9 read the TIG API, and `TigReader::Gateway` is the
+# share ADR-0006 gives this process for it. Check 4 is not among them: it
+# fetches the published specification from the swagger host with this
+# crate's own client, outside that share and outside this dependency.
 tig-client = { path = "../tig-client" }
 # For `PgPool` by name in the claim loop; the same features pool-workflow uses.
 sqlx = { version = "0.9", default-features = false, features = [

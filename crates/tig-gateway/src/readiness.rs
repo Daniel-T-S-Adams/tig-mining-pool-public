@@ -16,7 +16,7 @@
 //! when their input is unavailable is worse than no gate, because the
 //! failure surfaces as a successful write against an incompatible API.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use pool_domain::Network;
 
@@ -107,6 +107,16 @@ pub struct Pins {
     pub upstream_commit: String,
     /// Image reference to pinned manifest digest.
     pub image_digests: BTreeMap<String, String>,
+    /// The pinned images by the name the pinned file keys them under —
+    /// `satisfiability_runtime` and so on.
+    ///
+    /// Separate from `image_digests`, which is keyed by registry reference
+    /// because that is what a resolved image reports. §13 check 6 asks a
+    /// different question — *is there a pinned runtime for this challenge* —
+    /// and a challenge knows its name, not a registry path. Handing the
+    /// reference keys to that lookup would report every challenge unpinned:
+    /// fail-closed, but for a reason no operator could act on.
+    pub image_names: BTreeSet<String>,
     /// The platform those digests were reviewed for.
     pub platform: String,
     pub openapi_sha256: String,
@@ -186,6 +196,7 @@ impl Pins {
         // Keyed by image reference, which is what `evaluate` matches a
         // resolved image against.
         let mut image_digests = BTreeMap::new();
+        let mut image_names = BTreeSet::new();
         let images = value
             .get("images")
             .and_then(|v| v.as_object())
@@ -200,6 +211,7 @@ impl Pins {
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| format!("pinned image {name} has no manifest_digest"))?;
             image_digests.insert(reference.to_string(), digest.to_string());
+            image_names.insert(name.clone());
         }
 
         let network = pinned_network(&value)?;
@@ -208,6 +220,7 @@ impl Pins {
             network,
             upstream_commit: text(&["upstream", "commit"])?,
             image_digests,
+            image_names,
             platform,
             openapi_sha256: text(&["upstream", "openapi", "sha256"])?,
             pool_player_id,

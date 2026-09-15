@@ -812,10 +812,17 @@ and §1 makes a missing or type-incompatible required field fatal. What the
 gateway performs is narrower: it confirms each response carries **the
 collections the pool reads from it**, per the live envelopes §14 records.
 
-It is not field-level model validation. The typed parsers live in
-`pool-snapshot` and `pool-controller`, and the gateway does not depend on the
-controller to judge its own readiness — a process asking another component
-whether it may write has moved the gate somewhere it cannot be trusted.
+It is not field-level model validation, and that is a gap rather than a
+division of labour. §14 asks for "explicit v0 models" with regression fixtures
+before writes are enabled; **those models do not exist**. `pool-snapshot` and
+`pool-controller` read these envelopes as `serde_json::Value` and pull fields
+out by name, so no component validates a response against a declared shape.
+
+The gateway does not close it by depending on the controller — a process
+asking another component whether it may write has moved the gate somewhere it
+cannot be trusted. Closing it means the v0 models themselves, which
+[issue #4](https://github.com/Daniel-T-S-Adams/tig-mining-pool-public/issues/4)
+owns along with the v2 fixture set they would be validated against.
 
 **What this catches** is the failure that actually happens: TIG renaming or
 removing a collection, so the pool's next read finds nothing where it expected
@@ -1098,6 +1105,31 @@ Two Swagger inaccuracies at this pin, both confirmed against the live API:
 The lowercase wire casing matches the enum-casing discrepancy the spike
 already recorded (`protocol_spike_report.md` §9 item 6); `tig-structs`
 declares the variants in Rust casing and they serialize lowercase.
+
+### 14.4 `get-algorithms` carries no `algorithms` collection
+
+`GET /get-algorithms?block_id=…` returns, on live testnet:
+
+```
+advances:       list — block_data, details, id, state
+binarys:        list — algorithm_id, details, state
+codes:          list — block_data, details, id, state
+player_details: object
+```
+
+There is no `algorithms` key. Observed 2026-09-15; consistent with the spike's
+S1 reading on 2026-08-03.
+
+`fixtures/tig/v1/get-algorithms.json` carries exactly one top-level key and it
+is `algorithms`, so the fixture and the API disagree. The fixture's provenance
+is **constructed** rather than captured, so this may be a derivation error
+rather than an envelope change — establishing which belongs to §15's review.
+[Issue #28](https://github.com/Daniel-T-S-Adams/tig-mining-pool-public/issues/28)
+owns it.
+
+§13 check 5 validates against the collections recorded here rather than
+against the fixture, so `get-algorithms` fails against `fake-tig` until the
+fixture is corrected.
 
 ### 14.3 An absent player is a success, not a 404
 

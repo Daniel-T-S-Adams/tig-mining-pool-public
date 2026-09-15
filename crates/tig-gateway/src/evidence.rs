@@ -128,16 +128,49 @@ pub async fn openapi_checksum(url: &str) -> Result<OpenApiObservation, String> {
 /// deployment may legitimately run the gateway as a user that is not the
 /// file's owner, and the mode is what decides who can read it.
 pub fn api_key_placement(present: bool, key_path: &Path) -> Result<ApiKeyPlacement, String> {
-    use std::os::unix::fs::PermissionsExt;
-    let mode = std::fs::metadata(key_path)
-        .map_err(|e| format!("cannot stat the key file {}: {e}", key_path.display()))?
-        .permissions()
-        .mode();
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let meta = std::fs::metadata(key_path)
+        .map_err(|e| format!("cannot stat the key file {}: {e}", key_path.display()))?;
+    let mode = meta.permissions().mode();
+
+    // Mode alone is not enough, and the first version stopped there. A file
+    // at 0600 owned by a member-service identity, with the gateway running as
+    // another user, has no group or other bits set and its owner can still
+    // read it — §2.2 asks that the file be readable *only by the gateway
+    // identity*, which is a statement about who, not just about how many.
+    //
+    // So: any group or other bit, or an owner who is not this process.
+    let owner_is_someone_else = meta.uid() != effective_uid()?;
     Ok(ApiKeyPlacement {
         present_in_gateway: present,
-        // 0o077: any group or other permission bit at all.
-        readable_by_member_services: mode & 0o077 != 0,
+        readable_by_member_services: mode & 0o077 != 0 || owner_is_someone_else,
     })
+}
+
+/// The effective uid of this process, read from `/proc`.
+///
+/// Two routes were not taken. `unsafe extern "C" { fn geteuid() }` is refused
+/// by the workspace lints, and rightly — the one crate holding the API key is
+/// the last place to start making exceptions. A `libc` or `rustix` dependency
+/// for a single integer would add a dependency to that same crate, which §2.2
+/// gives reason to keep narrow.
+///
+/// `/proc/self/status` carries `Uid:\treal\teffective\tsaved\tfs`. Linux
+/// only, which is what this deploys on; an error is returned rather than
+/// guessed, so check 8 fails rather than passing on an assumption about who
+/// this process is.
+fn effective_uid() -> Result<u32, String> {
+    let status = std::fs::read_to_string("/proc/self/status")
+        .map_err(|e| format!("cannot read /proc/self/status: {e}"))?;
+    let line = status
+        .lines()
+        .find(|line| line.starts_with("Uid:"))
+        .ok_or_else(|| "/proc/self/status has no Uid line".to_string())?;
+    line.split_whitespace()
+        .nth(2)
+        .ok_or_else(|| format!("no effective uid in {line:?}"))?
+        .parse()
+        .map_err(|e| format!("effective uid in {line:?} is not a number: {e}"))
 }
 
 /// §13 check 6: every live active challenge this deployment could mine has a
@@ -237,6 +270,31 @@ pub async fn active_challenge_runtimes(
             compute_path_supported: true,
         });
     }
+    // A served type TIG has never heard of is a typo, and a typo scopes
+    // nothing and passes check 6 without a runtime being examined — the shape
+    // §13.5 warns about for an empty `served`, reached by misspelling
+    // instead. "CPU" for "cpu" is the case.
+    //
+    // Judged against the vocabulary the read itself declares, not against a
+    // match count. A served type that TIG knows but has no *active* challenge
+    // for right now is a legitimate empty scope, and counting matches cannot
+    // tell the two apart.
+    let vocabulary: BTreeSet<&str> = challenges
+        .iter()
+        .filter_map(|c| c.get("config")?.get("type")?.as_str())
+        .collect();
+    let unknown: Vec<&String> = served
+        .iter()
+        .filter(|t| !vocabulary.contains(t.as_str()))
+        .collect();
+    if !unknown.is_empty() {
+        return Err(format!(
+            "served compute {unknown:?} is not a type any live challenge declares \
+             (TIG uses {vocabulary:?}); a misspelling would scope nothing and pass \
+             this check unexamined"
+        ));
+    }
+
     Ok(out)
 }
 
@@ -257,62 +315,10 @@ pub fn serialization_fixtures() -> Result<FixtureOutcome, String> {
     const LOSSLESS: &str = include_str!("../../../fixtures/serialization/v1/lossless.json");
     const BODY: &str = include_str!("../../../fixtures/serialization/v1/precommit-body.json");
 
+    let numeric = lossless_holds(LOSSLESS);
+    let canonical = canonical_holds(BODY);
+
     let mut detail = String::new();
-
-    // §4: integers must survive the JSON boundary unchanged. The fixture's
-    // values sit above 2^53, so a parser routing them through `f64` returns a
-    // neighbour rather than the value — which is the failure, and it is
-    // silent.
-    let numeric = (|| -> Result<bool, String> {
-        let doc: Value =
-            serde_json::from_str(LOSSLESS).map_err(|e| format!("lossless fixture: {e}"))?;
-        let values = doc
-            .get("values")
-            .and_then(Value::as_object)
-            .ok_or_else(|| "lossless fixture has no values object".to_string())?;
-        for (field, value) in values {
-            let parsed = value
-                .as_u64()
-                .ok_or_else(|| format!("{field} did not parse as an integer"))?;
-            // Round-tripped through the same serializer a request body uses,
-            // because that is the path a value actually takes.
-            let round_tripped: Value = serde_json::from_str(
-                &serde_json::to_string(&parsed).map_err(|e| format!("{field}: {e}"))?,
-            )
-            .map_err(|e| format!("{field}: {e}"))?;
-            if round_tripped.as_u64() != Some(parsed) {
-                return Err(format!("{field} did not survive a round trip"));
-            }
-        }
-        Ok(true)
-    })();
-
-    // §6.1's body, byte for byte — for what the documents establish, not for
-    // a claim about how TIG hashes a request. §10 identifies a precommit by
-    // its semantic fields, not by a body digest.
-    //
-    // What makes the bytes load-bearing is `architecture.md` §7.3: an
-    // admitted intent is bound to its canonical payload digest and the
-    // gateway refuses bytes that do not reproduce it, so changing the
-    // rendering invalidates intents already recorded.
-    let canonical = (|| -> Result<bool, String> {
-        let doc: Value = serde_json::from_str(BODY).map_err(|e| format!("body fixture: {e}"))?;
-        let expected = doc
-            .get("expected_bytes")
-            .and_then(Value::as_str)
-            .ok_or_else(|| "body fixture has no expected_bytes".to_string())?;
-        let input = doc
-            .get("input")
-            .ok_or_else(|| "body fixture has no input".to_string())?;
-        let submission = submission_from(input)?;
-        let rendered = serde_json::to_string(&pool_workflow::payload::precommit_body(&submission))
-            .map_err(|e| format!("rendering the body: {e}"))?;
-        if rendered != expected {
-            return Err(format!("rendered {rendered}, fixture expects {expected}"));
-        }
-        Ok(true)
-    })();
-
     for outcome in [&numeric, &canonical] {
         if let Err(e) = outcome {
             if !detail.is_empty() {
@@ -323,18 +329,95 @@ pub fn serialization_fixtures() -> Result<FixtureOutcome, String> {
     }
 
     Ok(FixtureOutcome {
-        lossless_numeric_parsing: numeric.unwrap_or(false),
-        canonical_request_serialization: canonical.unwrap_or(false),
+        lossless_numeric_parsing: numeric.is_ok(),
+        canonical_request_serialization: canonical.is_ok(),
         detail,
     })
 }
 
-/// The fixture's `input`, read into a submission by hand.
+/// §4's lossless rule, against a document handed in.
 ///
-/// `PrecommitSubmission` deliberately derives no `Deserialize`: it is a
-/// domain type the pool constructs from decisions, not something parsed from
-/// arbitrary JSON, and widening its API so one fixture could be loaded more
-/// briefly would make every future caller's mistake compile.
+/// Takes its input so a test can give it one that *should* fail.
+/// `serialization_fixtures` reads two fixed files, so a test calling only
+/// that can never see either judgement return an error — which is how a
+/// mutant that stopped checking the decimal strings survived.
+pub fn lossless_holds(document: &str) -> Result<(), String> {
+    let doc: Value = serde_json::from_str(document).map_err(|e| format!("lossless: {e}"))?;
+
+    // The integer half. These values sit above 2^53, where a double stops
+    // being able to hold every integer, so a parser routing them through
+    // `f64` returns a neighbour — silently, which is the failure §4 forbids.
+    let integers = doc
+        .get("integers")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "no integers object".to_string())?;
+    //
+    // The check is the *type*, not a round trip. An earlier version also
+    // re-serialised each value and compared, which cannot fail — `serde_json`
+    // writing a `u64` and reading it back always returns the same `u64` — and
+    // a mutant walked straight through it. What distinguishes a lossless
+    // parser from a lossy one is whether the value presents as an integer at
+    // all: one routed through `f64` arrives as `9007199254740992.0`, and
+    // `as_u64` refuses it.
+    for (field, value) in integers {
+        if value.as_u64().is_none() {
+            return Err(format!(
+                "{field} did not parse as an integer; a value routed through f64 \
+                 arrives here as a float"
+            ));
+        }
+    }
+
+    // The decimal-string half, which `accounting.md` §3 depends on.
+    // `PreciseNumber` values ride as strings; one re-typed to a float keeps
+    // the integer half green while losing the precision the ledger needs.
+    let precise = doc
+        .get("precise_numbers")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "no precise_numbers object".to_string())?;
+    for (field, value) in precise {
+        let text = value
+            .as_str()
+            .ok_or_else(|| format!("{field} is not a decimal string"))?;
+        // Digits only. A value that is still a string but carries an
+        // exponent or a decimal point has been through a float on the way,
+        // which a bare type check would accept.
+        //
+        // The round trip that used to be here could not fail — `serde_json`
+        // writing a string and reading it back always returns that string —
+        // and a mutant walked straight through it.
+        if text.is_empty() || !text.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(format!(
+                "{field} is {text:?}, not a plain decimal integer string"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// §6.1's canonical rendering, against a document handed in.
+///
+/// Pinned for what the documents establish, not for a claim about how TIG
+/// hashes a request — §10 identifies a precommit by its semantic fields.
+/// `architecture.md` §7.3 binds an admitted intent to its canonical payload
+/// digest and the gateway refuses bytes that do not reproduce it, so changing
+/// the rendering invalidates intents already recorded.
+pub fn canonical_holds(document: &str) -> Result<(), String> {
+    let doc: Value = serde_json::from_str(document).map_err(|e| format!("body: {e}"))?;
+    let expected = doc
+        .get("expected_bytes")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "no expected_bytes".to_string())?;
+    let input = doc.get("input").ok_or_else(|| "no input".to_string())?;
+    let submission = submission_from(input)?;
+    let rendered = serde_json::to_string(&pool_workflow::payload::precommit_body(&submission))
+        .map_err(|e| format!("rendering: {e}"))?;
+    if rendered != expected {
+        return Err(format!("rendered {rendered}, fixture expects {expected}"));
+    }
+    Ok(())
+}
+
 fn submission_from(input: &Value) -> Result<pool_workflow::PrecommitSubmission, String> {
     use std::collections::BTreeMap;
 
@@ -389,8 +472,7 @@ fn submission_from(input: &Value) -> Result<pool_workflow::PrecommitSubmission, 
 ///
 /// **Taken from what TIG serves, not from the fixtures.** `get-algorithms` is
 /// why: `fixtures/tig/v1` gives it a top-level `algorithms` key, and the
-/// envelope §14 records — verified live in spike S1 and reconfirmed
-/// 2026-09-15 — carries `codes`, `binarys` and `advances` with no
+/// envelope §14.4 records carries `codes`, `binarys` and `advances` with no
 /// `algorithms` at all (issue #28 owns the v2 fixture). Validating against
 /// the fixture would make the fake the authority on the real API's shape,
 /// which is the inversion check 5 exists to prevent — code that passes every

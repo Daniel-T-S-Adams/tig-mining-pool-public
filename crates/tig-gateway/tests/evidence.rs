@@ -9,8 +9,8 @@ use std::collections::BTreeSet;
 use tig_client::{ReadPolicy, TigReadClient, TigReader};
 
 use tig_gateway::evidence::{
-    active_challenge_runtimes, api_key_placement, confirmed_pool_player_id, openapi_checksum,
-    response_models, serialization_fixtures,
+    active_challenge_runtimes, api_key_placement, canonical_holds, confirmed_pool_player_id,
+    lossless_holds, openapi_checksum, response_models, serialization_fixtures,
 };
 
 const PINNED: &str = include_str!("../../../config/tig_integration.json");
@@ -201,19 +201,25 @@ async fn check_6_does_not_fail_over_a_challenge_outside_the_served_set() {
             .is_empty()
     );
 
-    // Serving a type no live challenge has: same answer, and reached without
-    // reading a single challenge's name or id.
+    // A served type TIG has never heard of is refused rather than scoping
+    // nothing quietly — the misspelling case ("CPU" for "cpu"), which would
+    // otherwise pass check 6 with no runtime examined.
+    //
+    // Judged against the vocabulary the read declares, not against a match
+    // count: a type TIG knows but has no active challenge for today is a
+    // legitimate empty scope, and counting matches cannot tell those apart.
+    let err = active_challenge_runtimes(
+        &reader,
+        &block,
+        BLOCK_ROUND,
+        &pinned,
+        &BTreeSet::from(["CPU".to_string()]),
+    )
+    .await
+    .expect_err("a misspelled compute type must not pass as an empty scope");
     assert!(
-        active_challenge_runtimes(
-            &reader,
-            &block,
-            BLOCK_ROUND,
-            &pinned,
-            &BTreeSet::from(["fpga".to_string()])
-        )
-        .await
-        .unwrap()
-        .is_empty()
+        err.contains("not a type any live challenge declares"),
+        "{err}"
     );
 }
 
@@ -273,6 +279,37 @@ fn check_8_reads_who_can_open_the_key_file_from_its_mode() {
 
     // A path that does not exist cannot be judged at all.
     assert!(api_key_placement(true, &dir.join("absent")).is_err());
+
+    // Mode bits alone are not the question §2.2 asks. It asks that the file
+    // be readable *only by the gateway identity* — so a 0600 file owned by
+    // somebody else has no group or other bits set and its owner can still
+    // read it. The first version stopped at the mode and passed this case.
+    //
+    // Only checkable when this process can chown, which is why it is guarded
+    // rather than assumed: a test that silently skipped its own subject is
+    // the failure this suite keeps finding.
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let chowned = std::process::Command::new("chown")
+        .arg("1:1")
+        .arg(&path)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if chowned {
+        assert!(
+            api_key_placement(true, &path)
+                .unwrap()
+                .readable_by_member_services,
+            "0600 owned by another identity is still readable by that identity"
+        );
+    } else {
+        // Not silently skipped: say so, so a green run here is not mistaken
+        // for the assertion having been made.
+        eprintln!(
+            "note: cannot chown in this environment; the owner half of check 8 was not exercised"
+        );
+    }
+
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -375,4 +412,72 @@ async fn check_5_reports_a_read_that_failed_as_invalid_not_as_absent() {
         validations.iter().all(|v| v.detail.contains("read failed")),
         "{validations:?}"
     );
+}
+
+#[test]
+fn check_7_both_halves_of_the_lossless_rule_can_fail() {
+    // `serialization_fixtures` reads two fixed files, so a test calling only
+    // that can never see either judgement return an error. Two mutants
+    // survived exactly that gap — one stopping the decimal-string check, one
+    // dropping the key-file owner comparison. These take a document.
+    use serde_json::json;
+
+    let good = json!({
+        "integers": { "fuel": 9007199254740993u64 },
+        "precise_numbers": { "fee": "1000000000000000" }
+    })
+    .to_string();
+    assert!(lossless_holds(&good).is_ok());
+
+    // An integer that arrived as a float is the f64 failure §4 forbids.
+    let floated = json!({
+        "integers": { "fuel": 9007199254740992.0 },
+        "precise_numbers": { "fee": "1000000000000000" }
+    })
+    .to_string();
+    assert!(lossless_holds(&floated).is_err());
+
+    // A PreciseNumber re-typed to a number is `accounting.md` §3's failure,
+    // and it leaves the integer half untouched — which is why both halves are
+    // checked rather than one flag standing for both.
+    let retyped = json!({
+        "integers": { "fuel": 9007199254740993u64 },
+        "precise_numbers": { "fee": 1000000000000000u64 }
+    })
+    .to_string();
+    let err = lossless_holds(&retyped).expect_err("a fee that is not a string");
+    assert!(err.contains("not a decimal string"), "{err}");
+
+    // A string that has been through a float arrives looking like one, even
+    // though it is still a string — which a bare type check would accept.
+    let exponent = json!({
+        "integers": { "fuel": 9007199254740993u64 },
+        "precise_numbers": { "fee": "1e15" }
+    })
+    .to_string();
+    let err = lossless_holds(&exponent).expect_err("an exponent is not a decimal integer");
+    assert!(err.contains("not a plain decimal integer string"), "{err}");
+
+    // And a document missing a half fails rather than passing on the half it
+    // has.
+    assert!(lossless_holds(&json!({"integers": {}}).to_string()).is_err());
+    assert!(lossless_holds(&json!({"precise_numbers": {}}).to_string()).is_err());
+}
+
+#[test]
+fn check_7_a_rendering_that_drifted_from_the_fixture_fails() {
+    use serde_json::json;
+    const BODY: &str = include_str!("../../../fixtures/serialization/v1/precommit-body.json");
+    let doc: serde_json::Value = serde_json::from_str(BODY).unwrap();
+
+    assert!(canonical_holds(BODY).is_ok());
+
+    // One byte different is a different set of recorded intents.
+    let drifted = json!({
+        "input": doc["input"],
+        "expected_bytes": doc["expected_bytes"].as_str().unwrap().replace("aws_t4g", "aws_t3")
+    })
+    .to_string();
+    let err = canonical_holds(&drifted).expect_err("the rendering no longer matches");
+    assert!(err.contains("fixture expects"), "{err}");
 }

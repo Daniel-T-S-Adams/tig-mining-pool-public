@@ -29,6 +29,12 @@ the bug.
 `fuel_consumed` and `nonce` are the fields §6.3 carries at full width, which
 is why they are the ones recorded.
 
+`precise_numbers` is §4's other half. TIG's `PreciseNumber` values ride as
+decimal strings, and `accounting.md` §3 forbids floating point — so a parser
+that re-typed a fee to a float would keep the integer half of this fixture
+green while losing exactly the precision the ledger depends on. The values are
+real shapes: an 18-decimal balance, a base fee, and a zero.
+
 ## `precommit-body.json`
 
 §6.1's body, rendered by `pool_workflow::payload::precommit_body`, with the

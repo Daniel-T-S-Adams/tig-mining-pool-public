@@ -11,7 +11,7 @@
 //! as "fine".
 //!
 //! The gateway reads TIG here even though `architecture.md` §4 gives it no
-//! read responsibilities. §13 is why: checks 5, 6 and 9 cannot be answered
+//! read responsibilities. §13 is why: checks 4, 5, 6 and 9 cannot be answered
 //! without reading, and `tig_client`'s `TigReader::Gateway` share exists for
 //! exactly this. Choosing work stays the controller's.
 
@@ -124,9 +124,19 @@ pub async fn openapi_checksum(url: &str) -> Result<OpenApiObservation, String> {
 /// `readable_by_member_services` is read off the file's mode. Anything beyond
 /// owner-readable is the finding: a member service running as another user, or
 /// in the same group, can read a group- or world-readable file whatever the
-/// process boundaries say. Ownership is deliberately not checked — a
-/// deployment may legitimately run the gateway as a user that is not the
-/// file's owner, and the mode is what decides who can read it.
+/// process boundaries say.
+///
+/// **And ownership, because the mode alone answers the wrong question.**
+/// §2.2 asks that the file be readable *only by the gateway identity* — a
+/// statement about who, not about how many. A 0600 file owned by a
+/// member-service identity has no group or other bits set and its owner can
+/// still read it, so the mode reports it safe. An owner that is not this
+/// process is therefore the finding, alongside the bits.
+///
+/// An earlier version of this said ownership was deliberately not checked,
+/// on the grounds that a deployment may run the gateway as a user that is
+/// not the file's owner. That is true and it is exactly the case §2.2
+/// forbids: whoever owns it can read it, whatever the gateway runs as.
 pub fn api_key_placement(present: bool, key_path: &Path) -> Result<ApiKeyPlacement, String> {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
     let meta = std::fs::metadata(key_path)

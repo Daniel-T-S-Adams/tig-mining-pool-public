@@ -120,12 +120,37 @@ pub struct WriteGate {
     inner: Arc<Mutex<Inner>>,
 }
 
+/// Say, every time the gate is granted, that §13 check 3 passed on an
+/// acknowledgement rather than on evidence.
+///
+/// `tig_integration.md` §13.2 permits that deviation on exactly one ground:
+/// the acknowledgement stays visible, so a pass granted without resolving a
+/// digest never looks like one granted with. An accessor nobody calls does
+/// not make it visible — the first version of this shipped only that, and
+/// the document asserted a reporting that did not exist.
+///
+/// At `warn`, and at both entry points. This is the single moment the pool
+/// takes permission to write while a §13 check went unperformed; once per
+/// gate opening is not a volume that buries anything, and a lower level
+/// would put it beneath the threshold an operator runs in production.
+fn report_unresolved_containers(ready: &WriteReady, event: &'static str) {
+    if let Some(reason) = ready.containers_unresolved() {
+        tracing::warn!(
+            event,
+            check = "container_digests",
+            reason,
+            "writes enabled with §13 check 3 unperformed; see tig_integration.md §13.2"
+        );
+    }
+}
+
 impl WriteGate {
     /// Open the gate with proof that all nine §13 checks passed.
     ///
     /// Takes [`WriteReady`], which has no public constructor, so a gate
     /// cannot be opened by code that skipped the compatibility evaluation.
     pub fn open(ready: WriteReady) -> Self {
+        report_unresolved_containers(&ready, "gateway.write_ready.opened");
         Self {
             inner: Arc::new(Mutex::new(Inner {
                 state: State::Ready(Box::new(ready)),
@@ -213,6 +238,7 @@ impl WriteGate {
             event = "gateway.write_ready.restored",
             in_flight = inner.in_flight,
         );
+        report_unresolved_containers(&ready, "gateway.write_ready.restored");
         inner.state = State::Ready(Box::new(ready));
         true
     }

@@ -283,6 +283,27 @@ fn check_3_resolving_nothing_fails_unless_it_is_acknowledged() {
 }
 
 #[test]
+fn check_3_an_acknowledgement_that_gives_no_reason_is_still_silence() {
+    // §13.2 permits the deviation on one ground: a later operator can read
+    // why. A blank reason hands over the permission without the reason, and
+    // is the shape of someone who wanted the failure to stop.
+    //
+    // Asserted at the gate, not only where configuration is loaded.
+    // `pool-config` refuses it earlier and with a friendlier message, but it
+    // is one possible source of an `Evidence` and the rule cannot depend on
+    // which source was used.
+    let pins = pins();
+    for blank in ["", "   ", "\t\n"] {
+        let mut evidence = passing(&pins);
+        evidence.resolved_images = Ok(ImageObservation {
+            resolved: None,
+            reviewed_unresolved: Some(blank.to_string()),
+        });
+        only(evidence, Check::ContainerDigests);
+    }
+}
+
+#[test]
 fn check_3_an_acknowledgement_does_not_excuse_digests_that_did_resolve() {
     // The acknowledgement answers "this deployment resolved none", not "ignore
     // what it found". A deployment that both resolved digests and carries an

@@ -161,7 +161,8 @@ pub struct TigConfig {
     ///
     /// Nothing in this repository acquires TIG's source: §15 makes the
     /// upgrade a reviewed human procedure that ends by editing the pinned
-    /// file, restating this value in every deployment and rebuilding (§15). The acquired commit is therefore a fact only a person holds, and
+    /// file, restating this value in every deployment and rebuilding. The
+    /// acquired commit is therefore a fact only a person holds, and
     /// this is where they state it. A deployment stating one the binary was
     /// not built against fails check 2 rather than writing to TIG under a
     /// snapshot nobody built it against.

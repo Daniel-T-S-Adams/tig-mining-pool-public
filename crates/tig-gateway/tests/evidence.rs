@@ -5,8 +5,12 @@
 //! rather than from the configuration it is compared against.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use std::collections::BTreeSet;
 use tig_client::{ReadPolicy, TigReadClient, TigReader};
-use tig_gateway::evidence::confirmed_pool_player_id;
+
+use tig_gateway::evidence::{
+    active_challenge_runtimes, api_key_placement, confirmed_pool_player_id, openapi_checksum,
+};
 
 const PINNED: &str = include_str!("../../../config/tig_integration.json");
 const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/tig/v1");
@@ -66,4 +70,122 @@ async fn check_9_reads_the_identity_from_tig_and_not_from_the_configuration() {
     .await
     .expect_err("TIG holds no such player");
     assert!(err.contains("holds no player"), "{err}");
+}
+
+/// The runtimes the pinned file names, keyed the way check 6 looks them up.
+fn pinned_images() -> BTreeSet<String> {
+    serde_json::from_str::<serde_json::Value>(PINNED).unwrap()["images"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect()
+}
+
+#[tokio::test]
+async fn check_6_considers_only_the_compute_this_deployment_serves() {
+    let base = fake_tig().await;
+    let reader = reader(&base);
+    let block = latest_block(&base).await;
+    let pinned = pinned_images();
+
+    // A deployment serving nothing has nothing to consider. This is slice 1:
+    // no members, nothing mined. It is true rather than acknowledged, and it
+    // stops being true the moment compute is configured.
+    let none = active_challenge_runtimes(&reader, &block, &pinned, &BTreeSet::new())
+        .await
+        .unwrap();
+    assert!(none.is_empty(), "{none:?}");
+
+    // Serving CPU brings the live CPU challenges into scope, and each is
+    // judged on whether its runtime is pinned. `evaluate` fails on any that
+    // is not — which is how a stale pin stops a pool mining what it has not
+    // reviewed.
+    let cpu = active_challenge_runtimes(
+        &reader,
+        &block,
+        &pinned,
+        &BTreeSet::from(["cpu".to_string()]),
+    )
+    .await
+    .unwrap();
+    assert!(!cpu.is_empty(), "the fixture must carry a CPU challenge");
+    assert!(
+        cpu.iter().all(|c| c.compute_path_supported),
+        "anything in the list passed the compute filter: {cpu:?}"
+    );
+
+    // An unpinned runtime is reported, not filtered out. A gatherer that
+    // dropped it would answer check 6 by omission and the gate would never
+    // see the thing it exists to refuse.
+    let empty_pins = BTreeSet::new();
+    let unpinned = active_challenge_runtimes(
+        &reader,
+        &block,
+        &empty_pins,
+        &BTreeSet::from(["cpu".to_string()]),
+    )
+    .await
+    .unwrap();
+    assert!(unpinned.iter().all(|c| !c.runtime_pinned), "{unpinned:?}");
+    assert_eq!(unpinned.len(), cpu.len());
+}
+
+#[tokio::test]
+async fn check_4_hashes_what_was_served_and_fails_when_it_cannot_look() {
+    // The checksum is taken over the bytes fetched, so a document that
+    // changed under the pin produces a different answer rather than the
+    // pinned one.
+    let base = fake_tig().await;
+    let served = openapi_checksum(&format!("{base}/get-block"))
+        .await
+        .unwrap();
+    let sha = served
+        .hosted_sha256
+        .expect("a fetched document has a checksum");
+    assert_eq!(sha.len(), 64, "{sha}");
+    assert!(served.reviewed_local_override.is_none());
+
+    // Unreachable is an error, never a silent "unchanged". §13's whole
+    // posture is that evidence which could not be gathered fails its check.
+    let err = openapi_checksum(&format!("{base}/does-not-exist"))
+        .await
+        .expect_err("a 404 is not a checksum");
+    assert!(err.contains("does-not-exist"), "{err}");
+}
+
+#[test]
+fn check_8_reads_who_can_open_the_key_file_from_its_mode() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = std::env::temp_dir().join(format!("tig-ev-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("key");
+    std::fs::write(&path, "k\n").unwrap();
+
+    // Owner-only is the shape `architecture.md` §2.2 requires.
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let placement = api_key_placement(true, &path).unwrap();
+    assert!(placement.present_in_gateway);
+    assert!(!placement.readable_by_member_services);
+
+    // Group-readable is the finding, not world-readable only: a member
+    // service in the same group reads it just as easily.
+    for mode in [0o640, 0o604, 0o644, 0o660] {
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+        assert!(
+            api_key_placement(true, &path)
+                .unwrap()
+                .readable_by_member_services,
+            "mode {mode:o} must be reported as reachable"
+        );
+    }
+
+    // A key that is not loaded is reported as absent rather than as an error:
+    // `evaluate` owns what absence means.
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(!api_key_placement(false, &path).unwrap().present_in_gateway);
+
+    // A path that does not exist cannot be judged at all.
+    assert!(api_key_placement(true, &dir.join("absent")).is_err());
+    std::fs::remove_dir_all(&dir).ok();
 }

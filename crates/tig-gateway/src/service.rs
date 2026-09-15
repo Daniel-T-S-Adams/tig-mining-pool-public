@@ -118,7 +118,7 @@ pub async fn run(config: &Config, check_only: bool) -> Result<(), String> {
         "tig-gateway/{}@{}/{}",
         std::process::id(),
         hostname().unwrap_or_else(|| "unknown".to_string()),
-        startup_nonce()
+        startup_nonce()?
     );
 
     tracing::info!(
@@ -339,11 +339,40 @@ fn hostname() -> Option<String> {
 ///
 /// Not randomness for its own sake: two gateways that cannot read a hostname
 /// and share a pid would otherwise produce the same owner string, and §7.5's
-/// fence rests on owners being distinct across processes. The system clock at
-/// startup, in nanoseconds, distinguishes them without a dependency.
-fn startup_nonce() -> u128 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or_default()
+/// fence rests on owners being distinct across processes.
+///
+/// Drawn from the OS rather than from the clock. A startup instant reads as
+/// unique until you notice that the environment which produces the collision —
+/// no readable `/proc`, no hostname — is the same stripped container likely to
+/// have no working clock, and that a `SystemTime` before the epoch has to fall
+/// back to *some* value, which every such process would share. Randomness has
+/// no degraded case to share.
+///
+/// Fails rather than substitutes. There is no second-best value here: a
+/// gateway that cannot distinguish itself from another cannot safely hold a
+/// fenced lease, and §9 says to exit rather than serve.
+fn startup_nonce() -> Result<u128, String> {
+    let mut bytes = [0u8; 16];
+    getrandom::fill(&mut bytes)
+        .map_err(|e| format!("cannot draw a startup nonce from the OS: {e}"))?;
+    Ok(u128::from_be_bytes(bytes))
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::*;
+
+    #[test]
+    fn two_starts_do_not_present_the_same_lease_owner() {
+        // §7.5's fence rests on the owner distinguishing processes. The value
+        // this asserts about is the nonce, because the other two components
+        // are exactly what the degraded case makes identical: two containers
+        // at PID 1 with no readable hostname agree on `tig-gateway/1@unknown`.
+        let a = startup_nonce().expect("the OS has randomness");
+        let b = startup_nonce().expect("the OS has randomness");
+        assert_ne!(a, b, "two starts must not share an owner");
+        assert_ne!(a, 0, "a fallback shared by every degraded process");
+    }
 }

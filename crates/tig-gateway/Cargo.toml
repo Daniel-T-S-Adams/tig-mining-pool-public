@@ -8,6 +8,10 @@ version = "0.1.0"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
+# §7.5's lease owner must be distinct across processes, and the environment
+# that defeats hostname-and-pid is the one with no working clock either. Drawn
+# from the OS instead: see `service::startup_nonce`.
+getrandom = "0.3"
 pool-config = { path = "../pool-config" }
 pool-domain = { path = "../pool-domain" }
 pool-telemetry = { path = "../pool-telemetry" }

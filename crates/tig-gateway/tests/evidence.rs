@@ -71,6 +71,34 @@ async fn check_9_reads_the_identity_from_tig_and_not_from_the_configuration() {
     .await
     .expect_err("TIG holds no such player");
     assert!(err.contains("holds no player"), "{err}");
+
+    // The whole envelope, not just the null player. §14.3 records what TIG
+    // sends, and the fake is the fidelity reference §13 check 5's model
+    // validation will run against — so a reply that drops the sibling keys
+    // would let a v0 model pass here and fail against testnet.
+    //
+    // It also must not answer with the pool's own data under a null player.
+    // An earlier version built this reply by cloning the present-player
+    // fixture, which would have done exactly that once a fixture carried
+    // balances.
+    let absent: serde_json::Value = reqwest::get(format!(
+        "{base}/get-player-data?block_id={block}&player_id=0x0000000000000000000000000000000000000001"
+    ))
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    assert_eq!(
+        absent,
+        serde_json::json!({
+            "player": serde_json::Value::Null,
+            "deposits": [],
+            "round_earnings": [],
+            "topups": [],
+        }),
+        "the absent-player envelope must be §14.3's, exactly"
+    );
 }
 
 /// The runtimes the pinned file names, keyed the way check 6 looks them up.

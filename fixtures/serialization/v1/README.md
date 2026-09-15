@@ -32,10 +32,20 @@ is why they are the ones recorded.
 ## `precommit-body.json`
 
 §6.1's body, rendered by `pool_workflow::payload::precommit_body`, with the
-exact bytes it must produce. TIG compares the digest of what it receives, so
-a body that differs by key order, by number formatting, or by a re-typed
-hyperparameter is a different write — and the fee is paid before the pool
-learns that.
+exact bytes it must produce.
+
+Pinned for reasons the design documents actually establish, not for a claim
+about how TIG hashes requests — nothing here records that, and
+`tig_integration.md` §10 identifies a precommit by its semantic fields rather
+than by a body digest:
+
+- `architecture.md` §7.3 binds an admitted intent to its canonical payload
+  digest, and the gateway refuses to transmit bytes that do not reproduce it.
+  A change to the rendering therefore invalidates intents already recorded —
+  silently, and after the decision that created them.
+- `mining_system.md` §6.6 copies the source benchmark's hyperparameters, so a
+  re-typed one is a different method rather than a different encoding of the
+  same one.
 
 `input` is the submission; `expected_bytes` is the serialization it must
 produce.

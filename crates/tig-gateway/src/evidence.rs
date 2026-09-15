@@ -162,6 +162,9 @@ pub fn api_key_placement(present: bool, key_path: &Path) -> Result<ApiKeyPlaceme
 /// deployment serving CPU cannot write until the pin is brought forward
 /// (`tig_integration.md` §15). That is the check working: the pool cannot mine
 /// what it has not reviewed.
+///
+/// §13.5 records this reading, the §5.1 activity filter, and that the
+/// compute-path half is satisfied by construction rather than checked.
 pub async fn active_challenge_runtimes(
     reader: &TigReadClient,
     block_id: &str,
@@ -284,9 +287,14 @@ pub fn serialization_fixtures() -> Result<FixtureOutcome, String> {
         Ok(true)
     })();
 
-    // §6.1's body, byte for byte. TIG compares the digest of what it
-    // receives, so a body differing by key order or number formatting is a
-    // different write — and the fee is paid before the pool finds out.
+    // §6.1's body, byte for byte — for what the documents establish, not for
+    // a claim about how TIG hashes a request. §10 identifies a precommit by
+    // its semantic fields, not by a body digest.
+    //
+    // What makes the bytes load-bearing is `architecture.md` §7.3: an
+    // admitted intent is bound to its canonical payload digest and the
+    // gateway refuses bytes that do not reproduce it, so changing the
+    // rendering invalidates intents already recorded.
     let canonical = (|| -> Result<bool, String> {
         let doc: Value = serde_json::from_str(BODY).map_err(|e| format!("body fixture: {e}"))?;
         let expected = doc

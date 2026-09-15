@@ -294,19 +294,22 @@ fn check_7_runs_the_fixtures_rather_than_trusting_that_ci_did() {
 
 #[test]
 fn check_7_pins_the_bytes_a_body_renders_to() {
-    // What the fixture is for. TIG compares the digest of what it receives,
-    // so a body differing by key order or number formatting is a different
-    // write — and §6.1's fee is paid before the pool learns that.
+    // What the fixture is for: `architecture.md` §7.3 binds an admitted
+    // intent to its canonical payload digest and the gateway refuses bytes
+    // that do not reproduce it, so changing the rendering invalidates intents
+    // already recorded. Not a claim about how TIG hashes a request — §10
+    // identifies a precommit by its semantic fields.
     //
-    // The expectation was taken from what the code renders, so this cannot
-    // establish that the rendering is what TIG accepts; the protocol spike's
-    // live runs did that. It establishes that changing the rendering has to
-    // be deliberate.
+    // The expectation was taken from what the code renders, so it cannot
+    // establish that the rendering is what TIG accepts. The spike confirmed
+    // the envelope live, always with null hyperparameters; a typed one has
+    // never been confirmed.
     const BODY: &str = include_str!("../../../fixtures/serialization/v1/precommit-body.json");
     let doc: serde_json::Value = serde_json::from_str(BODY).unwrap();
     let expected = doc["expected_bytes"].as_str().unwrap();
 
-    // Key order is part of it: TIG digests bytes, not a parsed object.
+    // Key order is part of it, because §7.3's digest is over the bytes the
+    // pool recorded — whatever TIG does with them.
     assert!(
         expected.starts_with(r#"{"compute_type":"#),
         "the fixture must pin an ordering, not just a value: {expected}"

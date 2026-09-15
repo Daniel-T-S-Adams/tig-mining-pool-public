@@ -833,6 +833,37 @@ is the inversion check 5 exists to prevent. `get-algorithms` therefore fails
 against the fake until the fixture is corrected, and a test asserts that
 failure so the disagreement stays visible.
 
+### 13.5 What check 6 evaluates at this slice
+
+Check 6 covers "all live active challenges considered by the decision engine".
+Both qualifiers do work, and the gateway resolves them as follows.
+
+**Live and active** is §5.1's test — `state.round_active <= block.round`. A
+challenge that activates in a later round is not one the engine considers, so
+requiring a pinned runtime for it would refuse writes over work the pool could
+not take.
+
+**Considered by the decision engine** resolves to the compute types this
+deployment *serves*. `select_challenge` excludes a challenge whose compute
+type no offer matches before looking at anything else, so those are the ones
+that reach it. That set is a fact about the deployment and must be wired from
+its configuration; a gateway that defaulted it to empty would pass this check
+by saying nothing.
+
+**A deployment serving nothing has nothing to judge.** Slice 1 is that: no
+members, nothing mined. This is not §13.2's kind of acknowledgement — it is
+true, and it stops being true the moment compute is configured, at which point
+the check bites without anyone having to enable it. When it bites, it refuses
+writes until §15 brings the pin forward (see §16).
+
+**The compute-path half is satisfied by construction.** Everything reaching
+the check passed the served filter, so `compute_path_supported` is always
+true and `evaluate`'s branch for it cannot fire. It is kept because `evaluate`
+owns the rule and a gatherer answering it by omission would put the rule in
+two places — but it is not, today, a check. Making it one means comparing the
+deployment's compute type against §2's compatibility table, which belongs with
+the slice that has members to serve.
+
 ## 14. Known upstream discrepancies at this pin
 
 These discrepancies are recorded so implementation does not accidentally
@@ -1119,14 +1150,24 @@ without this process.
 
 ## 16. Watching for drift
 
-§13's gate compares a running binary against **its pin**. It never consults
-TIG's current state, and must not: §13 makes moving a branch or a container
-tag something that is "never accepted automatically", so a gate checking
-against upstream would either follow it silently — defeating the pin — or fail
-permanently the moment TIG committed anything.
+§13's gate never follows TIG's **upstream source or tags**, and must not:
+§13 makes moving a branch or a container tag something that is "never accepted
+automatically", so a gate that re-pinned itself from upstream would defeat the
+pin entirely.
 
-That leaves a question nobody was asking: *has TIG moved since the review
-behind this pin?* It went unasked long enough for the pin to fall 45 commits
+It does read live TIG — checks 5, 6 and 9 cannot be answered otherwise. The
+distinction is what it does with what it reads: it compares against the pin
+and refuses, never adopts. Check 6 is the sharpest case. It compares the live
+active challenges against the pinned runtimes and **fails** when one the
+deployment could mine has none, which means a pool serving a compute type TIG
+has since added a challenge for cannot write until §15 brings the pin forward.
+That is the intended posture, not an accident of implementation: the pool does
+not mine what nobody has reviewed. §15 step 9's note applies — an operator
+meeting that refusal should find it documented rather than mysterious.
+
+What no check asks, because none of them may, is the question in the other
+direction: *has TIG moved since the review behind this pin?* A gate answers
+"may this process write now"; nothing answered "is the pin still current". It went unasked long enough for the pin to fall 45 commits
 behind and a new CPU challenge to go live unnoticed.
 
 `scripts/pin-drift.sh` asks it. Four comparisons against live TIG, all public

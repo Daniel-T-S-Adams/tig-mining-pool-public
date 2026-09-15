@@ -135,17 +135,71 @@ pub struct RunReport {
     pub outcomes: Vec<IntentOutcome>,
 }
 
+/// How much attention an outcome is owed (`architecture.md` §10.1, §10.3).
+///
+/// One classification, used both to raise the run's report and to pick a log
+/// level, so the two cannot come to different conclusions about the same
+/// outcome — a pass that logged at `warn` while reporting "nothing to see"
+/// would teach an operator to ignore the level.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Notability {
+    /// A person has to decide something. §10.3's bucket, and the one that
+    /// must stay empty on an ordinary pass to be worth reading.
+    Operator,
+    /// The pool changed what TIG holds, or settled a write that had. Rare,
+    /// costs a fee, and is the record §10's search reads on the next crash.
+    Effect,
+    /// Contention the next pass resolves by itself.
+    Routine,
+}
+
+impl IntentOutcome {
+    /// The attempt this outcome touched, where it touched one.
+    pub fn attempt_id(&self) -> Option<&str> {
+        match &self.acted {
+            Acted::Transmitted { attempt_id, .. }
+            | Acted::AttemptSettled { attempt_id, .. }
+            | Acted::AwaitingSender { attempt_id } => Some(attempt_id),
+            _ => None,
+        }
+    }
+
+    /// TIG's id for the benchmark, once something has established it —
+    /// a response on [`Acted::Transmitted`], §10's search on the other two.
+    pub fn benchmark_id(&self) -> Option<&str> {
+        match (&self.acted, &self.decision) {
+            (Acted::Transmitted { benchmark_id, .. }, _) => benchmark_id.as_deref(),
+            (Acted::AttemptSettled { benchmark_id, .. }, _) => Some(benchmark_id),
+            (_, Some(ClaimDecision::AlreadyConfirmed { benchmark_id })) => Some(benchmark_id),
+            _ => None,
+        }
+    }
+
+    pub fn notability(&self) -> Notability {
+        // `LaneOccupied`, `LeaseHeldElsewhere` and `WriteBlocked` are Routine
+        // on purpose: each is an ordinary condition the next pass resolves on
+        // its own, and a bucket that fills on every pass is one nobody reads
+        // (§10.3). `WriteBlocked` in particular is a revocation the readiness
+        // check reports — this run is only observing the closed gate, and
+        // raising it here would raise it once per claimable intent per pass.
+        if matches!(self.decision, Some(ClaimDecision::StopForOperator { .. }))
+            || matches!(self.acted, Acted::Failed { .. })
+        {
+            return Notability::Operator;
+        }
+        match self.acted {
+            Acted::Transmitted { .. } | Acted::AttemptSettled { .. } => Notability::Effect,
+            _ => Notability::Routine,
+        }
+    }
+}
+
 impl RunReport {
     /// Whether any intent stopped for an operator.
     pub fn needs_operator(&self) -> bool {
-        // `LaneOccupied`, `LeaseHeldElsewhere` and `WriteBlocked` are not
-        // counted on purpose: each is an ordinary condition the next pass
-        // resolves on its own, and a report that raised them would raise on
-        // every pass with a live precommit in flight.
-        self.outcomes.iter().any(|o| {
-            matches!(o.decision, Some(ClaimDecision::StopForOperator { .. }))
-                || matches!(o.acted, Acted::Failed { .. })
-        })
+        self.outcomes
+            .iter()
+            .any(|o| o.notability() == Notability::Operator)
     }
 }
 
@@ -207,15 +261,29 @@ pub async fn run_once(
 
 /// §7.5: the lease must outlast any call made under it, or the next claimant
 /// could take over an attempt whose sender is still waiting on TIG.
-fn check_lease(driver: &Driver<'_>) -> Result<(), DriveError> {
-    let call_timeout_secs = driver.lane.policy().call_timeout().as_secs();
-    if u64::try_from(driver.lease_secs).is_ok_and(|lease| lease > call_timeout_secs) {
+///
+/// Public because the comparison is a fact about configuration, not about any
+/// particular pass: `service::run` applies it once at startup so a gateway
+/// whose lease is too short exits instead of failing every pass for ever
+/// (`architecture.md` §9). Both callers must reach the same verdict on the
+/// same pair, so there is one comparison rather than two that could drift —
+/// the equal case in particular is a failure, since a lease that expires at
+/// the instant a call times out leaves the takeover window open.
+pub fn lease_outlasts_call(lease_secs: i64, call_timeout_secs: u64) -> Result<(), DriveError> {
+    if u64::try_from(lease_secs).is_ok_and(|lease| lease > call_timeout_secs) {
         return Ok(());
     }
     Err(DriveError::LeaseShorterThanCall {
-        lease_secs: driver.lease_secs,
+        lease_secs,
         call_timeout_secs,
     })
+}
+
+fn check_lease(driver: &Driver<'_>) -> Result<(), DriveError> {
+    lease_outlasts_call(
+        driver.lease_secs,
+        driver.lane.policy().call_timeout().as_secs(),
+    )
 }
 
 /// One pass over every claimable benchmark commitment intent
@@ -2160,6 +2228,203 @@ mod tests {
             elapsed >= h.lane.policy().min_between_initial_writes(),
             "the second send left {elapsed:?} after the first; the gap is {:?}",
             h.lane.policy().min_between_initial_writes()
+        );
+    }
+
+    fn outcome(decision: Option<ClaimDecision>, acted: Acted) -> IntentOutcome {
+        IntentOutcome {
+            intent_id: "i1".into(),
+            workflow_id: "w1".into(),
+            generation: 1,
+            decision,
+            acted,
+        }
+    }
+
+    #[test]
+    fn only_a_stop_or_a_failure_asks_for_an_operator() {
+        use Notability::{Effect, Operator, Routine};
+
+        // §10.3: the bucket is worth reading only if an ordinary pass leaves
+        // it empty. Every variant below occurs on a pass with one precommit
+        // legitimately in flight, so each must classify as Routine.
+        for acted in [
+            Acted::LaneOccupied,
+            Acted::LeaseHeldElsewhere,
+            Acted::WriteBlocked {
+                category: "readiness",
+            },
+            Acted::AwaitingSender {
+                attempt_id: "a1".into(),
+            },
+            Acted::Nothing,
+        ] {
+            assert_eq!(
+                outcome(Some(ClaimDecision::Transmit), acted.clone()).notability(),
+                Routine,
+                "{acted:?} is contention, not an operator condition"
+            );
+        }
+
+        // The two that changed what TIG holds.
+        assert_eq!(
+            outcome(
+                Some(ClaimDecision::Transmit),
+                Acted::Transmitted {
+                    attempt_id: "a1".into(),
+                    outcome: AttemptOutcome::Accepted,
+                    benchmark_id: Some("b1".into()),
+                },
+            )
+            .notability(),
+            Effect
+        );
+        assert_eq!(
+            outcome(
+                None,
+                Acted::AttemptSettled {
+                    attempt_id: "a1".into(),
+                    benchmark_id: "b1".into(),
+                },
+            )
+            .notability(),
+            Effect
+        );
+
+        // The two that do not resolve themselves.
+        assert_eq!(
+            outcome(
+                Some(ClaimDecision::StopForOperator {
+                    reason: StopReason::PayloadNotTheRecordedOne,
+                }),
+                Acted::Nothing,
+            )
+            .notability(),
+            Operator
+        );
+        assert_eq!(
+            outcome(
+                None,
+                Acted::Failed {
+                    error: "unreadable".into(),
+                },
+            )
+            .notability(),
+            Operator
+        );
+    }
+
+    #[test]
+    fn the_report_and_the_log_level_answer_the_same_question() {
+        // Two classifications of one outcome would eventually disagree, and
+        // the disagreement would read as "warned about, reported as fine".
+        let stop = outcome(
+            Some(ClaimDecision::StopForOperator {
+                reason: StopReason::PayloadNotTheRecordedOne,
+            }),
+            Acted::Nothing,
+        );
+        let routine = outcome(Some(ClaimDecision::Transmit), Acted::LaneOccupied);
+
+        assert!(
+            RunReport {
+                outcomes: vec![routine.clone(), stop.clone()],
+            }
+            .needs_operator()
+        );
+        assert!(
+            !RunReport {
+                outcomes: vec![routine],
+            }
+            .needs_operator()
+        );
+        assert_eq!(stop.notability(), Notability::Operator);
+    }
+
+    #[test]
+    fn an_outcome_surrenders_the_ids_a_log_line_correlates_on() {
+        // §10.1 wants `benchmark_id` on the line. It arrives three ways, and
+        // a match that knew only the response path would drop it on exactly
+        // the recovery paths §10 exists for.
+        assert_eq!(
+            outcome(
+                Some(ClaimDecision::Transmit),
+                Acted::Transmitted {
+                    attempt_id: "a1".into(),
+                    outcome: AttemptOutcome::Accepted,
+                    benchmark_id: Some("b-response".into()),
+                },
+            )
+            .benchmark_id(),
+            Some("b-response")
+        );
+        assert_eq!(
+            outcome(
+                None,
+                Acted::AttemptSettled {
+                    attempt_id: "a1".into(),
+                    benchmark_id: "b-settled".into(),
+                },
+            )
+            .benchmark_id(),
+            Some("b-settled")
+        );
+        assert_eq!(
+            outcome(
+                Some(ClaimDecision::AlreadyConfirmed {
+                    benchmark_id: "b-searched".into(),
+                }),
+                Acted::Nothing,
+            )
+            .benchmark_id(),
+            Some("b-searched")
+        );
+
+        // An ambiguous send still names its attempt: that row is what §10's
+        // search reads after a crash, so a line without it cannot be followed.
+        assert_eq!(
+            outcome(
+                Some(ClaimDecision::Transmit),
+                Acted::Transmitted {
+                    attempt_id: "a-ambiguous".into(),
+                    outcome: AttemptOutcome::Ambiguous,
+                    benchmark_id: None,
+                },
+            )
+            .attempt_id(),
+            Some("a-ambiguous")
+        );
+        assert_eq!(outcome(None, Acted::LaneOccupied).attempt_id(), None);
+    }
+
+    #[test]
+    fn the_lease_rule_refuses_a_lease_equal_to_the_call_timeout() {
+        // The boundary is the whole point: a lease that expires at the instant
+        // a call times out still leaves the takeover window open, so `>` is
+        // strict. `service::run` and `check_lease` share this function so a
+        // value one accepts cannot be a value the other rejects for ever.
+        assert!(lease_outlasts_call(61, 60).is_ok(), "longer is fine");
+        assert!(
+            matches!(
+                lease_outlasts_call(60, 60),
+                Err(DriveError::LeaseShorterThanCall { .. })
+            ),
+            "equal must be refused"
+        );
+        assert!(
+            matches!(
+                lease_outlasts_call(59, 60),
+                Err(DriveError::LeaseShorterThanCall { .. })
+            ),
+            "shorter must be refused"
+        );
+        // A negative lease cannot convert, and must not read as unbounded.
+        assert!(
+            matches!(
+                lease_outlasts_call(-1, 60),
+                Err(DriveError::LeaseShorterThanCall { .. })
+            ),
+            "a negative lease must be refused"
         );
     }
 

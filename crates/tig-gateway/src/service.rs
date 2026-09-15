@@ -17,7 +17,7 @@ use std::time::Duration;
 use pool_config::Config;
 use tig_client::{ReadPolicy, TigReadClient, TigReader};
 
-use crate::drive::{self, Driver};
+use crate::drive::{self, Driver, Notability};
 use crate::lane::PostLane;
 use crate::readiness::{Evidence, Pins, WriteReady, evaluate};
 use crate::transmit::PrecommitTransmitter;
@@ -68,15 +68,11 @@ pub async fn run(config: &Config, check_only: bool) -> Result<(), String> {
     // `architecture.md` §9 requires exiting before serving on a cross-field
     // error, and `main.rs`'s own doc names a process that started but cannot
     // write as the more dangerous of the two.
-    let call_timeout = write_policy.call_timeout().as_secs();
-    if gateway.lease_secs < i64::try_from(call_timeout).unwrap_or(i64::MAX) {
-        return Err(format!(
-            "gateway.lease_secs is {}, shorter than a write's call timeout of \
-             {call_timeout}s: a claimant could take over an attempt whose sender \
-             is still waiting on TIG (architecture.md §7.5)",
-            gateway.lease_secs
-        ));
-    }
+    // The same comparison `drive::check_lease` makes per pass, made once here
+    // against the same pinned policy, so a lease that every pass would reject
+    // is refused before the first one rather than for ever after it.
+    drive::lease_outlasts_call(gateway.lease_secs, write_policy.call_timeout().as_secs())
+        .map_err(|e| format!("{e} (architecture.md §7.5)"))?;
 
     // §13, before anything else. `WriteReady` has no public constructor, so
     // the gate below cannot be opened by a path that skipped this.
@@ -157,12 +153,8 @@ pub async fn run(config: &Config, check_only: bool) -> Result<(), String> {
         match confirmed_precommits(&reader, tig).await {
             Ok(window) => match drive::run_once(&driver, &window).await {
                 Ok(report) => {
-                    if report.needs_operator() {
-                        tracing::warn!(
-                            event = "gateway.pass.needs_operator",
-                            outcomes = report.outcomes.len(),
-                            "a claim stopped for an operator"
-                        );
+                    for outcome in &report.outcomes {
+                        report_outcome(outcome);
                     }
                 }
                 Err(e) => tracing::error!(event = "gateway.pass.failed", error = %e),
@@ -171,6 +163,63 @@ pub async fn run(config: &Config, check_only: bool) -> Result<(), String> {
         }
 
         tokio::time::sleep(read_policy.block_poll_interval()).await;
+    }
+}
+
+/// One line per intent, carrying the ids §10.1 requires to correlate it.
+///
+/// Per intent rather than per pass: the pass count that stood here said how
+/// many things happened and nothing about which, so the pool's only
+/// money-costing effect and its operator stops left no correlated record.
+///
+/// The level comes from [`Notability`] rather than from a judgement made here,
+/// so what the report raises and what the log warns about are the same
+/// question asked once. Routine contention goes to `debug` deliberately: it
+/// occurs on every pass with a precommit in flight, and at `info` it would
+/// bury the two events that matter (§10.3).
+fn report_outcome(outcome: &drive::IntentOutcome) {
+    let intent_id = outcome.intent_id.as_str();
+    let workflow_id = outcome.workflow_id.as_str();
+    let generation = outcome.generation;
+    let attempt_id = outcome.attempt_id().unwrap_or("-");
+    let benchmark_id = outcome.benchmark_id().unwrap_or("-");
+    // `decision` and `acted` carry their own payloads — a stop's reason, a
+    // failure's error — so they are recorded whole rather than flattened to a
+    // name that would drop exactly the part an operator needs.
+    match outcome.notability() {
+        Notability::Operator => tracing::warn!(
+            event = "gateway.intent.outcome",
+            intent_id,
+            workflow_id,
+            generation,
+            attempt_id,
+            benchmark_id,
+            decision = ?outcome.decision,
+            acted = ?outcome.acted,
+            "an intent needs an operator"
+        ),
+        Notability::Effect => tracing::info!(
+            event = "gateway.intent.outcome",
+            intent_id,
+            workflow_id,
+            generation,
+            attempt_id,
+            benchmark_id,
+            decision = ?outcome.decision,
+            acted = ?outcome.acted,
+            "an intent reached TIG"
+        ),
+        Notability::Routine => tracing::debug!(
+            event = "gateway.intent.outcome",
+            intent_id,
+            workflow_id,
+            generation,
+            attempt_id,
+            benchmark_id,
+            decision = ?outcome.decision,
+            acted = ?outcome.acted,
+            "an intent made no change"
+        ),
     }
 }
 

@@ -195,9 +195,21 @@ fn each_binary_accepts_only_its_own_role() {
 const ORCHESTRATION: &str =
     "\n[orchestration]\ninternal_pool_unverified_limit = 8\nactive_cache_fetches_per_poll = 20\n";
 
+/// Gateway-only: the section carries the API key path, so no other binary may
+/// present it (`architecture.md` §2.2). `served_compute` is explicitly empty
+/// because the pool serves no compute of its own in slice 1
+/// (`tig_integration.md` §13.5), and an absent list would be indistinguishable
+/// from an unanswered question.
+///
+/// `lease_secs` outlasts the pinned 60s write call timeout, which `tig-gateway`
+/// requires at startup (§7.5). `pool-config` cannot check that — the timeout is
+/// pinned in `tig-gateway`, not configured — so a fixture that looked valid
+/// here but that no gateway would start on would teach a reader the wrong
+/// shape.
+const GATEWAY: &str = "\n[gateway]\napi_key_file = \"/dev/null\"\nlease_secs = 120\nplatform = \"linux/arm64\"\nserved_compute = []\n";
+
 /// The endpoint the controller and gateway both require. A local `fake-tig`
 /// here, which is also what F4d's guard reads.
-const GATEWAY: &str = "\n[gateway]\napi_key_file = \"/dev/null\"\nlease_secs = 60\nplatform = \"linux/arm64\"\nserved_compute = []\n";
 const TIG: &str = "\n[tig]\nbase_url = \"http://127.0.0.1:8080\"\nplayer_id = \"0x2935a721068da756b28cba896efdb64e8909dfae\"\nacquired_upstream_commit = \"ad08d1ea001a73ff5aab3b556d7f59246fece14e\"\n";
 
 #[test]
@@ -572,7 +584,7 @@ fn a_gateway_section_with_an_unusable_value_does_not_load() {
     // could act on.
     for bad in ["arm64", "linux/", ""] {
         let Err(err) = load(&format!(
-            "\n[gateway]\napi_key_file = \"/dev/null\"\nlease_secs = 60\n\
+            "\n[gateway]\napi_key_file = \"/dev/null\"\nlease_secs = 120\n\
              platform = \"{bad}\"\nserved_compute = []\n"
         )) else {
             panic!("platform {bad:?} must not load");
@@ -583,7 +595,7 @@ fn a_gateway_section_with_an_unusable_value_does_not_load() {
     // An empty served entry matches no challenge and would scope §13 check 6
     // to nothing — the failure §13.5 warns about, reached by a stray comma.
     let Err(err) = load(
-        "\n[gateway]\napi_key_file = \"/dev/null\"\nlease_secs = 60\n\
+        "\n[gateway]\napi_key_file = \"/dev/null\"\nlease_secs = 120\n\
          platform = \"linux/arm64\"\nserved_compute = [\"cpu\", \"\"]\n",
     ) else {
         panic!("an empty served_compute entry must not load");
@@ -593,7 +605,7 @@ fn a_gateway_section_with_an_unusable_value_does_not_load() {
     // And the shape that does load, so the rejections above are not passing
     // for some unrelated reason.
     load(
-        "\n[gateway]\napi_key_file = \"/dev/null\"\nlease_secs = 60\n\
+        "\n[gateway]\napi_key_file = \"/dev/null\"\nlease_secs = 120\n\
          platform = \"linux/arm64\"\nserved_compute = []\n",
     )
     .expect("a well-formed [gateway] loads");
@@ -821,6 +833,11 @@ fn every_shipped_dev_config_parses_into_the_typed_shape() {
             Binary::PoolController,
             "pool_controller",
         ),
+        (
+            include_str!("../../../config/tig-gateway.dev.toml"),
+            Binary::TigGateway,
+            "pool_gateway",
+        ),
     ] {
         let config: Config = toml::from_str(file)
             .unwrap_or_else(|e| panic!("{} dev config does not parse: {e}", binary.as_str()));
@@ -852,6 +869,37 @@ fn every_shipped_dev_config_parses_into_the_typed_shape() {
                     tig.base_url
                 );
                 assert!(config.orchestration.is_some());
+            }
+            Binary::TigGateway => {
+                let tig = config.tig.as_ref().expect("the gateway needs an endpoint");
+                assert!(
+                    tig.is_local_fake_tig(),
+                    "a dev config points at a local fake-tig: {}",
+                    tig.base_url
+                );
+                let gateway = config
+                    .gateway
+                    .as_ref()
+                    .expect("the gateway section is what makes this binary runnable");
+                assert!(
+                    gateway.api_key_file.starts_with("secrets/"),
+                    "a dev config names a key file under secrets/, never a key: {:?}",
+                    gateway.api_key_file
+                );
+                // The one cross-field rule `pool-config` cannot check, because
+                // the call timeout is pinned in `tig-gateway` rather than
+                // configured: a file that parses here but that no gateway would
+                // start on teaches the wrong shape (drive::lease_outlasts_call).
+                assert!(
+                    gateway.lease_secs > 60,
+                    "a dev lease must outlast the pinned 60s write call timeout, or \
+                     `tig-gateway run` refuses to start: {}",
+                    gateway.lease_secs
+                );
+                assert!(
+                    config.orchestration.is_none(),
+                    "the gateway chooses no work"
+                );
             }
             _ => {
                 assert!(config.tig.is_none(), "migrate does not talk to TIG");

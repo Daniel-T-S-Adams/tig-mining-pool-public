@@ -15,14 +15,20 @@
 //! without reading, and `tig_client`'s `TigReader::Gateway` share exists for
 //! exactly this. Choosing work stays the controller's.
 //!
-//! **The library does not read configuration**, though the crate now depends
-//! on `pool-config` — `main.rs` lives here because `credential::load` is
-//! crate-private, and a binary in the same crate shares its dependencies. So
-//! this is discipline rather than a boundary the compiler holds: every
-//! function below takes what it needs as an argument, and the binary is the
-//! only place a `Config` is touched. Worth saying plainly, because an earlier
-//! version of this comment claimed the crate *could not* see configuration,
-//! which stopped being true the moment the binary needed it.
+//! **Nothing in this module reads configuration.** The crate does depend on
+//! `pool-config`, and one library module reads a `Config`: `service::run`,
+//! which is the crate's single entry point and lives in the library rather
+//! than in `main.rs` only because `credential::load` is crate-private and the
+//! key must not leave. Everywhere else — every function below, and every
+//! function in `readiness` — takes what it needs as an argument.
+//!
+//! That is a testability property, not a boundary the compiler holds: a
+//! gathering function that read a `Config` could only be tested against the
+//! config the crate ships, whereas one that takes its inputs can be handed the
+//! failing case. Worth stating carefully, because two earlier versions of this
+//! comment overclaimed — first that the crate *could not* see configuration,
+//! then that no library code touched a `Config` — and each stopped being true
+//! in the commit that added the dependency and the run loop respectively.
 //!
 //! Check 4 reads too, and not through that share: the published specification
 //! lives on the swagger host rather than the API, so it is fetched with this

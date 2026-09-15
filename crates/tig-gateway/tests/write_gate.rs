@@ -3,7 +3,7 @@
 //! in-flight intents.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use pool_domain::Network;
 use tig_gateway::readiness::{
@@ -15,6 +15,7 @@ use tig_gateway::write_gate::{Revocation, WriteGate};
 fn pins() -> Pins {
     Pins {
         network: Network::Testnet,
+        image_names: BTreeSet::from(["img".to_string()]),
         upstream_commit: "ad08d1ea001a73ff5aab3b556d7f59246fece14e".to_string(),
         image_digests: BTreeMap::from([("img".to_string(), "sha256:aa".to_string())]),
         platform: "linux/arm64".to_string(),

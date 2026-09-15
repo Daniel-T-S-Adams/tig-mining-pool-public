@@ -849,7 +849,7 @@ mod tests {
     //! `POOL_TEST_SUPERUSER_URL`; without it these skip.
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::path::PathBuf;
 
     use pool_domain::Network;
@@ -901,6 +901,7 @@ mod tests {
         };
         let pins = Pins {
             network: Network::Testnet,
+            image_names: BTreeSet::from(["img".to_string()]),
             upstream_commit: "c".to_string(),
             image_digests: BTreeMap::from([("img".to_string(), "sha256:aa".to_string())]),
             platform: "linux/arm64".to_string(),

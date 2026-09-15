@@ -1,0 +1,14 @@
+{
+  "_comment": "Both halves of \u00a74's lossless rule. `integers` sit above 2^53, where f64 stops being able to hold every integer, so a parser routing them through a double returns a neighbour. `precise_numbers` are TIG's PreciseNumber values, which ride as decimal strings and must stay strings \u2014 accounting.md \u00a73 forbids floating point, and a fee re-typed to a float is the failure that rule exists for.",
+  "precise_numbers": {
+    "base_fee": "1000000000000000",
+    "available_fee_balance": "10000000000000000000",
+    "total_fees_paid": "0"
+  },
+  "integers": {
+    "fuel_consumed": 9007199254740993,
+    "nonce": 18446744073709551615,
+    "large_signature": 9223372036854775807,
+    "just_above_f64_exact": 9007199254740993
+  }
+}

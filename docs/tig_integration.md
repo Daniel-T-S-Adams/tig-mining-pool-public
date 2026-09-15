@@ -805,6 +805,72 @@ silently attributed.
 the request succeed" passes for an identity that does not exist, which is the
 case this one exists to catch.
 
+### 13.4 What check 5 validates at this slice
+
+Check 5 asks that the required responses "validate against required models",
+and §1 makes a missing or type-incompatible required field fatal. What the
+gateway performs is narrower: it confirms each response carries **the
+collections the pool reads from it**, per the live envelopes §14 records.
+
+It is not field-level model validation, and that is a gap rather than a
+division of labour. §14 asks for "explicit v0 models" with regression fixtures
+before writes are enabled; **those models do not exist**. `pool-snapshot` and
+`pool-controller` read these envelopes as `serde_json::Value` and pull fields
+out by name, so no component validates a response against a declared shape.
+
+The gateway does not close it by depending on the controller — a process
+asking another component whether it may write has moved the gate somewhere it
+cannot be trusted. Closing it means the v0 models themselves, which
+[issue #4](https://github.com/Daniel-T-S-Adams/tig-mining-pool-public/issues/4)
+owns along with the v2 fixture set they would be validated against.
+
+**What this catches** is the failure that actually happens: TIG renaming or
+removing a collection, so the pool's next read finds nothing where it expected
+everything. **What it misses** is a field inside a collection changing
+meaning, which no shape check catches at any depth and which §15's review is
+the answer to.
+
+The validation is written against what TIG serves rather than against
+`fixtures/tig/v1`, because those disagree: the fixture gives `get-algorithms`
+a top-level `algorithms` key and TIG sends `codes`, `binarys` and `advances`
+([issue #28](https://github.com/Daniel-T-S-Adams/tig-mining-pool-public/issues/28)).
+Validating against the fixture would make `fake-tig` the authority on the real
+API's shape — code that passes every test and fails on first contact — which
+is the inversion check 5 exists to prevent. `get-algorithms` therefore fails
+against the fake until the fixture is corrected, and a test asserts that
+failure so the disagreement stays visible.
+
+### 13.5 What check 6 evaluates at this slice
+
+Check 6 covers "all live active challenges considered by the decision engine".
+Both qualifiers do work, and the gateway resolves them as follows.
+
+**Live and active** is §5.1's test — `state.round_active <= block.round`. A
+challenge that activates in a later round is not one the engine considers, so
+requiring a pinned runtime for it would refuse writes over work the pool could
+not take.
+
+**Considered by the decision engine** resolves to the compute types this
+deployment *serves*. `select_challenge` excludes a challenge whose compute
+type no offer matches before looking at anything else, so those are the ones
+that reach it. That set is a fact about the deployment and must be wired from
+its configuration; a gateway that defaulted it to empty would pass this check
+by saying nothing.
+
+**A deployment serving nothing has nothing to judge.** Slice 1 is that: no
+members, nothing mined. This is not §13.2's kind of acknowledgement — it is
+true, and it stops being true the moment compute is configured, at which point
+the check bites without anyone having to enable it. When it bites, it refuses
+writes until §15 brings the pin forward (see §16).
+
+**The compute-path half is satisfied by construction.** Everything reaching
+the check passed the served filter, so `compute_path_supported` is always
+true and `evaluate`'s branch for it cannot fire. It is kept because `evaluate`
+owns the rule and a gatherer answering it by omission would put the rule in
+two places — but it is not, today, a check. Making it one means comparing the
+deployment's compute type against §2's compatibility table, which belongs with
+the slice that has members to serve.
+
 ## 14. Known upstream discrepancies at this pin
 
 These discrepancies are recorded so implementation does not accidentally
@@ -1040,6 +1106,31 @@ The lowercase wire casing matches the enum-casing discrepancy the spike
 already recorded (`protocol_spike_report.md` §9 item 6); `tig-structs`
 declares the variants in Rust casing and they serialize lowercase.
 
+### 14.4 `get-algorithms` carries no `algorithms` collection
+
+`GET /get-algorithms?block_id=…` returns, on live testnet:
+
+```
+advances:       list — block_data, details, id, state
+binarys:        list — algorithm_id, details, state
+codes:          list — block_data, details, id, state
+player_details: object
+```
+
+There is no `algorithms` key. Observed 2026-09-15; consistent with the spike's
+S1 reading on 2026-08-03.
+
+`fixtures/tig/v1/get-algorithms.json` carries exactly one top-level key and it
+is `algorithms`, so the fixture and the API disagree. The fixture's provenance
+is **constructed** rather than captured, so this may be a derivation error
+rather than an envelope change — establishing which belongs to §15's review.
+[Issue #28](https://github.com/Daniel-T-S-Adams/tig-mining-pool-public/issues/28)
+owns it.
+
+§13 check 5 validates against the collections recorded here rather than
+against the fixture, so `get-algorithms` fails against `fake-tig` until the
+fixture is corrected.
+
 ### 14.3 An absent player is a success, not a 404
 
 `GET /get-player-data?block_id=…&player_id=…` answers an id TIG does not hold
@@ -1091,14 +1182,24 @@ without this process.
 
 ## 16. Watching for drift
 
-§13's gate compares a running binary against **its pin**. It never consults
-TIG's current state, and must not: §13 makes moving a branch or a container
-tag something that is "never accepted automatically", so a gate checking
-against upstream would either follow it silently — defeating the pin — or fail
-permanently the moment TIG committed anything.
+§13's gate never follows TIG's **upstream source or tags**, and must not:
+§13 makes moving a branch or a container tag something that is "never accepted
+automatically", so a gate that re-pinned itself from upstream would defeat the
+pin entirely.
 
-That leaves a question nobody was asking: *has TIG moved since the review
-behind this pin?* It went unasked long enough for the pin to fall 45 commits
+It does read live TIG — checks 5, 6 and 9 cannot be answered otherwise. The
+distinction is what it does with what it reads: it compares against the pin
+and refuses, never adopts. Check 6 is the sharpest case. It compares the live
+active challenges against the pinned runtimes and **fails** when one the
+deployment could mine has none, which means a pool serving a compute type TIG
+has since added a challenge for cannot write until §15 brings the pin forward.
+That is the intended posture, not an accident of implementation: the pool does
+not mine what nobody has reviewed. §15 step 9's note applies — an operator
+meeting that refusal should find it documented rather than mysterious.
+
+What no check asks, because none of them may, is the question in the other
+direction: *has TIG moved since the review behind this pin?* A gate answers
+"may this process write now"; nothing answered "is the pin still current". It went unasked long enough for the pin to fall 45 commits
 behind and a new CPU challenge to go live unnoticed.
 
 `scripts/pin-drift.sh` asks it. Four comparisons against live TIG, all public

@@ -1,0 +1,21 @@
+{
+  "_comment": "The \u00a76.1 body this submission must render to, byte for byte. Pinned because architecture.md \u00a77.3 binds an admitted intent to its canonical payload digest, so a rendering change silently invalidates intents already recorded; and because mining_system.md \u00a76.6 makes a re-typed hyperparameter a different method. The spike confirmed the envelope, key order and empty track_id live, always with \"hyperparameters\": null \u2014 a typed-hyperparameter body has never been confirmed by TIG and this pinning is unverified live until slice 1's live run submits one.",
+  "input": {
+    "player_id": "0xp00l00000000000000000000000000000000000",
+    "block_id": "block_100080",
+    "challenge_id": "c001",
+    "algorithm_id": "a011",
+    "compute_type": "aws_t4g",
+    "track_settings": {
+      "scale=16,n_start=50": {
+        "num_bundles": 3,
+        "fuel_budget": 5000000000000,
+        "hyperparameters": {
+          "alpha": 7,
+          "beta": 0.25
+        }
+      }
+    }
+  },
+  "expected_bytes": "{\"compute_type\":\"aws_t4g\",\"settings\":{\"algorithm_id\":\"a011\",\"block_id\":\"block_100080\",\"challenge_id\":\"c001\",\"player_id\":\"0xp00l00000000000000000000000000000000000\",\"track_id\":\"\"},\"track_settings\":{\"scale=16,n_start=50\":{\"fuel_budget\":5000000000000,\"hyperparameters\":{\"alpha\":7,\"beta\":0.25},\"num_bundles\":3}}}"
+}

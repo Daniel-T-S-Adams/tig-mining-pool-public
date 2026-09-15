@@ -160,7 +160,7 @@ pub struct TigConfig {
     /// nothing.
     ///
     /// Nothing in this repository acquires TIG's source: §15 makes the
-    /// upgrade an eight-step human review that ends by editing the pinned
+    /// upgrade a reviewed human procedure that ends by editing the pinned
     /// file. The acquired commit is therefore a fact only a person holds, and
     /// this is where they state it. A deployment stating one the binary was
     /// not built against fails check 2 rather than writing to TIG under a

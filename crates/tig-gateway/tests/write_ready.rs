@@ -205,8 +205,8 @@ fn check_2_compares_the_deployments_declaration_against_the_compiled_in_pin() {
     // What check 2 can actually verify here, and what it cannot.
     //
     // §13 asks for "the acquired upstream source commit", but nothing in this
-    // repository acquires TIG's source — §15 makes the upgrade an eight-step
-    // human review ending in an edit to `config/tig_integration.json`. So the
+    // repository acquires TIG's source — §15 makes the upgrade a reviewed
+    // human procedure ending in an edit to `config/tig_integration.json`. So the
     // observation is what the deployment *declares* was acquired, and the pin
     // is compiled into the binary from that same file.
     //

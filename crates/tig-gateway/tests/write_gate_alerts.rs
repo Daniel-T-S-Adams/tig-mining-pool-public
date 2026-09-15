@@ -37,30 +37,24 @@ fn pins() -> Pins {
     }
 }
 
+/// A gate proof whose nine checks all passed on evidence.
+///
+/// The acknowledgement variant lives in `write_gate_acknowledgement.rs`,
+/// where it is exercised. Keeping a copy here would leave a branch this
+/// binary never takes, free to drift from the one that is tested — which is
+/// the same rot as an untested check, arrived at through a helper.
 fn ready() -> WriteReady {
-    ready_with(None)
-}
-
-/// A gate proof whose check 3 passed on an acknowledgement rather than on
-/// resolved digests, when `acknowledgement` is `Some`.
-fn ready_with(acknowledgement: Option<&str>) -> WriteReady {
     let pins = pins();
     let evidence = Evidence {
         config_network: Ok(Network::Testnet),
         upstream_commit: Ok(pins.upstream_commit.clone()),
-        resolved_images: Ok(match acknowledgement {
-            None => ImageObservation {
-                resolved: Some(vec![ResolvedImage {
-                    reference: "img".to_string(),
-                    manifest_digest: "sha256:aa".to_string(),
-                    platform: "linux/arm64".to_string(),
-                }]),
-                reviewed_unresolved: None,
-            },
-            Some(reason) => ImageObservation {
-                resolved: None,
-                reviewed_unresolved: Some(reason.to_string()),
-            },
+        resolved_images: Ok(ImageObservation {
+            resolved: Some(vec![ResolvedImage {
+                reference: "img".to_string(),
+                manifest_digest: "sha256:aa".to_string(),
+                platform: "linux/arm64".to_string(),
+            }]),
+            reviewed_unresolved: None,
         }),
         openapi: Ok(OpenApiObservation {
             hosted_sha256: Some("abc".to_string()),

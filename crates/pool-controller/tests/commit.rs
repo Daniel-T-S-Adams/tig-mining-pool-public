@@ -20,6 +20,7 @@ const ARTIFACT: &str = "artifact/w1/commitment";
 fn fake() -> TigConfig {
     TigConfig {
         base_url: "http://127.0.0.1:8080".to_string(),
+        acquired_upstream_commit: "ad08d1ea001a73ff5aab3b556d7f59246fece14e".to_string(),
         player_id: "0x2935a721068da756b28cba896efdb64e8909dfae".to_string(),
     }
 }
@@ -27,6 +28,7 @@ fn fake() -> TigConfig {
 fn live() -> TigConfig {
     TigConfig {
         base_url: "https://testnet-api.tig.foundation".to_string(),
+        acquired_upstream_commit: "ad08d1ea001a73ff5aab3b556d7f59246fece14e".to_string(),
         player_id: "0x2935a721068da756b28cba896efdb64e8909dfae".to_string(),
     }
 }

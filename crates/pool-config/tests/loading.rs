@@ -192,7 +192,7 @@ const ORCHESTRATION: &str =
 
 /// The endpoint the controller and gateway both require. A local `fake-tig`
 /// here, which is also what F4d's guard reads.
-const TIG: &str = "\n[tig]\nbase_url = \"http://127.0.0.1:8080\"\nplayer_id = \"0x2935a721068da756b28cba896efdb64e8909dfae\"\n";
+const TIG: &str = "\n[tig]\nbase_url = \"http://127.0.0.1:8080\"\nplayer_id = \"0x2935a721068da756b28cba896efdb64e8909dfae\"\nacquired_upstream_commit = \"ad08d1ea001a73ff5aab3b556d7f59246fece14e\"\n";
 
 #[test]
 fn a_controller_without_an_unverified_limit_does_not_load() {
@@ -364,7 +364,7 @@ fn decision_digest_is_stable_and_excludes_non_decision_fields() {
         let mut toml = valid_toml(&scratch.password_file())
             .replace("user = \"pool_migration\"", "user = \"pool_gateway\"");
         toml.push_str(&format!(
-            "\n[tig]\nbase_url = \"{base_url}\"\nplayer_id = \"{player}\"\n"
+            "\n[tig]\nbase_url = \"{base_url}\"\nplayer_id = \"{player}\"\nacquired_upstream_commit = \"ad08d1ea001a73ff5aab3b556d7f59246fece14e\"\n"
         ));
         Config::load(scratch.write(&toml), Binary::TigGateway).unwrap()
     };
@@ -411,12 +411,42 @@ fn a_player_id_that_is_not_a_lowercase_address_does_not_load() {
         let mut toml = valid_toml(&scratch.password_file())
             .replace("user = \"pool_migration\"", "user = \"pool_gateway\"");
         toml.push_str(&format!(
-            "\n[tig]\nbase_url = \"http://127.0.0.1:8080\"\nplayer_id = \"{bad}\"\n"
+            "\n[tig]\nbase_url = \"http://127.0.0.1:8080\"\nplayer_id = \"{bad}\"\nacquired_upstream_commit = \"ad08d1ea001a73ff5aab3b556d7f59246fece14e\"\n"
         ));
         let Err(err) = Config::load(scratch.write(&toml), Binary::TigGateway) else {
             panic!("{bad:?} must not load");
         };
         assert_invalid(err, "40 lowercase hex digits");
+    }
+}
+
+#[test]
+fn an_abbreviated_or_malformed_upstream_commit_does_not_load() {
+    // §13 check 2 compares this against the pin compiled into the binary,
+    // byte for byte. An abbreviation is the value a person would naturally
+    // paste — git prints short hashes everywhere — and it would fail the
+    // check saying "you deployed the wrong binary" when the operator had
+    // only typed seven characters. Refused here, where the message is about
+    // what is actually wrong.
+    let scratch = Scratch::new("upstream-shape");
+    for bad in [
+        "ad08d1e",
+        "AD08D1EA001A73FF5AAB3B556D7F59246FECE14E",
+        "ad08d1ea001a73ff5aab3b556d7f59246fece14",
+        " ad08d1ea001a73ff5aab3b556d7f59246fece14e",
+        "",
+    ] {
+        let mut toml = valid_toml(&scratch.password_file())
+            .replace("user = \"pool_migration\"", "user = \"pool_gateway\"");
+        toml.push_str(&format!(
+            "\n[tig]\nbase_url = \"http://127.0.0.1:8080\"\nplayer_id = \
+             \"0x2935a721068da756b28cba896efdb64e8909dfae\"\n\
+             acquired_upstream_commit = \"{bad}\"\n"
+        ));
+        let Err(err) = Config::load(scratch.write(&toml), Binary::TigGateway) else {
+            panic!("{bad:?} must not load");
+        };
+        assert_invalid(err, "40-character lowercase hex commit");
     }
 }
 
@@ -552,7 +582,7 @@ fn an_endpoint_that_is_not_a_url_does_not_load() {
     ] {
         let mut toml = valid_toml(&scratch.password_file())
             .replace("user = \"pool_migration\"", "user = \"pool_gateway\"");
-        toml.push_str(&format!("\n[tig]\nbase_url = \"{bad}\"\nplayer_id = \"0x2935a721068da756b28cba896efdb64e8909dfae\"\n"));
+        toml.push_str(&format!("\n[tig]\nbase_url = \"{bad}\"\nplayer_id = \"0x2935a721068da756b28cba896efdb64e8909dfae\"\nacquired_upstream_commit = \"ad08d1ea001a73ff5aab3b556d7f59246fece14e\"\n"));
         let path = scratch.write(&toml);
         let Err(err) = Config::load(&path, Binary::TigGateway) else {
             panic!("{bad} must not load");
@@ -579,6 +609,7 @@ fn the_fake_tig_test_reads_the_endpoint_and_not_the_network() {
     ] {
         assert!(
             pool_config::TigConfig {
+                acquired_upstream_commit: "ad08d1ea001a73ff5aab3b556d7f59246fece14e".to_string(),
                 base_url: local.to_string(),
                 player_id: "0x2935a721068da756b28cba896efdb64e8909dfae".to_string(),
             }
@@ -604,6 +635,7 @@ fn the_fake_tig_test_reads_the_endpoint_and_not_the_network() {
     ] {
         assert!(
             !pool_config::TigConfig {
+                acquired_upstream_commit: "ad08d1ea001a73ff5aab3b556d7f59246fece14e".to_string(),
                 base_url: remote.to_string(),
                 player_id: "0x2935a721068da756b28cba896efdb64e8909dfae".to_string(),
             }
@@ -694,7 +726,7 @@ fn the_endpoint_cannot_be_pointed_at_mainnet_or_anywhere_unpinned() {
     let with = |base: &str| {
         let mut toml = valid_toml(&scratch.password_file())
             .replace("user = \"pool_migration\"", "user = \"pool_gateway\"");
-        toml.push_str(&format!("\n[tig]\nbase_url = \"{base}\"\nplayer_id = \"0x2935a721068da756b28cba896efdb64e8909dfae\"\n"));
+        toml.push_str(&format!("\n[tig]\nbase_url = \"{base}\"\nplayer_id = \"0x2935a721068da756b28cba896efdb64e8909dfae\"\nacquired_upstream_commit = \"ad08d1ea001a73ff5aab3b556d7f59246fece14e\"\n"));
         toml
     };
 
@@ -728,7 +760,7 @@ fn a_rejected_endpoint_never_echoes_its_userinfo() {
     ] {
         let mut toml = valid_toml(&scratch.password_file())
             .replace("user = \"pool_migration\"", "user = \"pool_gateway\"");
-        toml.push_str(&format!("\n[tig]\nbase_url = \"{bad}\"\nplayer_id = \"0x2935a721068da756b28cba896efdb64e8909dfae\"\n"));
+        toml.push_str(&format!("\n[tig]\nbase_url = \"{bad}\"\nplayer_id = \"0x2935a721068da756b28cba896efdb64e8909dfae\"\nacquired_upstream_commit = \"ad08d1ea001a73ff5aab3b556d7f59246fece14e\"\n"));
         let path = scratch.write(&toml);
         let Err(err) = Config::load(&path, Binary::TigGateway) else {
             panic!("{bad} must not load");

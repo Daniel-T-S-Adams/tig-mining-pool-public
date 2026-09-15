@@ -694,7 +694,7 @@ At startup and after any deployment, the TIG gateway must pass all of these
 checks before entering `WRITE_READY`:
 
 1. project config parses and the network is exactly `testnet`;
-2. the acquired upstream source commit matches the pin;
+2. the acquired upstream source commit matches the pin (see §13.1);
 3. every required container resolves to the pinned manifest digest for the
    current platform;
 4. the hosted OpenAPI checksum matches the reviewed checksum, or an explicit
@@ -712,6 +712,35 @@ A changed OpenAPI checksum or required response shape creates an operator task:
 compare a newly pinned upstream commit, update explicit models and fixtures,
 run the protocol spike tests, then review the config change. Moving a Git
 branch or container tag is never accepted automatically.
+
+### 13.1 What check 2 verifies while acquisition is manual
+
+Check 2 is written as a comparison between the commit that was *acquired* and
+the commit that is *pinned*. Nothing in this repository acquires TIG's source:
+§15 makes an upgrade an eight-step human review that ends by editing
+`config/tig_integration.json`. There is therefore no machine-produced record
+of what a build was made against, and a check comparing the pinned file to
+itself would pass however wrong it was.
+
+So the two sides are these:
+
+- **the pin** — `config/tig_integration.json` reaches the binary through
+  `include_str!`, so it is fixed when the binary is compiled and cannot be
+  changed by editing a file beside it;
+- **the acquired commit** — `[tig].acquired_upstream_commit` in the
+  deployment's own configuration, stated by whoever performed the §15 review.
+
+A mismatch means a binary was deployed beside a configuration that has moved
+on, and the gateway refuses to write rather than transmit under a snapshot
+nobody built it against.
+
+**What this does not establish** is that the declared commit was reviewed at
+all: the declaration and the pin can be wrong together and the check still
+passes. Closing that requires the build to acquire the source itself, which is
+[issue #16](https://github.com/Daniel-T-S-Adams/tig-mining-pool-public/issues/16).
+Until then check 2 verifies the deployment against the build, not the build
+against upstream, and this section is what stops that reading as the stronger
+guarantee its one-line form suggests.
 
 ## 14. Known upstream discrepancies at this pin
 

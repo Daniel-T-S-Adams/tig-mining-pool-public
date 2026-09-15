@@ -150,6 +150,27 @@ pub struct TigConfig {
     /// identity *on that endpoint*: the same pool has a different id on a
     /// different network.
     pub player_id: String,
+    /// The upstream TIG source commit whoever deployed this says was
+    /// acquired and reviewed, per `tig_integration.md` §15.
+    ///
+    /// §13 check 2 compares "the acquired upstream source commit" against the
+    /// pin. The pin is compiled in — `config/tig_integration.json` reaches
+    /// the binary through `include_str!` — so it cannot also be the *other*
+    /// side of that comparison without the check being circular and proving
+    /// nothing.
+    ///
+    /// Nothing in this repository acquires TIG's source: §15 makes the
+    /// upgrade an eight-step human review that ends by editing the pinned
+    /// file. The acquired commit is therefore a fact only a person holds, and
+    /// this is where they state it. A deployment stating one the binary was
+    /// not built against fails check 2 rather than writing to TIG under a
+    /// snapshot nobody built it against.
+    ///
+    /// What this does **not** prove: that the person reviewed that commit.
+    /// Only automated acquisition closes that, and until it exists check 2
+    /// verifies the deployment against the build, not the build against
+    /// upstream.
+    pub acquired_upstream_commit: String,
 }
 
 impl TigConfig {
@@ -472,6 +493,24 @@ impl Config {
                     return Err(invalid(
                         "tig.player_id must be 0x followed by 40 lowercase hex digits, exactly \
                          as tig_integration.md §6.1 renders it and as TIG compares it"
+                            .into(),
+                    ));
+                }
+                // §13 check 2 compares this against the compiled-in pin byte
+                // for byte, so a shortened or mixed-case commit would fail
+                // the check for the wrong reason — the operator would read
+                // "you deployed the wrong binary" when they had only typed an
+                // abbreviation. Refused at load, where it says what it is.
+                let commit = &tig.acquired_upstream_commit;
+                let well_formed = commit.len() == 40
+                    && commit
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+                if !well_formed {
+                    return Err(invalid(
+                        "tig.acquired_upstream_commit must be a full 40-character lowercase \
+                         hex commit, not an abbreviation: §13 check 2 compares it against the \
+                         compiled-in pin byte for byte"
                             .into(),
                     ));
                 }

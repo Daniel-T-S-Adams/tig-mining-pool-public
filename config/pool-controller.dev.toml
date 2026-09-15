@@ -42,6 +42,13 @@ base_url = "http://127.0.0.1:8080"
 # address, not a credential. The API key that pairs with it is never in a
 # config file.
 player_id = "0x2935a721068da756b28cba896efdb64e8909dfae"
+# The TIG source commit this deployment says was acquired and reviewed
+# (`tig_integration.md` §15). §13 check 2 compares it against the pin compiled
+# into the binary from `config/tig_integration.json`, so the two are different
+# artifacts and a mismatch means a binary was deployed beside a configuration
+# that moved on. Stated by a person because nothing here acquires the source —
+# §15 makes that an eight-step human review.
+acquired_upstream_commit = "ad08d1ea001a73ff5aab3b556d7f59246fece14e"
 
 [orchestration]
 # `mining_system.md` §11 lists this among the values "required before full

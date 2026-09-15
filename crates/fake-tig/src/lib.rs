@@ -761,14 +761,22 @@ async fn get_player_data(
         .player
         .get("player")
         .and_then(|p| p.get("id"))
-        .and_then(Value::as_str);
-    if held != Some(requested.as_str()) {
-        return Ok(Json(json!({
-            "player": Value::Null,
-            "deposits": [],
-            "round_earnings": [],
-            "topups": [],
-        })));
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    // Case-insensitive, matching `get_benchmarks` below. One identity
+    // compared two ways by one fake is a fake that models two TIGs, and
+    // `get_benchmarks` is §7's sole confirmation read — the stricter place to
+    // have settled it.
+    if !requested.eq_ignore_ascii_case(held) {
+        // §14.3: the same envelope with a null player, which is what live
+        // testnet returns. A second shape here would make this endpoint two
+        // endpoints, and the fake is the fidelity reference §13 check 5's
+        // model validation is written against.
+        let mut absent = w.fixture.player.clone();
+        if let Some(object) = absent.as_object_mut() {
+            object.insert("player".to_string(), Value::Null);
+        }
+        return Ok(Json(absent));
     }
     Ok(Json(w.fixture.player.clone()))
 }

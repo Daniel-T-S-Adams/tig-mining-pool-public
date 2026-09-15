@@ -773,6 +773,32 @@ concern the moment anything here runs one of those containers.
 owns resolving digests for real and deleting this section along with the field,
 and belongs with the slice that first runs a pinned container.
 
+### 13.3 What check 9 establishes against a player-scoped read
+
+Check 9 compares "the pool player ID returned by confirmed data" against the
+configured identity. The read that answers it — `GET /get-player-data` — takes
+`player_id` as a **parameter**, so the id in the reply is the id in the
+request. Comparing those two would compare a value with itself, which is the
+circularity §13.1 rejects for check 2.
+
+**What is verified is existence.** TIG either holds a player for the
+configured id on the pinned endpoint or it does not. A typo, a mainnet
+identity against a testnet endpoint, and an account that was retired all
+produce a reply with no player, and a deployment cannot write until its
+identity is one TIG serves.
+
+**What it does not establish** is that the API key the gateway loaded belongs
+to that player. Nothing at startup can: the key is a bearer credential and the
+read is public. That is caught later and by different means — §10's
+reconciliation compares `settings.player_id` on the pool's own confirmed
+precommit byte for byte against the configured identity, so a write made under
+a key belonging to someone else reconciles as `NoCandidate` rather than being
+silently attributed.
+
+**A missing player is HTTP 200, not 404** — see §14.3. A check written as "did
+the request succeed" passes for an identity that does not exist, which is the
+case this one exists to catch.
+
 ## 14. Known upstream discrepancies at this pin
 
 These discrepancies are recorded so implementation does not accidentally
@@ -813,6 +839,23 @@ choose the wrong shape:
 These known discrepancies do not authorize accepting new mismatches. They are
 handled by the explicit v0 models and must have regression fixtures before
 writes are enabled.
+
+### 14.3 An absent player is a success, not a 404
+
+`GET /get-player-data?block_id=…&player_id=…` answers an id TIG does not hold
+with **HTTP 200** and a null player, not a 404 or an error:
+
+```json
+{ "player": null, "deposits": [], "round_earnings": [], "topups": [] }
+```
+
+Observed on live testnet 2026-09-15. A present player carries the same
+envelope with `player` populated.
+
+This matters because §13 check 9 and any later reader of this endpoint cannot
+treat transport success as evidence that the player exists. `fake-tig` models
+the same answer, so a check that made that mistake fails against the fake
+rather than only against TIG.
 
 ### 14.1 Method-report penalty configuration block (S5 determination)
 

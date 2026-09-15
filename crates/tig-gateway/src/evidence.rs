@@ -21,7 +21,9 @@ use std::path::Path;
 use serde_json::Value;
 use tig_client::TigReadClient;
 
-use crate::readiness::{ActiveChallengeRuntime, ApiKeyPlacement, OpenApiObservation};
+use crate::readiness::{
+    ActiveChallengeRuntime, ApiKeyPlacement, FixtureOutcome, OpenApiObservation,
+};
 
 /// §13 check 9: the pool player ID returned by confirmed data matches the
 /// configured identity.
@@ -202,4 +204,144 @@ pub async fn active_challenge_runtimes(
         });
     }
     Ok(out)
+}
+
+/// §13 check 7: the lossless-numeric and canonical-serialization fixtures
+/// pass.
+///
+/// **Run here, in the process, rather than left to CI.** §13 is a gate on a
+/// running binary — "at startup and after any deployment" — and a property
+/// proven in CI is a property of a *tree*. A binary built from a tree whose
+/// tests never ran is the deployment the gate exists to stop, and it would
+/// pass a check that trusted CI. Both fixtures are compiled in, so the
+/// process carries what it verifies.
+///
+/// The two properties are reported separately because `evaluate` fails them
+/// separately: one flag for both would let either regress while the check
+/// stayed green.
+pub fn serialization_fixtures() -> Result<FixtureOutcome, String> {
+    const LOSSLESS: &str = include_str!("../../../fixtures/serialization/v1/lossless.json");
+    const BODY: &str = include_str!("../../../fixtures/serialization/v1/precommit-body.json");
+
+    let mut detail = String::new();
+
+    // §4: integers must survive the JSON boundary unchanged. The fixture's
+    // values sit above 2^53, so a parser routing them through `f64` returns a
+    // neighbour rather than the value — which is the failure, and it is
+    // silent.
+    let numeric = (|| -> Result<bool, String> {
+        let doc: Value =
+            serde_json::from_str(LOSSLESS).map_err(|e| format!("lossless fixture: {e}"))?;
+        let values = doc
+            .get("values")
+            .and_then(Value::as_object)
+            .ok_or_else(|| "lossless fixture has no values object".to_string())?;
+        for (field, value) in values {
+            let parsed = value
+                .as_u64()
+                .ok_or_else(|| format!("{field} did not parse as an integer"))?;
+            // Round-tripped through the same serializer a request body uses,
+            // because that is the path a value actually takes.
+            let round_tripped: Value = serde_json::from_str(
+                &serde_json::to_string(&parsed).map_err(|e| format!("{field}: {e}"))?,
+            )
+            .map_err(|e| format!("{field}: {e}"))?;
+            if round_tripped.as_u64() != Some(parsed) {
+                return Err(format!("{field} did not survive a round trip"));
+            }
+        }
+        Ok(true)
+    })();
+
+    // §6.1's body, byte for byte. TIG compares the digest of what it
+    // receives, so a body differing by key order or number formatting is a
+    // different write — and the fee is paid before the pool finds out.
+    let canonical = (|| -> Result<bool, String> {
+        let doc: Value = serde_json::from_str(BODY).map_err(|e| format!("body fixture: {e}"))?;
+        let expected = doc
+            .get("expected_bytes")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "body fixture has no expected_bytes".to_string())?;
+        let input = doc
+            .get("input")
+            .ok_or_else(|| "body fixture has no input".to_string())?;
+        let submission = submission_from(input)?;
+        let rendered = serde_json::to_string(&pool_workflow::payload::precommit_body(&submission))
+            .map_err(|e| format!("rendering the body: {e}"))?;
+        if rendered != expected {
+            return Err(format!("rendered {rendered}, fixture expects {expected}"));
+        }
+        Ok(true)
+    })();
+
+    for outcome in [&numeric, &canonical] {
+        if let Err(e) = outcome {
+            if !detail.is_empty() {
+                detail.push_str("; ");
+            }
+            detail.push_str(e);
+        }
+    }
+
+    Ok(FixtureOutcome {
+        lossless_numeric_parsing: numeric.unwrap_or(false),
+        canonical_request_serialization: canonical.unwrap_or(false),
+        detail,
+    })
+}
+
+/// The fixture's `input`, read into a submission by hand.
+///
+/// `PrecommitSubmission` deliberately derives no `Deserialize`: it is a
+/// domain type the pool constructs from decisions, not something parsed from
+/// arbitrary JSON, and widening its API so one fixture could be loaded more
+/// briefly would make every future caller's mistake compile.
+fn submission_from(input: &Value) -> Result<pool_workflow::PrecommitSubmission, String> {
+    use std::collections::BTreeMap;
+
+    let text = |key: &str| -> Result<String, String> {
+        input
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| format!("the fixture input has no {key}"))
+    };
+
+    let mut track_settings = BTreeMap::new();
+    let tracks = input
+        .get("track_settings")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "the fixture input has no track_settings".to_string())?;
+    for (track_id, settings) in tracks {
+        let number = |key: &str| -> Result<u64, String> {
+            settings
+                .get(key)
+                .and_then(Value::as_u64)
+                .ok_or_else(|| format!("track {track_id} has no {key}"))
+        };
+        let hyperparameters = settings
+            .get("hyperparameters")
+            .and_then(Value::as_object)
+            .ok_or_else(|| format!("track {track_id} has no hyperparameters"))?
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        track_settings.insert(
+            track_id.clone(),
+            pool_workflow::TrackSettings {
+                num_bundles: number("num_bundles")?,
+                fuel_budget: number("fuel_budget")?,
+                hyperparameters,
+            },
+        );
+    }
+
+    Ok(pool_workflow::PrecommitSubmission {
+        player_id: text("player_id")?,
+        block_id: text("block_id")?,
+        challenge_id: text("challenge_id")?,
+        algorithm_id: text("algorithm_id")?,
+        compute_type: text("compute_type")?,
+        track_settings,
+    })
 }

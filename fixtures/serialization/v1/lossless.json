@@ -1,0 +1,9 @@
+{
+  "_comment": "Values above 2^53, where f64 stops being able to hold every integer. A parser that routes integers through a double returns a neighbour instead of these.",
+  "values": {
+    "fuel_consumed": 9007199254740993,
+    "nonce": 18446744073709551615,
+    "large_signature": 9223372036854775807,
+    "just_above_f64_exact": 9007199254740993
+  }
+}

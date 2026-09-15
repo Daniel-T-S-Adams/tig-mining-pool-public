@@ -10,6 +10,7 @@ use tig_client::{ReadPolicy, TigReadClient, TigReader};
 
 use tig_gateway::evidence::{
     active_challenge_runtimes, api_key_placement, confirmed_pool_player_id, openapi_checksum,
+    serialization_fixtures,
 };
 
 const PINNED: &str = include_str!("../../../config/tig_integration.json");
@@ -188,4 +189,44 @@ fn check_8_reads_who_can_open_the_key_file_from_its_mode() {
     // A path that does not exist cannot be judged at all.
     assert!(api_key_placement(true, &dir.join("absent")).is_err());
     std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn check_7_runs_the_fixtures_rather_than_trusting_that_ci_did() {
+    // §13 gates a running process — "at startup and after any deployment" —
+    // and a property proven in CI is a property of a tree. A binary built
+    // from a tree whose tests never ran is the deployment this stops, and it
+    // would pass a check that trusted CI. Both fixtures are compiled in.
+    let outcome = serialization_fixtures().expect("the fixtures are compiled in and readable");
+    assert!(outcome.lossless_numeric_parsing, "{}", outcome.detail);
+    assert!(
+        outcome.canonical_request_serialization,
+        "{}",
+        outcome.detail
+    );
+    assert!(outcome.detail.is_empty(), "{}", outcome.detail);
+}
+
+#[test]
+fn check_7_pins_the_bytes_a_body_renders_to() {
+    // What the fixture is for. TIG compares the digest of what it receives,
+    // so a body differing by key order or number formatting is a different
+    // write — and §6.1's fee is paid before the pool learns that.
+    //
+    // The expectation was taken from what the code renders, so this cannot
+    // establish that the rendering is what TIG accepts; the protocol spike's
+    // live runs did that. It establishes that changing the rendering has to
+    // be deliberate.
+    const BODY: &str = include_str!("../../../fixtures/serialization/v1/precommit-body.json");
+    let doc: serde_json::Value = serde_json::from_str(BODY).unwrap();
+    let expected = doc["expected_bytes"].as_str().unwrap();
+
+    // Key order is part of it: TIG digests bytes, not a parsed object.
+    assert!(
+        expected.starts_with(r#"{"compute_type":"#),
+        "the fixture must pin an ordering, not just a value: {expected}"
+    );
+    // And the hyperparameters keep their own types — §6.6 copies the source
+    // benchmark's values, and re-typing either is the failure this pins.
+    assert!(expected.contains(r#""alpha":7,"beta":0.25"#), "{expected}");
 }

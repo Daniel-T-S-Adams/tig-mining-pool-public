@@ -31,6 +31,9 @@ ok()      { printf '  [ok]        %s\n' "$*"; }
 moved()   { printf '  [DRIFT]     %s\n' "$*"; drift=1; }
 unknown() { printf '  [unchecked] %s\n' "$*"; unchecked=1; }
 
+# Exits non-zero on a missing key. Without that a renamed field yields an
+# empty string, and the caller reports "pinned " with no value as DRIFT —
+# blaming TIG for a local config error.
 pin() { python3 -c "
 import json,sys
 d=json.load(open('$pinned'))
@@ -42,13 +45,18 @@ printf '\nTIG pin drift — %s\n\n' "$(date -u +%Y-%m-%dT%H:%MZ)"
 
 # ---- 1. the upstream source commit ----------------------------------------
 printf 'Upstream source commit\n'
-pinned_commit="$(pin upstream.commit)"
+if ! pinned_commit="$(pin upstream.commit)" || [[ -z "$pinned_commit" ]]; then
+    unknown "the pinned file has no upstream.commit"
+    pinned_commit=""
+fi
 head_json="$(curl -sf --max-time 25 "https://api.github.com/repos/$repo/commits/main" 2>/dev/null)"
 if [[ -z "$head_json" ]]; then
     unknown "could not reach GitHub for $repo"
 else
     head_commit="$(printf '%s' "$head_json" | python3 -c 'import sys,json;print(json.load(sys.stdin)["sha"])')"
-    if [[ "$head_commit" == "$pinned_commit" ]]; then
+    if [[ -z "$pinned_commit" ]]; then
+        : # already reported as unchecked
+    elif [[ "$head_commit" == "$pinned_commit" ]]; then
         ok "pinned commit is the current head"
     else
         cmp_json="$(curl -sf --max-time 25 \
@@ -78,11 +86,34 @@ fi
 
 # ---- 3. the pinned container images ---------------------------------------
 printf '\nContainer images\n'
-python3 - "$pinned" <<'PY' > /tmp/pin-images.txt 2>/dev/null
+# mktemp, not a fixed name in a shared directory: a predictable path in /tmp
+# lets anyone who can write there pre-plant a symlink and have this redirect
+# overwrite whatever it points at.
+image_list="$(mktemp)"
+# `2>&1 >file` and not `>file 2>&1`: the second sends stderr to where stdout
+# already points — the file — so a traceback lands in the image list and the
+# loop below parses it as image entries.
+extract_err="$(python3 - "$pinned" 2>&1 >"$image_list" <<'IMG'
 import json, sys
-for name, image in json.load(open(sys.argv[1]))["images"].items():
+images = json.load(open(sys.argv[1]))["images"]
+if not images:
+    raise SystemExit("the pinned file lists no images")
+for name, image in images.items():
     print(name, image["reference"], image["manifest_digest"])
-PY
+IMG
+)"
+extract_status=$?
+# The rule section 4 follows and this section did not: a read that failed
+# leaves an empty list, the loop below runs zero times, no ok/DRIFT line is
+# printed for any image, and the run finishes *clean*. That is the
+# silent-clean answer this whole script exists to refuse, reached inside the
+# script itself.
+if (( extract_status != 0 )); then
+    unknown "could not read the image pins: ${extract_err//$'\n'/ }"
+    : > "$image_list"
+elif [[ ! -s "$image_list" ]]; then
+    unknown "the image pins read as empty"
+fi
 while read -r name reference pinned_digest; do
     [[ -z "${name:-}" ]] && continue
     path="${reference#ghcr.io/}"; path="${path%%:*}"
@@ -106,8 +137,8 @@ while read -r name reference pinned_digest; do
         note  "pinned $pinned_digest"
         note  "live   $live_digest"
     fi
-done < /tmp/pin-images.txt
-rm -f /tmp/pin-images.txt
+done < "$image_list"
+rm -f "$image_list"
 
 # ---- 4. live challenges against the pinned runtimes ------------------------
 printf '\nLive challenges without a pinned runtime\n'

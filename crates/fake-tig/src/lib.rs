@@ -740,10 +740,37 @@ async fn get_player_data(
     State(world): State<SharedWorld>,
     Query(params): Query<HashMap<String, String>>,
 ) -> ApiResult {
-    fixture_read(&world, "get-player-data", &params, |w| {
-        w.fixture.player.clone()
-    })
-    .await
+    check_read_injection(&world, "get-player-data")?;
+    let w = lock(&world);
+    require_latest_block(&w, &params)?;
+
+    // Player-scoped, for the reason `get-benchmarks` is: a handler that
+    // ignores `player_id` serves the fixture pool to every caller, so a check
+    // that exists to catch a *wrong* identity passes against the fake.
+    //
+    // §13 check 9 is that check. Live testnet answers an id it does not hold
+    // with HTTP 200 and a null player — not a 404 (verified 2026-09-15) — so
+    // a fake that always returns the pool would let "the request succeeded"
+    // stand in for "TIG holds this player", which is precisely the mistake
+    // the check forbids.
+    let requested = params
+        .get("player_id")
+        .ok_or_else(|| ApiError::bad_request("missing player_id"))?;
+    let held = w
+        .fixture
+        .player
+        .get("player")
+        .and_then(|p| p.get("id"))
+        .and_then(Value::as_str);
+    if held != Some(requested.as_str()) {
+        return Ok(Json(json!({
+            "player": Value::Null,
+            "deposits": [],
+            "round_earnings": [],
+            "topups": [],
+        })));
+    }
+    Ok(Json(w.fixture.player.clone()))
 }
 
 async fn get_benchmarks(

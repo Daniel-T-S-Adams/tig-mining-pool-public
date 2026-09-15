@@ -12,6 +12,7 @@
 pub mod claim;
 pub mod credential;
 pub mod drive;
+pub mod evidence;
 pub mod lane;
 pub mod readiness;
 pub mod reconcile;

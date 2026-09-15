@@ -2435,6 +2435,7 @@ dependencies = [
  "sha2 0.10.9",
  "sqlx",
  "thiserror",
+ "tig-client",
  "tokio",
  "tracing",
  "tracing-subscriber",

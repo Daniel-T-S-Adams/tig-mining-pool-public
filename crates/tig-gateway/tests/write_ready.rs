@@ -7,56 +7,50 @@
 //! once — is a test failure rather than a green run.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::collections::BTreeMap;
-
 use pool_domain::Network;
 use tig_gateway::readiness::{
     ActiveChallengeRuntime, ApiKeyPlacement, Check, Evidence, FixtureOutcome, ModelValidation,
-    OpenApiObservation, Pins, ResolvedImage, evaluate,
+    OpenApiObservation, Pins, ResolvedImage, acquired_upstream_commit, evaluate,
 };
 
 /// Makes one piece of evidence ungatherable, for the fail-closed cases.
 type BreakEvidence = Box<dyn Fn(&mut Evidence)>;
 
-const SHIPPED_CONFIG: &str = include_str!("../../../config/tig_integration.json");
-
 /// The pins a deployment actually ships with.
 ///
-/// Read from `config/tig_integration.json` rather than hand-written, so
-/// these tests also prove the shipped config carries everything §13 needs
-/// to compare against. A fixture would let the real file lose a pinned
-/// digest without any test noticing.
+/// The pins a deployment ships with, built by the **production**
+/// constructor rather than re-derived here.
+///
+/// It used to re-read `config/tig_integration.json` by hand, which meant the
+/// thing under test and the thing the binary uses were two readings of one
+/// file that could drift apart — the duplication §13's own checks exist to
+/// prevent, one level up. `Pins::compiled_in` is now the only reader, so a
+/// shipped config that lost a pinned digest fails here too.
+///
+/// The platform is the test's, because it is the deployment's everywhere: the
+/// pinned manifests are multi-platform, so nothing in the file answers "which
+/// one does this host need".
 fn pins() -> Pins {
-    let config: serde_json::Value = serde_json::from_str(SHIPPED_CONFIG).unwrap();
-    let mut image_digests = BTreeMap::new();
-    for (_name, image) in config["images"].as_object().unwrap() {
-        image_digests.insert(
-            image["reference"].as_str().unwrap().to_string(),
-            image["manifest_digest"].as_str().unwrap().to_string(),
-        );
-    }
-    assert!(
-        !image_digests.is_empty(),
-        "the shipped config must pin at least one container"
-    );
-    Pins {
-        network: Network::Testnet,
-        upstream_commit: config["upstream"]["commit"].as_str().unwrap().to_string(),
-        image_digests,
-        platform: config["spike"]["cpu_architecture"]
-            .as_str()
-            .unwrap()
-            .to_string(),
-        openapi_sha256: config["upstream"]["openapi"]["sha256"]
-            .as_str()
-            .unwrap()
-            .to_string(),
+    let pins = Pins::compiled_in(
+        Network::Testnet,
         // Test data, not a pin source: the gate compares observed identity
         // against whatever a deployment configures, and these pins are
         // self-consistent. The real slice-1 testnet identity is recorded in
         // docs/plans/slice-1-gateway.md.
-        pool_player_id: "0x1111111111111111111111111111111111111111".to_string(),
-    }
+        "0x1111111111111111111111111111111111111111".to_string(),
+        "linux/arm64".to_string(),
+    )
+    .expect("the shipped config must parse into pins");
+    assert!(
+        !pins.image_digests.is_empty(),
+        "the shipped config must pin at least one container"
+    );
+    assert_eq!(
+        pins.upstream_commit.len(),
+        40,
+        "the pin must be a full commit, since check 2 compares it byte for byte"
+    );
+    pins
 }
 
 /// Observations that satisfy all nine checks.
@@ -166,6 +160,40 @@ fn check_2_an_upstream_commit_that_moved() {
     let mut evidence = passing(&pins);
     evidence.upstream_commit = Ok("0000000000000000000000000000000000000000".to_string());
     only(evidence, Check::UpstreamCommit);
+}
+
+#[test]
+fn check_2_compares_the_deployments_declaration_against_the_compiled_in_pin() {
+    // What check 2 can actually verify here, and what it cannot.
+    //
+    // §13 asks for "the acquired upstream source commit", but nothing in this
+    // repository acquires TIG's source — §15 makes the upgrade an eight-step
+    // human review ending in an edit to `config/tig_integration.json`. So the
+    // observation is what the deployment *declares* was acquired, and the pin
+    // is compiled into the binary from that same file.
+    //
+    // Those are two different artifacts: the pin is fixed when the binary is
+    // built, the declaration is written when it is deployed. Comparing them
+    // catches a binary deployed beside a configuration that moved on. It does
+    // not catch a declaration nobody reviewed — only automated acquisition
+    // would, which is why that gap is named rather than papered over.
+    let pins = pins();
+
+    // The deployment agreeing with the binary it was shipped with.
+    let mut evidence = passing(&pins);
+    evidence.upstream_commit = acquired_upstream_commit(&pins.upstream_commit);
+    evaluate(&pins, &evidence).expect("a deployment that agrees with its binary may write");
+
+    // A deployment that declares a different snapshot. This is the real
+    // failure: the same binary, deployed beside a config that has moved.
+    let mut evidence = passing(&pins);
+    evidence.upstream_commit = acquired_upstream_commit("00112233445566778899aabbccddeeff00112233");
+    only(evidence, Check::UpstreamCommit);
+
+    // An empty declaration is an ungatherable observation, not a mismatch.
+    // `pool-config` refuses one at load, so this only pins that the public
+    // function does not quietly turn it into a comparison against "".
+    assert!(acquired_upstream_commit("").is_err());
 }
 
 #[test]

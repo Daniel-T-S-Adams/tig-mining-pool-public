@@ -113,6 +113,75 @@ pub struct Pins {
     pub pool_player_id: String,
 }
 
+impl Pins {
+    /// The reviewed pins this binary was built against.
+    ///
+    /// `config/tig_integration.json` reaches the binary through
+    /// `include_str!`, so these values are fixed when it is compiled and
+    /// cannot be changed by editing a file beside it. That is what makes them
+    /// usable as one side of §13's comparisons: the other side is what the
+    /// deployment states, and a check between two readings of the same file
+    /// would pass however wrong both were.
+    ///
+    /// `network`, `pool_player_id` and `platform` come from the deployment's
+    /// own configuration rather than the pinned file. The first two because
+    /// §13 check 1 and check 9 are about *this* deployment's identity, not
+    /// the protocol's. `platform` because the pinned file records none: §13
+    /// says the pinned images "support both `linux/amd64` and `linux/arm64`
+    /// manifests", so which one a digest must resolve for is a fact about the
+    /// host this runs on. Defaulting it here would answer a question about
+    /// the machine from a file that does not know the machine.
+    pub fn compiled_in(
+        network: Network,
+        pool_player_id: String,
+        platform: String,
+    ) -> Result<Self, String> {
+        const PINNED: &str = include_str!("../../../config/tig_integration.json");
+        let value: serde_json::Value = serde_json::from_str(PINNED)
+            .map_err(|e| format!("config/tig_integration.json is not valid JSON: {e}"))?;
+
+        let text = |path: &[&str]| -> Result<String, String> {
+            let mut at = &value;
+            for key in path {
+                at = at
+                    .get(key)
+                    .ok_or_else(|| format!("pinned file has no {}", path.join(".")))?;
+            }
+            at.as_str()
+                .map(str::to_string)
+                .ok_or_else(|| format!("pinned {} is not a string", path.join(".")))
+        };
+
+        // Keyed by image reference, which is what `evaluate` matches a
+        // resolved image against.
+        let mut image_digests = BTreeMap::new();
+        let images = value
+            .get("images")
+            .and_then(|v| v.as_object())
+            .ok_or_else(|| "pinned file has no images object".to_string())?;
+        for (name, image) in images {
+            let reference = image
+                .get("reference")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| format!("pinned image {name} has no reference"))?;
+            let digest = image
+                .get("manifest_digest")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| format!("pinned image {name} has no manifest_digest"))?;
+            image_digests.insert(reference.to_string(), digest.to_string());
+        }
+
+        Ok(Self {
+            network,
+            upstream_commit: text(&["upstream", "commit"])?,
+            image_digests,
+            platform,
+            openapi_sha256: text(&["upstream", "openapi", "sha256"])?,
+            pool_player_id,
+        })
+    }
+}
+
 /// One container resolved against the registry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedImage {
@@ -190,6 +259,41 @@ pub struct Evidence {
     pub fixtures: Result<FixtureOutcome, String>,
     pub api_key: Result<ApiKeyPlacement, String>,
     pub confirmed_pool_player_id: Result<String, String>,
+}
+
+/// The §13 check-2 observation this deployment can actually make.
+///
+/// §13 asks for "the acquired upstream source commit". Nothing in this
+/// repository acquires TIG's source — §15 makes the upgrade an eight-step
+/// human review that ends by editing `config/tig_integration.json` — so the
+/// acquired commit is a fact only the person who performed that review holds.
+/// `[tig].acquired_upstream_commit` is where they state it, and this returns
+/// it for [`evaluate`] to compare against the compiled-in pin.
+///
+/// **What the resulting check proves.** The binary and the deployment beside
+/// it agree about which protocol snapshot is being run. The pin is fixed when
+/// the binary is compiled; the declaration is written when it is deployed. A
+/// mismatch means a binary was deployed next to a configuration that has
+/// moved on — which is the failure that would otherwise send writes to TIG
+/// under a snapshot nobody built this against.
+///
+/// **What it does not prove.** That the person reviewed that commit at all.
+/// Comparing the pin against itself would prove even less, and is what makes
+/// a second, human-supplied source necessary rather than redundant. Closing
+/// the remaining gap needs the build to acquire the source itself — see the
+/// issue named in `docs/tig_integration.md` §13.
+/// Takes the declared value rather than reading configuration itself: this
+/// crate holds the API key and deliberately does not depend on `pool-config`,
+/// so the binary is what joins the two.
+pub fn acquired_upstream_commit(declared: &str) -> Result<String, String> {
+    if declared.is_empty() {
+        // Not reachable through `pool-config`, which refuses a malformed
+        // value at load. Stated anyway because this function is public and an
+        // empty observation would otherwise compare equal to nothing and
+        // fail check 2 with a message about the wrong thing.
+        return Err("no acquired upstream commit was declared".to_string());
+    }
+    Ok(declared.to_string())
 }
 
 /// Proof that all nine §13 checks passed.

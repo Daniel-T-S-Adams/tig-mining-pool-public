@@ -17,7 +17,7 @@ fn pins() -> Pins {
         network: Network::Testnet,
         upstream_commit: "ad08d1ea001a73ff5aab3b556d7f59246fece14e".to_string(),
         image_digests: BTreeMap::from([("img".to_string(), "sha256:aa".to_string())]),
-        platform: "arm64".to_string(),
+        platform: "linux/arm64".to_string(),
         openapi_sha256: "abc".to_string(),
         pool_player_id: "0xpool".to_string(),
     }
@@ -32,7 +32,7 @@ fn ready() -> WriteReady {
         resolved_images: Ok(vec![ResolvedImage {
             reference: "img".to_string(),
             manifest_digest: "sha256:aa".to_string(),
-            platform: "arm64".to_string(),
+            platform: "linux/arm64".to_string(),
         }]),
         openapi: Ok(OpenApiObservation {
             hosted_sha256: Some("abc".to_string()),

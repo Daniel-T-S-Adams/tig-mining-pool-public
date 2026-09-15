@@ -113,6 +113,29 @@ pub struct Pins {
     pub pool_player_id: String,
 }
 
+/// The network the pinned file names, as its own function so it can be tested
+/// against a file that says something else.
+///
+/// `Pins::compiled_in` reads one fixed document — `include_str!` makes it a
+/// compile-time constant — so a test calling it can only ever see the shipped
+/// value. That is how the first attempt at this went wrong: it asserted the
+/// constructor's network equalled the shipped `network.name`, which a body
+/// that ignored the file and returned `Testnet` outright also satisfied,
+/// because the shipped name *is* testnet. The assertion could not fail.
+///
+/// Splitting the judgement out gives it an input. An unknown name is an error
+/// rather than a default: a build that does not know the network it is pinned
+/// to cannot check anything about it.
+pub fn pinned_network(pinned: &serde_json::Value) -> Result<Network, String> {
+    let name = pinned
+        .get("network")
+        .and_then(|n| n.get("name"))
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "pinned file has no network.name".to_string())?;
+    name.parse::<Network>()
+        .map_err(|_| format!("pinned network.name {name:?} is not a network this build knows"))
+}
+
 impl Pins {
     /// The reviewed pins this binary was built against.
     ///
@@ -123,19 +146,27 @@ impl Pins {
     /// deployment states, and a check between two readings of the same file
     /// would pass however wrong both were.
     ///
-    /// `network`, `pool_player_id` and `platform` come from the deployment's
-    /// own configuration rather than the pinned file. The first two because
-    /// §13 check 1 and check 9 are about *this* deployment's identity, not
-    /// the protocol's. `platform` because the pinned file records none: §13
-    /// says the pinned images "support both `linux/amd64` and `linux/arm64`
-    /// manifests", so which one a digest must resolve for is a fact about the
-    /// host this runs on. Defaulting it here would answer a question about
-    /// the machine from a file that does not know the machine.
-    pub fn compiled_in(
-        network: Network,
-        pool_player_id: String,
-        platform: String,
-    ) -> Result<Self, String> {
+    /// **`network` is read from the pinned file, not from the deployment.**
+    /// The first version took it as a parameter, which made check 1's
+    /// pin-agreement branch compare two readings of one TOML value — the
+    /// same-artifact circularity §13.1 was written in the same change to
+    /// reject for check 2. An unknown name fails closed rather than
+    /// defaulting.
+    ///
+    /// `pool_player_id` and `platform` are the deployment's, and genuinely
+    /// are. Check 9 is about *this* deployment's identity, not the
+    /// protocol's. And §2 records that the pinned images "support both
+    /// `linux/amd64` and `linux/arm64` manifests", while §13 check 3 asks
+    /// about "the current platform" — so the file records the reviewed
+    /// architecture *set* and the host answers which of them it is.
+    /// Defaulting that here would answer a question about the machine from a
+    /// file that does not know the machine.
+    ///
+    /// The vocabulary is `linux/<arch>`, matching the spike's
+    /// `runtime_platform` and the OCI platform strings a registry reports,
+    /// because check 3 compares `ResolvedImage::platform` against this byte
+    /// for byte.
+    pub fn compiled_in(pool_player_id: String, platform: String) -> Result<Self, String> {
         const PINNED: &str = include_str!("../../../config/tig_integration.json");
         let value: serde_json::Value = serde_json::from_str(PINNED)
             .map_err(|e| format!("config/tig_integration.json is not valid JSON: {e}"))?;
@@ -170,6 +201,8 @@ impl Pins {
                 .ok_or_else(|| format!("pinned image {name} has no manifest_digest"))?;
             image_digests.insert(reference.to_string(), digest.to_string());
         }
+
+        let network = pinned_network(&value)?;
 
         Ok(Self {
             network,

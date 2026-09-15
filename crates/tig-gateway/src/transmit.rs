@@ -447,7 +447,7 @@ mod tests {
             network: Network::Testnet,
             upstream_commit: "c".to_string(),
             image_digests: BTreeMap::from([("img".to_string(), "sha256:aa".to_string())]),
-            platform: "arm64".to_string(),
+            platform: "linux/arm64".to_string(),
             openapi_sha256: "abc".to_string(),
             pool_player_id: POOL_PLAYER.to_string(),
         };
@@ -457,7 +457,7 @@ mod tests {
             resolved_images: Ok(vec![ResolvedImage {
                 reference: "img".to_string(),
                 manifest_digest: "sha256:aa".to_string(),
-                platform: "arm64".to_string(),
+                platform: "linux/arm64".to_string(),
             }]),
             openapi: Ok(OpenApiObservation {
                 hosted_sha256: Some("abc".to_string()),

@@ -805,6 +805,34 @@ silently attributed.
 the request succeed" passes for an identity that does not exist, which is the
 case this one exists to catch.
 
+### 13.4 What check 5 validates at this slice
+
+Check 5 asks that the required responses "validate against required models",
+and §1 makes a missing or type-incompatible required field fatal. What the
+gateway performs is narrower: it confirms each response carries **the
+collections the pool reads from it**, per the live envelopes §14 records.
+
+It is not field-level model validation. The typed parsers live in
+`pool-snapshot` and `pool-controller`, and the gateway does not depend on the
+controller to judge its own readiness — a process asking another component
+whether it may write has moved the gate somewhere it cannot be trusted.
+
+**What this catches** is the failure that actually happens: TIG renaming or
+removing a collection, so the pool's next read finds nothing where it expected
+everything. **What it misses** is a field inside a collection changing
+meaning, which no shape check catches at any depth and which §15's review is
+the answer to.
+
+The validation is written against what TIG serves rather than against
+`fixtures/tig/v1`, because those disagree: the fixture gives `get-algorithms`
+a top-level `algorithms` key and TIG sends `codes`, `binarys` and `advances`
+([issue #28](https://github.com/Daniel-T-S-Adams/tig-mining-pool-public/issues/28)).
+Validating against the fixture would make `fake-tig` the authority on the real
+API's shape — code that passes every test and fails on first contact — which
+is the inversion check 5 exists to prevent. `get-algorithms` therefore fails
+against the fake until the fixture is corrected, and a test asserts that
+failure so the disagreement stays visible.
+
 ## 14. Known upstream discrepancies at this pin
 
 These discrepancies are recorded so implementation does not accidentally

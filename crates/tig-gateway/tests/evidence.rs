@@ -16,6 +16,9 @@ use tig_gateway::evidence::{
 const PINNED: &str = include_str!("../../../config/tig_integration.json");
 const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/tig/v1");
 const POOL_PLAYER: &str = "0xp00l00000000000000000000000000000000000";
+/// The fixture anchor (`fixtures/tig/v1/README.md`). `c099` activates at 900,
+/// so §5.1 makes it inactive here.
+const BLOCK_ROUND: u64 = 834;
 
 async fn fake_tig() -> String {
     let world = fake_tig::build_world(fake_tig::Config::new(FIXTURES)).expect("world loads");
@@ -121,7 +124,7 @@ async fn check_6_considers_only_the_compute_this_deployment_serves() {
     // A deployment serving nothing has nothing to consider. This is slice 1:
     // no members, nothing mined. It is true rather than acknowledged, and it
     // stops being true the moment compute is configured.
-    let none = active_challenge_runtimes(&reader, &block, &pinned, &BTreeSet::new())
+    let none = active_challenge_runtimes(&reader, &block, BLOCK_ROUND, &pinned, &BTreeSet::new())
         .await
         .unwrap();
     assert!(none.is_empty(), "{none:?}");
@@ -133,6 +136,7 @@ async fn check_6_considers_only_the_compute_this_deployment_serves() {
     let cpu = active_challenge_runtimes(
         &reader,
         &block,
+        BLOCK_ROUND,
         &pinned,
         &BTreeSet::from(["cpu".to_string()]),
     )
@@ -143,6 +147,19 @@ async fn check_6_considers_only_the_compute_this_deployment_serves() {
         cpu.iter().all(|c| c.compute_path_supported),
         "anything in the list passed the compute filter: {cpu:?}"
     );
+    // The assertion whose absence hid a bug: with the shipped pins, every
+    // challenge reported must be pinned. Without it the list could carry
+    // `c099` — which activates at round 900 against the fixture's 834, so §5.1
+    // makes it inactive — and the gate would refuse to write over a challenge
+    // the decision engine never considers.
+    assert!(
+        cpu.iter().all(|c| c.runtime_pinned),
+        "every active served challenge must be pinned: {cpu:?}"
+    );
+    assert!(
+        !cpu.iter().any(|c| c.challenge_id == "c099"),
+        "c099 activates in a later round; §5.1 makes it inactive: {cpu:?}"
+    );
 
     // An unpinned runtime is reported, not filtered out. A gatherer that
     // dropped it would answer check 6 by omission and the gate would never
@@ -151,6 +168,7 @@ async fn check_6_considers_only_the_compute_this_deployment_serves() {
     let unpinned = active_challenge_runtimes(
         &reader,
         &block,
+        BLOCK_ROUND,
         &empty_pins,
         &BTreeSet::from(["cpu".to_string()]),
     )
@@ -158,6 +176,45 @@ async fn check_6_considers_only_the_compute_this_deployment_serves() {
     .unwrap();
     assert!(unpinned.iter().all(|c| !c.runtime_pinned), "{unpinned:?}");
     assert_eq!(unpinned.len(), cpu.len());
+}
+
+#[tokio::test]
+async fn check_6_does_not_fail_over_a_challenge_outside_the_served_set() {
+    // The function's own claim is that a gateway serving nothing has nothing
+    // to fail on. The first version broke that: it required `id` and
+    // `config.name` on every challenge *before* filtering by served compute,
+    // so one malformed entry for a compute type this deployment does not
+    // touch failed the whole check and blocked writes.
+    //
+    // Scope first, then demand fields.
+    let base = fake_tig().await;
+    let reader = reader(&base);
+    let block = latest_block(&base).await;
+    let pinned = pinned_images();
+
+    // Serving nothing: every challenge is out of scope, so nothing about
+    // their shape can matter.
+    assert!(
+        active_challenge_runtimes(&reader, &block, BLOCK_ROUND, &pinned, &BTreeSet::new())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    // Serving a type no live challenge has: same answer, and reached without
+    // reading a single challenge's name or id.
+    assert!(
+        active_challenge_runtimes(
+            &reader,
+            &block,
+            BLOCK_ROUND,
+            &pinned,
+            &BTreeSet::from(["fpga".to_string()])
+        )
+        .await
+        .unwrap()
+        .is_empty()
+    );
 }
 
 #[tokio::test]

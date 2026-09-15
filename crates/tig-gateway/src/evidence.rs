@@ -85,7 +85,18 @@ pub async fn confirmed_pool_player_id(
 /// refuse. `reviewed_local_override` is §13's own escape for the case where
 /// the hosted document is not reachable by design.
 pub async fn openapi_checksum(url: &str) -> Result<OpenApiObservation, String> {
-    let body = reqwest::get(url)
+    // Timed out, because §13 fails closed and a document that *hangs* rather
+    // than failing would hold the gate open indefinitely — a gateway that
+    // never starts is not the same as one that refuses to write, and only the
+    // second is a decision.
+    let http = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| format!("building the client: {e}"))?;
+    let body = http
+        .get(url)
+        .send()
         .await
         .map_err(|e| format!("fetching {url}: {e}"))?
         .error_for_status()
@@ -154,6 +165,7 @@ pub fn api_key_placement(present: bool, key_path: &Path) -> Result<ApiKeyPlaceme
 pub async fn active_challenge_runtimes(
     reader: &TigReadClient,
     block_id: &str,
+    block_round: u64,
     pinned_images: &BTreeSet<String>,
     served: &BTreeSet<String>,
 ) -> Result<Vec<ActiveChallengeRuntime>, String> {
@@ -175,25 +187,44 @@ pub async fn active_challenge_runtimes(
 
     let mut out = Vec::new();
     for (index, challenge) in challenges.iter().enumerate() {
+        let config = challenge
+            .get("config")
+            .ok_or_else(|| format!("challenge at index {index} has no config"))?;
+        let compute = config
+            .get("type")
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("challenge at index {index} has no config.type"))?;
+
+        // Scope first, then demand fields. The first version required `id`
+        // and `config.name` before filtering, so a malformed challenge for a
+        // compute type this deployment does not serve failed the whole check
+        // and blocked writes — contradicting this function's own claim that a
+        // gateway serving nothing has nothing to fail on.
+        if !served.contains(compute) {
+            continue;
+        }
+
+        // §5.1: active is `state.round_active <= block.details.round`. A
+        // challenge that activates in a future round is not one the decision
+        // engine considers, so requiring a pinned runtime for it would fail
+        // the gate over work the pool could not take even if it wanted to.
+        let round_active = challenge
+            .get("state")
+            .and_then(|state| state.get("round_active"))
+            .and_then(Value::as_u64)
+            .ok_or_else(|| format!("challenge at index {index} has no state.round_active"))?;
+        if round_active > block_round {
+            continue;
+        }
+
         let id = challenge
             .get("id")
             .and_then(Value::as_str)
             .ok_or_else(|| format!("challenge at index {index} has no id"))?;
-        let config = challenge
-            .get("config")
-            .ok_or_else(|| format!("challenge {id} has no config"))?;
         let name = config
             .get("name")
             .and_then(Value::as_str)
             .ok_or_else(|| format!("challenge {id} has no config.name"))?;
-        let compute = config
-            .get("type")
-            .and_then(Value::as_str)
-            .ok_or_else(|| format!("challenge {id} has no config.type"))?;
-
-        if !served.contains(compute) {
-            continue;
-        }
         out.push(ActiveChallengeRuntime {
             challenge_id: id.to_string(),
             runtime_pinned: pinned_images.contains(&format!("{name}_runtime")),
@@ -348,13 +379,14 @@ fn submission_from(input: &Value) -> Result<pool_workflow::PrecommitSubmission, 
 
 /// The collections each §13 check-5 read must carry, as TIG serves them.
 ///
-/// **Taken from live testnet, not from the fixtures.** `get-algorithms` is
-/// why: `fixtures/tig/v1` gives it a top-level `algorithms` key and TIG sends
-/// `codes`, `binarys` and `advances` with no `algorithms` at all (observed
-/// 2026-09-15, issue #28). Validating against the fixture would make the fake
-/// the authority on TIG's shape, which is the inversion check 5 exists to
-/// prevent — code that passes every test and fails the moment it meets the
-/// real API.
+/// **Taken from what TIG serves, not from the fixtures.** `get-algorithms` is
+/// why: `fixtures/tig/v1` gives it a top-level `algorithms` key, and the
+/// envelope §14 records — verified live in spike S1 and reconfirmed
+/// 2026-09-15 — carries `codes`, `binarys` and `advances` with no
+/// `algorithms` at all (issue #28 owns the v2 fixture). Validating against
+/// the fixture would make the fake the authority on the real API's shape,
+/// which is the inversion check 5 exists to prevent — code that passes every
+/// test and fails the moment it meets TIG.
 const REQUIRED_COLLECTIONS: &[(&str, &[&str])] = &[
     ("get-block", &["block"]),
     ("get-challenges", &["challenges"]),
@@ -368,17 +400,10 @@ const REQUIRED_COLLECTIONS: &[(&str, &[&str])] = &[
 
 /// §13 check 5: the required responses validate against required models.
 ///
-/// **What this validates, and what it does not.** It confirms each response
-/// carries the collections the pool reads from it. It is not a full model
-/// validation: the typed parsers live in `pool-snapshot` and
-/// `pool-controller`, and the gateway does not — and should not — depend on
-/// the controller to answer a question about its own readiness.
-///
-/// That is a real narrowing and it is worth naming. What it catches is the
-/// failure that actually happens: TIG renaming or removing a collection, so
-/// the pool's next read finds nothing where it expected everything. What it
-/// would miss is a field inside a collection changing meaning, which no
-/// shape check catches and which §15's review exists for.
+/// §13.4 records what this validates and what it does not: collection
+/// presence, not field-level model validation. In short — it catches TIG
+/// renaming or removing a collection, and misses a field inside one changing
+/// meaning, which no shape check catches at any depth.
 ///
 /// A response that does not arrive is an error, not an absent validation —
 /// `evaluate` fails an endpoint nobody validated, so a read that timed out

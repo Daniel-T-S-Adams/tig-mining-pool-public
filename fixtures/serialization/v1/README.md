@@ -42,10 +42,19 @@ produce.
 
 **What this establishes, and what it does not.** `expected_bytes` was taken
 from what the current code renders, so it cannot prove the rendering is what
-TIG accepts — that would be the code agreeing with itself. What established
-that is the protocol spike, which submitted these bodies to live testnet and
-had them confirmed (`docs/protocol_spike_report.md`). This pins the result so
-a *change* to the rendering has to be deliberate, and a build that would send
-different bytes than the reviewed ones cannot write. The hyperparameters deliberately mix an integer and a float, because
+TIG accepts — that would be the code agreeing with itself.
+
+What the protocol spike established is narrower than it is tempting to claim.
+It submitted §6.1 bodies to live testnet and had them confirmed
+(`docs/protocol_spike_report.md`), which verifies the envelope, the key order
+and the empty `track_id`. But the spike always sent
+`"hyperparameters": null` (`crates/spike/src/lib.rs`), so **no body carrying a
+hyperparameters object has ever been confirmed by TIG**, let alone one mixing
+an integer and a float.
+
+That part of this fixture is pinned from current code and is *unverified
+live*. It stays that way until slice 1's live run submits a body with typed
+hyperparameters, which is the step that closes it. Recording it as verified
+would be the fixture-integrity failure this file exists to prevent. The hyperparameters deliberately mix an integer and a float, because
 §6.6 copies the source benchmark's values at their own types and re-typing
 either is the failure this pins.

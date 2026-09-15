@@ -747,10 +747,16 @@ guarantee its one-line form suggests.
 
 ### 13.2 Check 3 is not performed, and says so
 
-Nothing in this repository resolves a container digest. The ten images §2 pins
-— the benchmarker master and worker, and the eight per-challenge runtimes —
-are what **members** run on their own machines. No component built here runs
-one, so there is nothing to resolve them against a registry for.
+No runtime component resolves a container digest. The ten images §2 pins —
+the benchmarker master and worker, and the eight per-challenge runtimes — are
+what **members** run on their own machines. Nothing built here runs one, so
+there is nothing for a gateway to resolve them against a registry for at
+startup.
+
+`scripts/pin-drift.sh` does resolve all ten, but it is an operator-run report
+and its result reaches no check: it answers "has a tag moved since the
+review", which is §15's question, not "may this process write now", which is
+§13's. See §16.
 
 The check is therefore satisfied, when it is satisfied at all, by an explicit
 acknowledgement: `[tig].unresolved_containers_acknowledged`, a reason rather
@@ -1082,3 +1088,31 @@ the step they skipped.
 
 No production upgrade follows upstream `main`, `latest`, or a mutable image tag
 without this process.
+
+## 16. Watching for drift
+
+§13's gate compares a running binary against **its pin**. It never consults
+TIG's current state, and must not: §13 makes moving a branch or a container
+tag something that is "never accepted automatically", so a gate checking
+against upstream would either follow it silently — defeating the pin — or fail
+permanently the moment TIG committed anything.
+
+That leaves a question nobody was asking: *has TIG moved since the review
+behind this pin?* It went unasked long enough for the pin to fall 45 commits
+behind and a new CPU challenge to go live unnoticed.
+
+`scripts/pin-drift.sh` asks it. Four comparisons against live TIG, all public
+reads: the pinned commit against the repository head, the pinned checksum
+against the published specification, each pinned digest against what its tag
+resolves to now, and the live active challenges against the pinned runtimes.
+`/pin-drift` runs it and reads the result.
+
+It is a **report**, not a gate:
+
+- it changes nothing, and gates nothing — §15 remains the only way a pin moves;
+- it is deliberately outside `make check`, because a green build must not
+  depend on TIG standing still; and
+- a comparison that could not run is reported as incomplete, never as clean.
+
+The division is that §13 protects one run of a binary, and this protects the
+project between runs.

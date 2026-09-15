@@ -11,9 +11,15 @@
 //! as "fine".
 //!
 //! The gateway reads TIG here even though `architecture.md` §4 gives it no
-//! read responsibilities. §13 is why: checks 4, 5, 6 and 9 cannot be answered
+//! read responsibilities. §13 is why: checks 5, 6 and 9 cannot be answered
 //! without reading, and `tig_client`'s `TigReader::Gateway` share exists for
 //! exactly this. Choosing work stays the controller's.
+//!
+//! Check 4 reads too, and not through that share: the published specification
+//! lives on the swagger host rather than the API, so it is fetched with this
+//! crate's own client. ADR-0006 allocates a share of *the API*, and counting
+//! check 4 against it would attribute a request to an allocation it never
+//! touches.
 
 use std::collections::BTreeSet;
 use std::path::Path;

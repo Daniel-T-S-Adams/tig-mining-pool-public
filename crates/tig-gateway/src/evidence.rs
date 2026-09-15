@@ -22,7 +22,7 @@ use serde_json::Value;
 use tig_client::TigReadClient;
 
 use crate::readiness::{
-    ActiveChallengeRuntime, ApiKeyPlacement, FixtureOutcome, OpenApiObservation,
+    ActiveChallengeRuntime, ApiKeyPlacement, FixtureOutcome, ModelValidation, OpenApiObservation,
 };
 
 /// §13 check 9: the pool player ID returned by confirmed data matches the
@@ -344,4 +344,79 @@ fn submission_from(input: &Value) -> Result<pool_workflow::PrecommitSubmission, 
         compute_type: text("compute_type")?,
         track_settings,
     })
+}
+
+/// The collections each §13 check-5 read must carry, as TIG serves them.
+///
+/// **Taken from live testnet, not from the fixtures.** `get-algorithms` is
+/// why: `fixtures/tig/v1` gives it a top-level `algorithms` key and TIG sends
+/// `codes`, `binarys` and `advances` with no `algorithms` at all (observed
+/// 2026-09-15, issue #28). Validating against the fixture would make the fake
+/// the authority on TIG's shape, which is the inversion check 5 exists to
+/// prevent — code that passes every test and fails the moment it meets the
+/// real API.
+const REQUIRED_COLLECTIONS: &[(&str, &[&str])] = &[
+    ("get-block", &["block"]),
+    ("get-challenges", &["challenges"]),
+    ("get-algorithms", &["codes", "binarys", "advances"]),
+    ("get-opow", &["opow"]),
+    (
+        "get-benchmarks",
+        &["precommits", "benchmarks", "proofs", "frauds"],
+    ),
+];
+
+/// §13 check 5: the required responses validate against required models.
+///
+/// **What this validates, and what it does not.** It confirms each response
+/// carries the collections the pool reads from it. It is not a full model
+/// validation: the typed parsers live in `pool-snapshot` and
+/// `pool-controller`, and the gateway does not — and should not — depend on
+/// the controller to answer a question about its own readiness.
+///
+/// That is a real narrowing and it is worth naming. What it catches is the
+/// failure that actually happens: TIG renaming or removing a collection, so
+/// the pool's next read finds nothing where it expected everything. What it
+/// would miss is a field inside a collection changing meaning, which no
+/// shape check catches and which §15's review exists for.
+///
+/// A response that does not arrive is an error, not an absent validation —
+/// `evaluate` fails an endpoint nobody validated, so a read that timed out
+/// cannot pass as a read that succeeded.
+pub async fn response_models(
+    reader: &TigReadClient,
+    block_id: &str,
+    player_id: &str,
+) -> Result<Vec<ModelValidation>, String> {
+    let mut out = Vec::new();
+    for (endpoint, required) in REQUIRED_COLLECTIONS {
+        let query = match *endpoint {
+            "get-block" => "/get-block?include_data=true".to_string(),
+            "get-benchmarks" => {
+                format!("/get-benchmarks?block_id={block_id}&player_id={player_id}")
+            }
+            other => format!("/{other}?block_id={block_id}"),
+        };
+        let (valid, detail) = match reader.get_json(&query).await {
+            Err(e) => (false, format!("read failed: {e}")),
+            Ok(body) => {
+                let missing: Vec<&str> = required
+                    .iter()
+                    .filter(|key| body.get(**key).is_none())
+                    .copied()
+                    .collect();
+                if missing.is_empty() {
+                    (true, String::new())
+                } else {
+                    (false, format!("missing {}", missing.join(", ")))
+                }
+            }
+        };
+        out.push(ModelValidation {
+            endpoint: (*endpoint).to_string(),
+            valid,
+            detail,
+        });
+    }
+    Ok(out)
 }

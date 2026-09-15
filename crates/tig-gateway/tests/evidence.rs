@@ -10,7 +10,7 @@ use tig_client::{ReadPolicy, TigReadClient, TigReader};
 
 use tig_gateway::evidence::{
     active_challenge_runtimes, api_key_placement, confirmed_pool_player_id, openapi_checksum,
-    serialization_fixtures,
+    response_models, serialization_fixtures,
 };
 
 const PINNED: &str = include_str!("../../../config/tig_integration.json");
@@ -229,4 +229,62 @@ fn check_7_pins_the_bytes_a_body_renders_to() {
     // And the hyperparameters keep their own types — §6.6 copies the source
     // benchmark's values, and re-typing either is the failure this pins.
     assert!(expected.contains(r#""alpha":7,"beta":0.25"#), "{expected}");
+}
+
+#[tokio::test]
+async fn check_5_validates_against_what_tig_serves_not_what_the_fixture_says() {
+    // The four endpoints where the fixture and live TIG agree pass.
+    //
+    // `get-algorithms` does not, and that is deliberate. `fixtures/tig/v1`
+    // gives it a top-level `algorithms` key; live testnet sends `codes`,
+    // `binarys` and `advances` with no `algorithms` at all (issue #28).
+    //
+    // Check 5 is written against TIG, because validating against the fixture
+    // would make the fake the authority on the real API's shape — code that
+    // passes every test and fails the moment it meets TIG. So the fake fails
+    // this one endpoint until the fixture is corrected, and this test says so
+    // rather than letting the discrepancy sit invisible.
+    let base = fake_tig().await;
+    let reader = reader(&base);
+    let block = latest_block(&base).await;
+
+    let validations = response_models(&reader, &block, POOL_PLAYER).await.unwrap();
+    assert_eq!(validations.len(), 5, "{validations:?}");
+
+    for v in &validations {
+        if v.endpoint == "get-algorithms" {
+            assert!(
+                !v.valid,
+                "the v1 fixture has `algorithms` where TIG has `codes`/`binarys`/`advances`; \
+                 if this now passes, issue #28 has been fixed and this test should be \
+                 updated to expect it: {v:?}"
+            );
+            assert!(v.detail.contains("missing"), "{v:?}");
+        } else {
+            assert!(v.valid, "{v:?}");
+            assert!(v.detail.is_empty(), "{v:?}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn check_5_reports_a_read_that_failed_as_invalid_not_as_absent() {
+    // `evaluate` fails an endpoint nobody validated, so the danger is not an
+    // endpoint reported invalid — it is one quietly missing from the list. A
+    // read that could not be made must still produce a row.
+    let base = fake_tig().await;
+    let reader = reader(&format!("{base}/nowhere"));
+    let validations = response_models(&reader, "block_100080", POOL_PLAYER)
+        .await
+        .unwrap();
+    assert_eq!(
+        validations.len(),
+        5,
+        "every endpoint reports: {validations:?}"
+    );
+    assert!(validations.iter().all(|v| !v.valid), "{validations:?}");
+    assert!(
+        validations.iter().all(|v| v.detail.contains("read failed")),
+        "{validations:?}"
+    );
 }

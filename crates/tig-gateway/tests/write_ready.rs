@@ -10,8 +10,9 @@
 use pool_domain::Network;
 use serde_json::json;
 use tig_gateway::readiness::{
-    ActiveChallengeRuntime, ApiKeyPlacement, Check, Evidence, FixtureOutcome, ModelValidation,
-    OpenApiObservation, Pins, ResolvedImage, acquired_upstream_commit, evaluate, pinned_network,
+    ActiveChallengeRuntime, ApiKeyPlacement, Check, Evidence, FixtureOutcome, ImageObservation,
+    ModelValidation, OpenApiObservation, Pins, ResolvedImage, acquired_upstream_commit, evaluate,
+    pinned_network,
 };
 
 /// Makes one piece of evidence ungatherable, for the fail-closed cases.
@@ -60,15 +61,19 @@ fn passing(pins: &Pins) -> Evidence {
     Evidence {
         config_network: Ok(Network::Testnet),
         upstream_commit: Ok(pins.upstream_commit.clone()),
-        resolved_images: Ok(pins
-            .image_digests
-            .iter()
-            .map(|(reference, digest)| ResolvedImage {
-                reference: reference.clone(),
-                manifest_digest: digest.clone(),
-                platform: pins.platform.clone(),
-            })
-            .collect()),
+        resolved_images: Ok(ImageObservation {
+            resolved: Some(
+                pins.image_digests
+                    .iter()
+                    .map(|(reference, digest)| ResolvedImage {
+                        reference: reference.clone(),
+                        manifest_digest: digest.clone(),
+                        platform: pins.platform.clone(),
+                    })
+                    .collect(),
+            ),
+            reviewed_unresolved: None,
+        }),
         openapi: Ok(OpenApiObservation {
             hosted_sha256: Some(pins.openapi_sha256.clone()),
             reviewed_local_override: None,
@@ -206,7 +211,8 @@ fn check_2_compares_the_deployments_declaration_against_the_compiled_in_pin() {
     //
     // §13 asks for "the acquired upstream source commit", but nothing in this
     // repository acquires TIG's source — §15 makes the upgrade a reviewed
-    // human procedure ending in an edit to `config/tig_integration.json`. So the
+    // human procedure ending in an edit to `config/tig_integration.json`, a
+    // restated declaration in every deployment and a rebuild. So the
     // observation is what the deployment *declares* was acquired, and the pin
     // is compiled into the binary from that same file.
     //
@@ -235,13 +241,72 @@ fn check_2_compares_the_deployments_declaration_against_the_compiled_in_pin() {
 }
 
 #[test]
+fn check_3_resolving_nothing_fails_unless_it_is_acknowledged() {
+    // Three states, and only one of them is silence.
+    //
+    // §13 check 4 offers "an explicit reviewed local schema override" in its
+    // own text. Check 3 offers nothing of the kind, so the acknowledgement
+    // below is a documented deviation — §13.2 records it, and issue #20 owns
+    // removing it by resolving digests for real.
+    let pins = pins();
+
+    // Nothing resolved, nothing said. This is the state a deployment is in
+    // before anyone has thought about it, and it must not write.
+    let mut evidence = passing(&pins);
+    evidence.resolved_images = Ok(ImageObservation {
+        resolved: None,
+        reviewed_unresolved: None,
+    });
+    only(evidence, Check::ContainerDigests);
+
+    // Acknowledged. The gate passes, and the reason comes back out with the
+    // proof — a deviation nobody can see from the outside is one that
+    // outlives the reason for it.
+    let mut evidence = passing(&pins);
+    evidence.resolved_images = Ok(ImageObservation {
+        resolved: None,
+        reviewed_unresolved: Some("slice 1 runs no pinned container; issue #20".to_string()),
+    });
+    let ready = evaluate(&pins, &evidence).expect("an acknowledged deployment may write");
+    assert_eq!(
+        ready.containers_unresolved(),
+        Some("slice 1 runs no pinned container; issue #20")
+    );
+
+    // Resolved for real. No acknowledgement, and none reported.
+    let ready = evaluate(&pins, &passing(&pins)).expect("resolved digests satisfy check 3");
+    assert_eq!(
+        ready.containers_unresolved(),
+        None,
+        "a check that was actually performed must not look acknowledged"
+    );
+}
+
+#[test]
+fn check_3_an_acknowledgement_does_not_excuse_digests_that_did_resolve() {
+    // The acknowledgement answers "this deployment resolved none", not "ignore
+    // what it found". A deployment that both resolved digests and carries an
+    // acknowledgement is still held to the digests — otherwise the field
+    // becomes a way to silence a real mismatch.
+    let pins = pins();
+    let mut evidence = passing(&pins);
+    let mut observation = evidence.resolved_images.unwrap();
+    observation.resolved.as_mut().unwrap()[0].manifest_digest =
+        "sha256:0000000000000000000000000000000000000000000000000000000000000000".to_string();
+    observation.reviewed_unresolved = Some("acknowledged anyway".to_string());
+    evidence.resolved_images = Ok(observation);
+    only(evidence, Check::ContainerDigests);
+}
+
+#[test]
 fn check_3_a_container_that_resolves_to_a_different_digest() {
     let pins = pins();
     let mut evidence = passing(&pins);
-    let mut images = evidence.resolved_images.unwrap();
+    let mut observation = evidence.resolved_images.unwrap();
+    let images = observation.resolved.as_mut().unwrap();
     images[0].manifest_digest =
         "sha256:0000000000000000000000000000000000000000000000000000000000000000".to_string();
-    evidence.resolved_images = Ok(images);
+    evidence.resolved_images = Ok(observation);
     only(evidence, Check::ContainerDigests);
 }
 
@@ -251,9 +316,10 @@ fn check_3_a_container_resolved_for_the_wrong_platform() {
     // architecture; §13 pins the platform as well for that reason.
     let pins = pins();
     let mut evidence = passing(&pins);
-    let mut images = evidence.resolved_images.unwrap();
+    let mut observation = evidence.resolved_images.unwrap();
+    let images = observation.resolved.as_mut().unwrap();
     images[0].platform = "amd64-but-pinned-elsewhere".to_string();
-    evidence.resolved_images = Ok(images);
+    evidence.resolved_images = Ok(observation);
     only(evidence, Check::ContainerDigests);
 }
 
@@ -263,9 +329,10 @@ fn check_3_a_container_that_did_not_resolve_at_all() {
     // from the resolved set must fail, not vanish from the check.
     let pins = pins();
     let mut evidence = passing(&pins);
-    let mut images = evidence.resolved_images.unwrap();
+    let mut observation = evidence.resolved_images.unwrap();
+    let images = observation.resolved.as_mut().unwrap();
     images.remove(0);
-    evidence.resolved_images = Ok(images);
+    evidence.resolved_images = Ok(observation);
     only(evidence, Check::ContainerDigests);
 }
 

@@ -451,6 +451,59 @@ fn an_abbreviated_or_malformed_upstream_commit_does_not_load() {
 }
 
 #[test]
+fn an_acknowledgement_that_says_nothing_does_not_load() {
+    // §13.2: the acknowledgement that lets check 3 pass is a reason, not a
+    // flag, because it is what a later operator reads to decide whether the
+    // deviation still holds. An empty string satisfies `Some(_)` and would
+    // pass the check while recording nothing — the shape of someone who
+    // wanted the failure to stop rather than to be understood.
+    let scratch = Scratch::new("ack-empty");
+    for bad in ["", "   ", "\t"] {
+        let mut toml = valid_toml(&scratch.password_file())
+            .replace("user = \"pool_migration\"", "user = \"pool_gateway\"");
+        toml.push_str(&format!(
+            "\n[tig]\nbase_url = \"http://127.0.0.1:8080\"\nplayer_id = \
+             \"0x2935a721068da756b28cba896efdb64e8909dfae\"\n\
+             acquired_upstream_commit = \"ad08d1ea001a73ff5aab3b556d7f59246fece14e\"\n\
+             unresolved_containers_acknowledged = \"{bad}\"\n"
+        ));
+        let Err(err) = Config::load(scratch.write(&toml), Binary::TigGateway) else {
+            panic!("{bad:?} must not load");
+        };
+        assert_invalid(err, "must say why");
+    }
+
+    // A real reason loads, and absence loads too — absence is the default,
+    // and it is `evaluate` that turns it into a failed check rather than
+    // configuration refusing to start.
+    for ok in [Some("slice 1 runs no pinned container; issue #20"), None] {
+        let mut toml = valid_toml(&scratch.password_file())
+            .replace("user = \"pool_migration\"", "user = \"pool_gateway\"");
+        toml.push_str(
+            "\n[tig]\nbase_url = \"http://127.0.0.1:8080\"\nplayer_id = \
+             \"0x2935a721068da756b28cba896efdb64e8909dfae\"\n\
+             acquired_upstream_commit = \"ad08d1ea001a73ff5aab3b556d7f59246fece14e\"\n",
+        );
+        if let Some(reason) = ok {
+            toml.push_str(&format!(
+                "unresolved_containers_acknowledged = \"{reason}\"\n"
+            ));
+        }
+        let config = Config::load(scratch.write(&toml), Binary::TigGateway)
+            .unwrap_or_else(|e| panic!("{ok:?} must load: {e}"));
+        assert_eq!(
+            config
+                .tig
+                .as_ref()
+                .unwrap()
+                .unresolved_containers_acknowledged
+                .as_deref(),
+            ok
+        );
+    }
+}
+
+#[test]
 fn database_url_is_built_from_the_password_file() {
     let scratch = Scratch::new("url");
     let config = Config::load(
@@ -610,6 +663,7 @@ fn the_fake_tig_test_reads_the_endpoint_and_not_the_network() {
         assert!(
             pool_config::TigConfig {
                 acquired_upstream_commit: "ad08d1ea001a73ff5aab3b556d7f59246fece14e".to_string(),
+                unresolved_containers_acknowledged: None,
                 base_url: local.to_string(),
                 player_id: "0x2935a721068da756b28cba896efdb64e8909dfae".to_string(),
             }
@@ -636,6 +690,7 @@ fn the_fake_tig_test_reads_the_endpoint_and_not_the_network() {
         assert!(
             !pool_config::TigConfig {
                 acquired_upstream_commit: "ad08d1ea001a73ff5aab3b556d7f59246fece14e".to_string(),
+                unresolved_containers_acknowledged: None,
                 base_url: remote.to_string(),
                 player_id: "0x2935a721068da756b28cba896efdb64e8909dfae".to_string(),
             }

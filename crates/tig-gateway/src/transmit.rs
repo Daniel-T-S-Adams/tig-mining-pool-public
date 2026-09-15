@@ -438,8 +438,8 @@ mod tests {
     /// one exists, since `WritePermit` has no public constructor.
     fn permit() -> crate::write_gate::WritePermit {
         use crate::readiness::{
-            ActiveChallengeRuntime, ApiKeyPlacement, Evidence, FixtureOutcome, ModelValidation,
-            OpenApiObservation, Pins, ResolvedImage, evaluate,
+            ActiveChallengeRuntime, ApiKeyPlacement, Evidence, FixtureOutcome, ImageObservation,
+            ModelValidation, OpenApiObservation, Pins, ResolvedImage, evaluate,
         };
         use pool_domain::Network;
 
@@ -454,11 +454,14 @@ mod tests {
         let evidence = Evidence {
             config_network: Ok(Network::Testnet),
             upstream_commit: Ok(pins.upstream_commit.clone()),
-            resolved_images: Ok(vec![ResolvedImage {
-                reference: "img".to_string(),
-                manifest_digest: "sha256:aa".to_string(),
-                platform: "linux/arm64".to_string(),
-            }]),
+            resolved_images: Ok(ImageObservation {
+                resolved: Some(vec![ResolvedImage {
+                    reference: "img".to_string(),
+                    manifest_digest: "sha256:aa".to_string(),
+                    platform: "linux/arm64".to_string(),
+                }]),
+                reviewed_unresolved: None,
+            }),
             openapi: Ok(OpenApiObservation {
                 hosted_sha256: Some("abc".to_string()),
                 reviewed_local_override: None,

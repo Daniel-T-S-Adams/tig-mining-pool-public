@@ -718,7 +718,8 @@ branch or container tag is never accepted automatically.
 Check 2 is written as a comparison between the commit that was *acquired* and
 the commit that is *pinned*. Nothing in this repository acquires TIG's source:
 §15 makes an upgrade a reviewed human procedure that ends by editing
-`config/tig_integration.json`, restating the declaration and rebuilding. There is therefore no machine-produced record
+`config/tig_integration.json`, restating the declaration and rebuilding.
+There is therefore no machine-produced record
 of what a build was made against, and a check comparing the pinned file to
 itself would pass however wrong it was.
 
@@ -743,6 +744,34 @@ passes. Closing that requires the build to acquire the source itself, which is
 Until then check 2 verifies the deployment against the build, not the build
 against upstream, and this section is what stops that reading as the stronger
 guarantee its one-line form suggests.
+
+### 13.2 Check 3 is not performed, and says so
+
+Nothing in this repository resolves a container digest. The ten images §2 pins
+— the benchmarker master and worker, and the eight per-challenge runtimes —
+are what **members** run on their own machines. No component built here runs
+one, so there is nothing to resolve them against a registry for.
+
+The check is therefore satisfied, when it is satisfied at all, by an explicit
+acknowledgement: `[tig].unresolved_containers_acknowledged`, a reason rather
+than a flag. It is absent by default and absence **fails** check 3 — a
+deployment that has said nothing about the check has not passed it. When
+present, the reason is carried to `WriteReady` and reported by the gateway, so
+a pass granted on an acknowledgement is never indistinguishable from one
+granted on evidence.
+
+The acknowledgement is narrow on purpose. It answers "this deployment resolved
+none", not "ignore what it found": digests that *did* resolve and disagree
+still fail, or the field would be a way to silence a real mismatch.
+
+**This is a deviation, not a reading.** Check 4 offers an override in its own
+text — "or an explicit reviewed local schema override is active" — and check 3
+offers nothing of the kind. What check 3 exists to catch is tag drift, TIG
+re-pointing a version at different bytes, and that is a real supply-chain
+concern the moment anything here runs one of those containers.
+[Issue #20](https://github.com/Daniel-T-S-Adams/tig-mining-pool-public/issues/20)
+owns resolving digests for real and deleting this section along with the field,
+and belongs with the slice that first runs a pinned container.
 
 ## 14. Known upstream discrepancies at this pin
 

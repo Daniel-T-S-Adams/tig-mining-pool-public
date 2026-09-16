@@ -163,18 +163,23 @@ psql "SELECT a.attempt_no, coalesce(a.outcome, 'STILL UNRESOLVED') AS outcome,
 # recovery, and this run showed why that is wrong: the kill landed before the
 # request left, TIG holds nothing for the tuple, and refusing to guess is
 # exactly what §10 asks for.
+# "Recovered by finding the write" is `reconciled_at`, not a benchmark id on
+# the attempt.
+#
+# `migrations/0004` defines `reconciled_at` as when §10 reconciliation settled
+# an ambiguity, and constrains it to a settled outcome — so it marks exactly
+# recovery-by-finding, and a plain transmit never sets it.
+#
+# The obvious-looking predicate, `ACCEPTED` with a non-null `benchmark_id`, is
+# **unsatisfiable here**: `migrations/0003` forces a precommit intent's
+# `benchmark_id` to NULL, and `0004`'s trigger copies the intent's value at
+# INSERT and freezes it. Slice 1 transmits precommits only, so that branch
+# could never fire and a successful recovery would have fallen through to the
+# count check below and printed FAIL — inverting K4's verdict on the one path
+# it exists to certify.
 settled="$(psql "SELECT count(*) FROM pool.tig_write_attempt
                   WHERE attempt_id = '$crashed_attempt'::uuid
-                    AND outcome = 'ACCEPTED' AND benchmark_id IS NOT NULL")"
-if [[ "$settled" == "1" ]]; then
-    echo
-    echo "recovered by finding the write: the attempt settled ACCEPTED with the"
-    echo "benchmark id §10's search recovered from a confirmed read."
-    echo "G2 expects exactly one entry for this tuple; confirm with the §10 scan."
-    echo
-    echo "gateway log: $log"
-    exit 0
-fi
+                    AND outcome = 'ACCEPTED' AND reconciled_at IS NOT NULL")"
 
 # Before reading the counts: did the restarted gateway actually run §10's
 # search? A gateway that never got that far — write gate refused, database
@@ -184,7 +189,7 @@ fi
 #
 # The observable is its own log: a pass that reached this intent emits an
 # outcome line for it, whatever it decided.
-if ! grep -q '"event":"gateway.intent.outcome"' "$log" 2>/dev/null; then
+if [[ "$settled" != "1" ]] && ! grep -q '"event":"gateway.intent.outcome"' "$log" 2>/dev/null; then
     echo "INCOMPLETE: the restarted gateway never reached this intent." >&2
     echo "No pass decided anything, so §10's search did not run and the state" >&2
     echo "below is the crash's, not a recovery's. Gateway log: $log" >&2
@@ -192,10 +197,9 @@ if ! grep -q '"event":"gateway.intent.outcome"' "$log" 2>/dev/null; then
     exit 2
 fi
 
-echo
-echo "the attempt is still unresolved. Whether that is correct depends on"
-echo "whether the write is at TIG, which is what the counts tell apart:"
-
+# G2: "exactly one where a write reached TIG, and exactly zero where it did
+# not". Both branches below read this count — the recovered one to prove there
+# is no duplicate, the unresolved one to prove there is nothing to have found.
 tuple="$(psql "SELECT d.anchor_block_id || ' ' || d.selected_challenge || ' ' ||
                       d.selected_algorithm
                  FROM pool.precommit_decision d
@@ -245,6 +249,27 @@ if [[ -z "$found" ]]; then
 fi
 count="${found%% *}"
 echo "  TIG holds $count precommit(s) for it"
+
+if [[ "$settled" == "1" ]]; then
+    # Recovered by finding the write. This is the branch where a duplicate is
+    # possible — the pool sent, crashed, and searched — so G2's "exactly one"
+    # is checked here rather than left to a separate run.
+    if [[ "$count" == "1" ]]; then
+        echo
+        echo "recovered by finding the write: §10's search settled the attempt from"
+        echo "a confirmed read, and TIG holds exactly one precommit for the tuple."
+        echo "That is G2's 'exactly one where a write reached TIG'."
+        echo
+        echo "gateway log: $log"
+        exit 0
+    fi
+    echo >&2
+    echo "FAIL: the attempt settled but TIG holds $count precommits for the tuple." >&2
+    echo "G2 requires exactly one; more is the duplicate §10 and invariant 14" >&2
+    echo "exist to prevent, and fewer means the search settled against nothing." >&2
+    echo "Gateway log: $log" >&2
+    exit 1
+fi
 
 if [[ "$count" == "0" ]]; then
     echo

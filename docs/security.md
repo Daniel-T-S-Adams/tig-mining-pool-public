@@ -164,15 +164,35 @@ The signer receives only immutable approved intents, allow-lists the Base chain
 and TIG token contract, enforces transaction/rolling/hot-balance limits, and
 records the nonce and signed transaction hash before broadcast. The
 member-custody signer additionally requires the approved policy state for the
-transfer's cause and **unconditional multi-person authorization** — every
-transfer, at any amount, with no threshold. This section owns that rule;
-`accounting.md` §12.4 points here rather than restating it, and thresholds
-there govern operating custody only.
+transfer's cause and **multi-person authorization for every transfer except a
+member withdrawal within ADR 0009's per-member caps**. This section owns that
+rule; `accounting.md` §12.4 points here rather than restating it, and
+thresholds there govern operating custody only.
 
-That control guarded every collateral movement before ADR 0008
-merged the pots, and merging them widened what one signature reaches rather
-than narrowing it, so relaxing it here would weaken a check while the reason
-to keep it grew.
+That control guarded every collateral movement before ADR 0008 merged the
+pots, and merging them widened what one signature reaches rather than
+narrowing it. It was therefore unconditional — every transfer, at any amount,
+with no threshold — until ADR 0009, and the argument for keeping it that way
+is recorded here rather than deleted: relaxing it weakens a check while the
+reason to keep it grows.
+
+**What ADR 0009 changed, and what it did not.** A member withdrawal is signed
+with no human authorization when the amount is at or below the per-transaction
+cap and the member's rolling seven-day total stays at or below the weekly cap;
+both caps are per member and both are versioned policy. Every other transfer
+out of member custody — a larger withdrawal, and `accounting.md` §8.6's sweep
+of pool value to operating custody — keeps unconditional multi-person
+authorization. Operating-custody thresholds are unchanged.
+
+The relaxation is bounded by what it can reach. Under ADR 0011 a member's
+withdrawal destination is the wallet that authenticated the session and cannot
+be changed, so the automated path can only ever move a member's own money to
+that member's own address. A compromised member session is therefore not a
+theft; a compromised *signing key* still is, and the caps do nothing about it,
+because a key holder signs directly and the signer's limits are never
+consulted. ADR 0009 records that the owner accepts that exposure for v0 and
+has declined to bound it with a hot-wallet limit, which is the control named
+in the paragraph above that would.
 
 It signs exactly two transfer kinds: a member withdrawal to that member's
 verified address, and `accounting.md` §8.6's sweep of pool value to the one

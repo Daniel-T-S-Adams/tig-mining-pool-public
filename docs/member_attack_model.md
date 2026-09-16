@@ -81,9 +81,11 @@ small one.
 
 It is not confirmed. The pool must read the live value and verify exactly how
 many penalties a benchmark can incur before accepting public member
-collateral; `accounting.md` §14 already holds the §11.3–§11.5 collateral
-policy as an unanswered owner decision that no implementation may present as
-settled. `tig_integration.md` §14.1 shows why verification is not a
+collateral. That requirement no longer rests on `accounting.md` §14, whose
+collateral hold ADR 0010 lifted by settling the §11.3–§11.5 policy: it now
+stands on its own, and it is the reason a settled formula is not yet a settled
+reserve. `accounting.md` §11.5 points back here for exactly this.
+`tig_integration.md` §14.1 shows why verification is not a
 formality: the code that applies a penalty sits behind `Context` hooks absent
 from the pinned tree, so the basis cannot be read off the pinned source and
 must be established on testnet or by written TIG confirmation. Until then it

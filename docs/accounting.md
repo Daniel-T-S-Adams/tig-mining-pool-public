@@ -726,12 +726,23 @@ B[t]       = proposed num_bundles for track t
 P[s]       = live config.reports.penalty_amount at snapshot s
 F[s,t]     = exact precommit fee implied by live challenge config and B[t]
 X[policy]  = charge reserved for one chargeable failed benchmark
+M[m]       = member m's collateral multiplier, default 1 (ADR 0010)
 
 method_reserve[s,t] = P[s] * B[t]
-assignment_reserve[s,t] = method_reserve[s,t] + F[s,t] + X[policy]
+assignment_reserve[m,s,t] = M[m] * method_reserve[s,t] + F[s,t] + X[policy]
 
-precommit_reserve = max(assignment_reserve[s,t] for every proposed track t)
+precommit_reserve = max(assignment_reserve[m,s,t] for every proposed track t)
 ```
+
+`M[m]` is set by the pool, never by the member, in the range `0 < M[m] <= 1`,
+and is versioned policy in the same append-only form as §5's fee policy. It
+scales the method reserve **only**: `F` is an outlay the pool certainly makes
+and `X` is a charge it has already decided to levy, so neither is a risk that
+trust can discount. The value is read when the assignment reserve is computed
+and fixed into that reservation; a later change to `M[m]` never reaches an
+open reservation, in either direction. ADR 0010 records the decision, what the
+uncovered `(1 - M[m]) * P[s] * B[t]` costs the pool on a slash, and why this
+is the trust-label mechanism §14 and `mining_system.md` §11 held open.
 
 The maximum is necessary because TIG selects the track only after the
 precommit. The pool atomically reserves that amount from the member's
@@ -825,12 +836,17 @@ several weeks of public notice, and that the pause above — which stops new
 precommits the moment the value changes — bounds what is exposed to
 benchmarks already open when a change lands.
 
-This is recorded as the owner's position, not as settled policy, and it does
-not lift §14's hold: that section still holds the §11.3–§11.5 collateral
-policy as an unanswered owner decision, and no implementation may accept
-public member collateral until it is answered. `CLAUDE.md` reserves
-security-deposit decisions to an explicit human decision, and this section
-records one rather than deriving it.
+This is recorded as the owner's position on the exposure, not as a derived
+result. §14's collateral hold has since been lifted — ADR 0010 settled the
+§11.3–§11.5 policy as §11.4 with a per-member multiplier — but that settles
+the *formula*, not the two premises below, and it does not make this position
+into a proof. One precondition for accepting public member collateral
+therefore survives the lifting of §14's hold: the penalty **basis** must be
+established, per
+[member_attack_model.md](member_attack_model.md)'s section on the same
+formula. A settled formula over an unverified basis is not a settled reserve.
+`CLAUDE.md` reserves security-deposit decisions to an explicit human decision,
+and this section records one rather than deriving it.
 
 Two premises it rests on are **not established**, and the position is taken
 knowingly rather than derived from them:
@@ -1212,31 +1228,49 @@ unencumbered amount is refused with the available figure, never partially
 filled: a partial fill would silently choose an amount for the member, which
 is what this model exists to stop doing.
 
+**Payable is not the same as unattended.** The gates above decide whether a
+withdrawal may happen at all; ADR 0009's per-member caps decide only whether a
+payable one is signed without a human. A withdrawal at or below the
+per-transaction cap whose rolling seven-day member total stays at or below the
+weekly cap is signed automatically; anything larger keeps `security.md` §3.4's
+multi-person authorization and waits for it. Exceeding a cap is never a
+refusal and never a partial fill — the request stands and is authorized by a
+person. §12.4 carries the signer-side rule.
+
 The pool pays Base gas as an operating cost and the exact TIG liability is not
 reduced for gas.
 
 ### 12.2 Destination authorization
 
-The withdrawal destination is an account setting, never a worker setting.
-Under ADR 0008 a withdrawal is member-initiated, which makes account
-compromise the direct route to a member's funds — these controls carry more
-weight than they did when payout went automatically to a long-verified
-address. Before public funds the account system must require:
+**The destination is the wallet that authenticated the session** (ADR 0011).
+It is not an account setting, not a worker setting, and there is no operation
+that changes it. Under ADR 0008 a withdrawal is member-initiated, which made
+account compromise the direct route to a member's funds; hardwiring the
+destination removes that route rather than guarding it, because a compromised
+session can only ever send a member's own money to that member's own address.
 
-- a verified Base address linked through a domain-separated EIP-191 or EIP-712
-  signature containing pool domain, member ID, chain ID, address, random nonce,
-  purpose, and expiry;
-- authenticated account access plus recent reauthentication and phishing-
-  resistant MFA/passkey for address change;
+The account system must require:
+
+- a Base address proved by a domain-separated EIP-191 or EIP-712 signature
+  containing pool domain, chain ID, address, random nonce, purpose, and
+  expiry. That address *is* the member identity, so it is not carried
+  separately in the signed payload; and
 - one-time nonces and exact-domain validation to prevent signature reuse on a
-  different pool or chain; and
-- a 48-hour security delay and out-of-band notification after destination
-  change, during which withdrawals for that member are held.
+  different pool or chain.
 
-The service never accepts a destination from a worker credential or unaudited
-operator edit. A member can explicitly request a withdrawal hold. A missing,
-invalid, or temporarily held destination leaves the amount in the member's
-balance and affects no other member.
+The address-change controls this section previously carried — reauthentication
+and phishing-resistant MFA or a passkey for a change, a 48-hour security delay,
+and out-of-band notification — are not listed because there is no change
+operation to guard. ADR 0011 records what that costs: a member who loses
+control of their wallet loses their balance permanently, and with it the
+authority `member_protocol.md` §3.3 gives the member account to recover a
+worker. The member terms required by `pre_build_checklist.md` §9 must say so
+before a member can deposit.
+
+The service never accepts a destination from a worker credential, a
+member-supplied field, or an unaudited operator edit. A member can explicitly
+request a withdrawal hold. A held destination leaves the amount in the
+member's balance and affects no other member.
 
 ### 12.3 Deterministic withdrawal intents
 
@@ -1286,12 +1320,21 @@ the private key. The signer:
 - uses one serialized nonce lane per signing address;
 - records transaction nonce and signed transaction hash before broadcast;
 - never substitutes a destination or amount during retry; and
-- enforces per-transaction, rolling daily, and hot-wallet limits. Multi-person
-  authorization is `security.md` §3.4's rule and is not restated here: it is
-  **unconditional** for every member-custody transfer, and thresholds apply
-  only to operating custody. One pot means a single signature would otherwise
-  move collateral-backed value whenever an amount fell below a configured
-  line, and which amounts those are would be an implementer's choice.
+- enforces per-transaction, rolling, and hot-wallet limits. Multi-person
+  authorization is `security.md` §3.4's rule and is not restated here. For
+  member custody it is required for every transfer **except** a member
+  withdrawal within ADR 0009's per-member caps: at or below the
+  per-transaction cap, with the member's rolling seven-day withdrawn total
+  also at or below the weekly cap. Both caps are versioned policy read by the
+  signer, not constants in it, and a transfer that exceeds either is signed
+  only with authorization. Thresholds for operating custody are unchanged.
+  The hot-wallet limit is a capability the signer must have and a value the
+  owner has not set: ADR 0009 declines one for v0 and records what that
+  accepts. An unset limit is not an absent control — it must be configurable
+  and reported, so setting it later is policy rather than a code change.
+  One pot means the signer must evaluate these caps against the member's own
+  recent history rather than the amount alone — which amounts qualify is
+  policy, never an implementer's choice.
 
 An ambiguous broadcast is reconciled by transaction hash, signer nonce, receipt,
 and token `Transfer` event. A fee replacement uses the same nonce and exact
@@ -1371,9 +1414,14 @@ Before and after every batch, enforce:
 17. a tier activation and its non-refundable fee post atomically;
 18. tier removal or repurchase never releases existing financial exposure;
 19. the same outcome cannot consume `X` or a method reserve twice under one
-    policy reason; and
+    policy reason;
 20. settled earnings count zero toward `eligible_collateral` until their round
-    has matured under §11.7.
+    has matured under §11.7; and
+21. aggregate uncovered method exposure — the sum of
+    `(1 - M[m]) * P[s] * B[t]` over every open reservation — is reported, not
+    merely derivable. A multiplier below 1 is the pool choosing to stand
+    behind a member (§11.4, ADR 0010); the amount it stands behind must be
+    visible before a slash lands, not reconstructed after one.
 
 Daily reconciliation compares:
 
@@ -1385,7 +1433,11 @@ Daily reconciliation compares:
   liabilities versus member custody's coverage inequality (§13 item 12), with
   each named margin term accounted for;
 - withdrawal and sweep intents versus signer nonces, transactions, receipts,
-  and events; and
+  and events;
+- aggregate uncovered method exposure (§13 item 21) against the pool's own
+  funds, and each member's rolling seven-day withdrawn total against ADR
+  0009's weekly cap, so an automated path that has stopped binding is seen;
+  and
 - ledger cached balances versus a journal rebuild.
 
 ## 14. Owner decisions required
@@ -1403,26 +1455,41 @@ The owner has confirmed:
    automatic;
 4. the pool pays Base ETH gas for member transfers without deducting it from a
    member's earned TIG;
-5. a changed payout address is held for 48 hours with out-of-band
-   notification; and
-6. one member balance holding both deposits and settled earnings, withdrawable
+5. one member balance holding both deposits and settled earnings, withdrawable
    by member request up to the unencumbered amount, and held in one member
    custody address separate from the reward wallet and from operating funds
-   (§11.7, ADR 0008).
+   (§11.7, ADR 0008);
+6. **the collateral policy is §11.4 as written** — the method reserve is
+   `P[s] * B[t]` with `P` read live from the decision snapshot. `10 TIG` is
+   what `P` reads today, not a constant, and the fixed-per-benchmark deposit
+   this section previously rejected stays rejected (ADR 0010);
+7. a pool-set per-member collateral multiplier `M[m]`, default 1, range
+   `0 < M[m] <= 1`, scaling the method reserve only (§11.4, ADR 0010);
+8. member withdrawals signed without human authorization at or below
+   `10_000 TIG` per transaction and `10_000 TIG` per member per rolling seven
+   days, both versioned policy, with multi-person authorization kept for
+   everything above and for every other member-custody transfer. The owner
+   accepts, for v0, that a compromise of the member-custody signing key takes
+   all member funds, and has declined to bound it with a hot-wallet limit
+   (§12.1, §12.4, `security.md` §3.4, ADR 0009); and
+9. the member's connected wallet is both the account identity and the
+   withdrawal destination, unchangeable, with no account recovery
+   (§12.2, ADR 0011). This supersedes the earlier confirmation that a changed
+   payout address is held for 48 hours with out-of-band notification: there is
+   no address change to hold, and the pool holds no contact channel to notify.
 
-The remaining decisions are:
+The remaining decision is:
 
-1. the dynamic slashable-deposit and malicious-work policy in sections
-   11.3-11.5. A fixed `10 TIG` per benchmark is explicitly not accepted because
-   direct method-verification exposure scales with `num_bundles` and TIG's live
-   report penalty. The threats and unresolved evidence/consequence choices are
-   enumerated in [member_attack_model.md](member_attack_model.md); and
-2. the trust-label mechanism that would let a trusted member's allowed bundle
-   count exceed what their collateral alone permits. The rule itself belongs
-   to `mining_system.md` §11, which records it; this entry exists because
-   §11.4's formula is what such a mechanism would relax. Nothing may raise an
-   admission limit above that formula until it lands.
+1. numerical `X` — the charge reserved for one chargeable failed benchmark. It
+   is a term of §11.4's assignment reserve, so a member's exact collateral
+   requirement is determined only once it has a value. `mining_system.md` §11
+   carries it, with `J[k]` and `internal_pool_unverified_limit`, among the
+   values required before full product implementation. The threats and
+   unresolved evidence/consequence choices behind the malicious-work side are
+   enumerated in [member_attack_model.md](member_attack_model.md).
 
-Until decision 1 is answered, testnet may exercise deposit fixtures using
-explicit fixture policy values, but no implementation may accept public member
-collateral or present the proposal as settled policy.
+Decisions 6 and 7 lift this section's former prohibition: an implementation
+may accept member collateral under §11.4 and may present it as settled policy.
+The public-funds gates in `pre_build_checklist.md` §9 are untouched and still
+govern real member money, and testnet continues to exercise deposit fixtures
+with explicit fixture policy values.

@@ -831,11 +831,18 @@ statistics.
 
 ## 17. Decisions left to later documents
 
-This protocol deliberately does not choose the member website login mechanism,
-the account-recovery HTTP route and schema (the recovery proof itself is
-specified in section 3.3), deposit custody details, numerical
-`J[k]`/`X`/global-headroom values, relational schema, artifact-store product,
-deployment topology, or production retention capacity.
+This protocol deliberately does not choose the account-recovery HTTP route and
+schema (the recovery proof itself is specified in section 3.3), deposit
+custody details, numerical `J[k]`/`X`/global-headroom values, relational
+schema, artifact-store product, deployment topology, or production retention
+capacity.
+
+The member website login mechanism, which this section previously also left
+open, **is now chosen**: the member connects a wallet and proves control of
+its Base address, and that address is the member account (ADR 0011). §3.3's
+`WORKER_RECOVERY` ticket is therefore authorized by a wallet signature. There
+is no recovery of the account itself, so a member who loses their wallet also
+loses the authority that issues those tickets.
 Those choices may implement this contract but may not weaken its ownership,
 idempotency, durable-acceptance, or failure-attribution rules.
 

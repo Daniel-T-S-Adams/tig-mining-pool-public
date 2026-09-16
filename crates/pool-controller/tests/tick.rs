@@ -972,4 +972,17 @@ async fn a_crash_after_tig_changed_state_is_recovered_by_the_controller_monotoni
         report.unchanged.iter().any(|id| id == "w1"),
         "and the workflow is reported at rest: {report:?}"
     );
+
+    // G2's load-bearing assertion, from the controller's side: the count at
+    // the server. Every durable row checked above would read exactly the same
+    // if one of these passes had *also* sent a second precommit, and a write
+    // count is the only observable that tells "recovered" from "recovered with
+    // a duplicate" — which is what §10 and `architecture.md` invariant 14
+    // exist to prevent. One write: the `send_precommit` this test made.
+    let state = call(&tig.app, "GET", "/_fake/state", None, None).await;
+    assert_eq!(
+        state["writes_received"]["submit-precommit"],
+        json!(1),
+        "reconciliation reads; it must not have sent anything"
+    );
 }

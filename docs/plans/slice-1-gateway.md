@@ -391,7 +391,10 @@ slice-1 configuration must name.
   lane, and advancing the workflow from that same evidence is the reconciler's.
   The test asserts monotonicity in all three of its senses — as far as the
   evidence supports and no further, not twice on the same read (the revision is
-  unchanged by a second pass), and never backwards.
+  unchanged by a second pass), and never backwards: a third pass over a window
+  that has *dropped* the confirmed precommit leaves the row, the revision and
+  the report where they were, because absence from §8's bounded window is not
+  evidence a write was undone.
 - G3. A lease claimant that lost its fence cannot commit a late result
   (`architecture.md` §7.5 step 4, invariant 8). Test: reclaim with a higher
   fence, then attempt the stale commit.
@@ -456,20 +459,6 @@ slice-1 configuration must name.
 - J4. No transaction stays open across TIG network I/O
   (`architecture.md` §7.2, invariant 7). Test: assert transaction duration
   bounds under an injected slow TIG response.
-
-  **The test is waived for this slice**, with the repository owner's
-  agreement. The property holds by construction rather than by timing:
-  `PostgresAttemptLedger::begin_fenced` commits its transaction before
-  returning, and `drive::handle` calls the transmitter only afterwards, so no
-  transaction is open across the send. What is waived is the *measurement* —
-  `fake-tig` has no response-delay injection, so the test would need one built
-  to observe a duration that the structure already forbids being long.
-
-  It re-homes to checklist §10 step 5, which brings the timing instrumentation
-  that would make the measurement worth having. The risk carried is that a
-  later change could open a transaction across the send without the structure
-  making it obvious; §7.2's invariant and this note are what a reviewer has
-  until then.
 
 ### K. Evidence required to call the slice done
 

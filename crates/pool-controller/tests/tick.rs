@@ -30,6 +30,7 @@ use pool_snapshot::{
     SnapshotSource, TigSnapshotSource,
 };
 use pool_test_support::TempDb;
+use pool_workflow::restart::{self, ConfirmedWindow};
 use pool_workflow::{
     AnchorSnapshot, AttemptOutcome, DecisionPayloadInputs, Guardrails, IntentState, NewDecision,
     PostgresAttemptLedger, PostgresIntentRepository, PrecommitSubmission, RecordedDraw,
@@ -913,9 +914,6 @@ async fn a_crash_after_tig_changed_state_is_recovered_by_the_controller_monotoni
     );
     assert!(!second.blocks_claiming(), "{:?}", second.needs_attention());
 
-    // And it never goes **backwards**. The intent settled with the workflow,
-    // and §7 makes CONFIRMED terminal for an intent — so the recovery cannot
-    // be undone by a later pass reading a window that has moved on.
     let intent: String =
         sqlx::query_scalar("SELECT state FROM pool.tig_write_intent WHERE intent_id = $1::uuid")
             .bind(&admitted.intent.intent_id)
@@ -925,5 +923,53 @@ async fn a_crash_after_tig_changed_state_is_recovered_by_the_controller_monotoni
     assert_eq!(
         intent, "CONFIRMED",
         "the write that landed is recorded as landed"
+    );
+
+    // And it never goes **backwards** — which needs a window that has *dropped*
+    // the evidence, not one that still carries it. §8's window is the latest
+    // 120 blocks, so a confirmed precommit eventually falls out of it, and a
+    // pass that read absence as un-confirmation would walk a recovered workflow
+    // back to where the crash left it, on every poll thereafter.
+    //
+    // The earlier version of this test asserted only that a second pass over
+    // the *same* window changed nothing, and the plan then claimed a coverage
+    // the test did not deliver.
+    let empty = ConfirmedWindow {
+        at_block: i64::try_from(ingested.snapshot.record().height).unwrap() + 1,
+        ..ConfirmedWindow::default()
+    };
+    let report = restart::reconcile_after_restart(&controller, NET, &empty)
+        .await
+        .unwrap();
+    let w = workflow::find(&controller, NET, "w1")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        w.state,
+        WorkflowState::PrecommitConfirmed,
+        "a window that dropped the precommit is not evidence it never confirmed"
+    );
+    assert_eq!(
+        w.revision, revision_after_first,
+        "and nothing is written on the way to not moving"
+    );
+    assert!(
+        !report.blocks_claiming(),
+        "an aged-out benchmark is ordinary (§7), not an operator condition: {report:?}"
+    );
+    // The *report* must not claim a backwards move either. `advance_one`
+    // returns where the workflow ended, and the caller classifies a returned
+    // state that differs from the row as `advanced` — so a pass that answered
+    // "absent, therefore PRECOMMIT_SUBMITTED" would tell §10's operator the
+    // workflow had moved back, even with the row untouched.
+    assert!(
+        report.advanced.is_empty(),
+        "nothing advanced from an empty window: {:?}",
+        report.advanced
+    );
+    assert!(
+        report.unchanged.iter().any(|id| id == "w1"),
+        "and the workflow is reported at rest: {report:?}"
     );
 }

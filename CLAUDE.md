@@ -64,6 +64,43 @@ the same PR workflow as code.
    editing the review workflow or prompts in the same PR the gate is failing
    on.
 
+## How much rigour a change earns
+
+Not every change carries the same risk, and treating them alike is how a
+codebase gets slow without getting safer. Sort a change before starting it,
+not after; if the bucket is genuinely unclear, take the first one.
+
+**Full rigour** — anything that can lose money or corrupt durable state:
+
+- code that sends to TIG, or decides what to send;
+- anything that touches a credential;
+- database migrations, and anything bearing on duplicate writes;
+- the crash and restart paths.
+
+For these: mutation-test every new assertion — confirm the mutant compiles and
+that a *named* test fails — verify factual claims against the API, the schema
+or the document rather than asserting them, and update the owning design doc
+in the same PR (workflow rule 6).
+
+**Normal care** — everything else: configuration fields, log lines, test
+helpers, scripts, renames. Tests that assert the behaviour are enough;
+comments say what is not obvious from the code; design docs change only when
+meaning did.
+
+**Two habits hold everywhere**, because they are what actually catches
+defects:
+
+- **Check a claim before you make it.** A comment, commit message or PR
+  description stating something unverified is worse than silence: it is read
+  as evidence, and the next reader inherits it as fact.
+- **A test that cannot fail proves nothing.** Prefer extracting the judgement
+  into a function a test can hand a failing case to, over a test that asserts
+  a value against itself.
+
+This calibration governs *effort*, never *honesty*. Nothing here licenses
+skipping a check, weakening a test, or reporting work as done that is not —
+those remain governed by the definition of done below.
+
 ## Security and secrets
 
 - **No secrets in this repository, ever**: not in TOML config, code, docs,

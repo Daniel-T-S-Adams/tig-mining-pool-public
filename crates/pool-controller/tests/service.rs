@@ -13,6 +13,7 @@ use axum::body::Body;
 use axum::http::Request;
 use fake_tig::{Config, SharedWorld, build_world, router};
 use http_body_util::BodyExt;
+use pool_controller::decide::Decided;
 use pool_controller::propose::Offer;
 use pool_controller::reconciler::Outcome;
 use pool_controller::service::{self, Deciding, Policy, Service, ServiceError, Tick};
@@ -673,6 +674,74 @@ async fn a_deployment_that_offers_nothing_takes_blocks_in_and_decides_nothing() 
         .await
         .unwrap();
     assert_eq!(intents, 0, "and nothing was proposed");
+}
+
+#[tokio::test]
+async fn a_blind_pass_decides_nothing_even_with_an_offer_configured() {
+    // The wiring half of the claiming gate. `claiming_refused`'s own rule is
+    // unit-tested in `service.rs`; this asserts the poll actually consults it,
+    // which a test of the rule alone cannot — removing the call from
+    // `Service::decide` leaves those unit tests passing.
+    //
+    // A blind pass is the reachable case: its reads were incomplete, so the
+    // reconciliation that would have revealed a blocking workflow never ran,
+    // and deciding on "nothing blocked" from a pass that looked at nothing is
+    // the §10 mistake the gate exists to prevent.
+    let Some(db) = TempDb::migrated("service_blind_no_decision").await else {
+        return;
+    };
+    let controller = db.pool_as("pool_controller").await;
+    let tig = fake_tig().await;
+    let (source, poll) = clients(&tig.base);
+    let flaky = Flaky::over(source);
+    flaky.benchmarks_down.store(true, Ordering::SeqCst);
+    let mut service = Service::new(
+        controller.clone(),
+        flaky,
+        poll,
+        Network::Testnet,
+        PLAYER,
+        Policy {
+            guardrails: guardrails(),
+            cache_budget: 10,
+            deciding: Deciding {
+                offer: Some(Offer {
+                    compute: OfferedCompute::Cpu { cores: 8 },
+                    tig_compute_type: "aws_t4g".to_string(),
+                }),
+                unverified_limit: 4,
+                failure_charge_atoms: "0".to_string(),
+                reserve_policy_version: "unchosen-pre-build-5.2".to_string(),
+                config_digest: [0xef; 32],
+            },
+        },
+    );
+
+    let Tick::Ingested(tick) = service.tick().await.unwrap() else {
+        panic!("the block is taken in even when a read fails");
+    };
+    // The premise: without a blind pass this proves nothing.
+    assert!(
+        matches!(tick.outcome, Outcome::Blind { .. }),
+        "{:?}",
+        tick.outcome
+    );
+    // `NotReconciled`, not `SnapshotNotUsable`: the two coincide for a blind
+    // pass — incomplete reads fail both gates — so naming them apart is what
+    // shows *which* refused. Asserting the weaker one would pass with the
+    // claiming gate deleted, since C5 would catch it anyway.
+    assert!(
+        matches!(tick.decided, Some(Ok(Decided::NotReconciled(_)))),
+        "the claiming gate refused, and an offer is configured so this is not \
+         `None` — which would say the deployment decides nothing: {:?}",
+        tick.decided
+    );
+
+    let intents: i64 = sqlx::query_scalar("SELECT count(*) FROM pool.tig_write_intent")
+        .fetch_one(&controller)
+        .await
+        .unwrap();
+    assert_eq!(intents, 0);
 }
 
 #[tokio::test]

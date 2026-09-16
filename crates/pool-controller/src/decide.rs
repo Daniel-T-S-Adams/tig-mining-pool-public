@@ -20,17 +20,16 @@
 //! and its §6.1 unverified interval belong inside the same transaction as the
 //! recount that reads them.
 //!
-//! **Nothing calls this yet.** Wiring it into the controller's poll needs one
-//! thing this module does not decide: where a deployment with no members gets
-//! its [`Offer`] from. Slice 1 has no member to offer compute, and the
-//! gateway's `served_compute` is not it — that field scopes §13 check 6, and
-//! the compute a decision is made *for* is a different question with a
-//! different answer. So the pass is delivered callable and tested against a
-//! real database rather than half-wired to a guess.
+//! `crate::service`'s poll calls this once per block it takes in, after
+//! reconciling from the same snapshot. The [`Offer`] comes from
+//! `[orchestration.bootstrap_offer]`, because slice 1 has no member to offer
+//! compute; the gateway's `served_compute` is not it — that field scopes §13
+//! check 6, and the compute a decision is made *for* is a different question.
 //!
-//! The configuration digest criterion A3 requires is `Config::decision_digest`,
-//! which already exists; it arrives here as an argument so this module stays
-//! free of configuration, the same way `propose` does.
+//! Configuration arrives as arguments, including the digest criterion A3
+//! requires (`Config::decision_digest`), so this module stays free of
+//! configuration the same way `propose` does — which is what lets a test hand
+//! it a case that is hard to reach live.
 
 use pool_domain::{Network, TraceId};
 use pool_snapshot::active_cache::ActiveBenchmarkMeta;
@@ -58,6 +57,23 @@ pub enum Decided {
     SnapshotNotUsable(String),
     /// §6.2's no-action outcome: nothing compute-compatible and eligible.
     NoAction,
+    /// The block's reconciliation says the controller must not claim new work
+    /// (`BlockReport::blocks_claiming`, criterion G1).
+    ///
+    /// A distinct answer from `NoAction`: the rules were never run, because
+    /// running them would decide on top of a workflow whose true state the
+    /// pool does not have.
+    BlockedForOperator,
+    /// Reconciliation did not run over this block, so nothing may be claimed
+    /// from it (`tig_integration.md` §10).
+    ///
+    /// Separate from [`Self::SnapshotNotUsable`] because they are different
+    /// facts: that one says the snapshot could not be *read* for a decision
+    /// (criterion C5), this one that it was never *reconciled from*. The two
+    /// coincide today — a blind pass has incomplete reads either way — and
+    /// naming them apart is what lets a test tell which gate refused, rather
+    /// than each masking the other's absence.
+    NotReconciled(String),
     /// A decision and its precommit intent are committed.
     Admitted(Box<Admitted>),
 }

@@ -375,9 +375,22 @@ pub struct OrchestrationConfig {
     ///
     /// This is **not** `gateway.served_compute`. That field scopes §13 check 6
     /// — which compute types the gateway must have pinned runtimes for — and
-    /// the compute a decision is made for is a different question. A deployment
-    /// will usually set both to agree, and nothing here enforces that: the
-    /// gate's job is to refuse writes when they do not.
+    /// the compute a decision is made for is a different question.
+    ///
+    /// **Nothing currently checks that the two agree, and the gate does not.**
+    /// An earlier version of this comment claimed it did. §13.5 scopes check 6
+    /// to the compute types "considered by the decision engine" and resolves
+    /// that to `served_compute`, so with `served_compute = []` the check skips
+    /// every challenge and passes vacuously — while this field could
+    /// independently have the controller deciding for CPU. The two processes
+    /// hold separate configurations and `pool-config` sees one at a time, so
+    /// the comparison cannot happen here.
+    ///
+    /// Where it can happen is the write boundary: every intent names its
+    /// `compute_type`, and the gateway could refuse to transmit one outside
+    /// its served set. That is the real fix and it belongs to `tig-gateway`;
+    /// until it lands, keeping the two in step is an operator's job and this
+    /// comment says so rather than implying a gate that does not fire.
     #[serde(default)]
     pub bootstrap_offer: Option<BootstrapOffer>,
 }
@@ -883,7 +896,14 @@ impl Config {
     /// must not carry the same config digest. Fields join it as the slices
     /// that introduce decision-affecting configuration land; the domain
     /// string is versioned so a change of coverage is never mistaken for a
-    /// change of value, and `v2` is the version that added `player_id`.
+    /// change of value: `v2` added `player_id` and `v3` the bootstrap offer.
+    ///
+    /// The offer joins it because it decides and is **not otherwise
+    /// recoverable**. `compute_class` selects §6.2's eligible set, and
+    /// `cpu_cores` drives §6.7's alignment — and while the resulting
+    /// `num_bundles` is on the decision record, the core count that produced
+    /// it is not, so two decisions taken under different offered cores would
+    /// otherwise be indistinguishable.
     ///
     /// `[orchestration]`'s reserve fields are deliberately **not** here, and
     /// the test is not "are they decision-affecting" — they are. It is whether
@@ -900,7 +920,32 @@ impl Config {
     /// decision record look unlike a live one for no protocol reason.
     pub fn decision_digest(&self) -> [u8; 32] {
         let player = self.tig.as_ref().map_or("", |t| t.player_id.as_str());
-        let preimage = format!("tig-pool-config-digest-v2\n{}\n{player}", self.network);
+        // `v3` adds the bootstrap offer. Rendered as three fields rather than
+        // one, so a record can be read back against the configuration that
+        // produced it, and absent as a distinct string rather than as empty
+        // ones — a deployment that offers nothing is not one that offers a
+        // nameless class with no cores.
+        let offer = self
+            .orchestration
+            .as_ref()
+            .and_then(|o| o.bootstrap_offer.as_ref())
+            .map_or_else(
+                || "none".to_string(),
+                |offer| {
+                    format!(
+                        "{}\n{}\n{}",
+                        offer.compute_class,
+                        offer
+                            .cpu_cores
+                            .map_or_else(|| "-".to_string(), |c| c.to_string()),
+                        offer.tig_compute_type,
+                    )
+                },
+            );
+        let preimage = format!(
+            "tig-pool-config-digest-v3\n{}\n{player}\n{offer}",
+            self.network
+        );
         *blake3::hash(preimage.as_bytes()).as_bytes()
     }
 

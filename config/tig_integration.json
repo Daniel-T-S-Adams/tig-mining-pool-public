@@ -52,6 +52,12 @@
       "nvidia_gpu_on_amd64": [
         "aws_g4dn"
       ]
+    },
+    "compute_class_by_vendor": {
+      "intel": "cpu",
+      "amd": "cpu",
+      "arm": "cpu",
+      "nvidia_gpu_on_amd64": "gpu"
     }
   },
   "images": {

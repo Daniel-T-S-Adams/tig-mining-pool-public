@@ -263,6 +263,64 @@ fn the_reserve_policy_values_are_checked_rather_than_carried() {
 }
 
 #[test]
+fn the_offer_the_pool_decides_for_enters_the_digest() {
+    // A3, and the digest's own rule that a decision-affecting field joins it
+    // unless the decision record already shows the field. `compute_class`
+    // selects §6.2's eligible set and `cpu_cores` drives §6.7's alignment —
+    // and while the resulting `num_bundles` reaches the record, the core count
+    // that produced it does not, so two decisions taken under different
+    // offered cores would otherwise be indistinguishable.
+    let scratch = Scratch::new("digest-offer");
+    let controller = |offer: Option<&str>| {
+        let mut toml = valid_toml(&scratch.password_file())
+            .replace("user = \"pool_migration\"", "user = \"pool_controller\"");
+        toml.push_str(TIG);
+        toml.push_str(ORCHESTRATION);
+        if let Some(offer) = offer {
+            toml.push_str(offer);
+        }
+        Config::load(scratch.write(&toml), Binary::PoolController).unwrap()
+    };
+    let offer = |class: &str, cores: &str, compute_type: &str| {
+        format!(
+            "\n[orchestration.bootstrap_offer]\ncompute_class = \"{class}\"\n\
+             {cores}tig_compute_type = \"{compute_type}\"\n"
+        )
+    };
+
+    let none = controller(None);
+    let eight = controller(Some(&offer("cpu", "cpu_cores = 8\n", "aws_t4g")));
+    let sixteen = controller(Some(&offer("cpu", "cpu_cores = 16\n", "aws_t4g")));
+    let gpu = controller(Some(&offer("gpu", "", "aws_g4dn")));
+    let other_type = controller(Some(&offer("cpu", "cpu_cores = 8\n", "aws_c7g")));
+
+    // Each differs from `eight` in exactly one field, and each must differ in
+    // the digest.
+    for (other, which) in [
+        (&none, "no offer at all"),
+        (&sixteen, "a different core count"),
+        (&gpu, "a different class"),
+        (&other_type, "a different protocol compute type"),
+    ] {
+        assert_ne!(
+            eight.decision_digest(),
+            other.decision_digest(),
+            "{which} must not carry the same digest"
+        );
+    }
+
+    // A deployment that offers nothing is not one that offers a nameless
+    // class: the absent case is its own value, not empty fields.
+    assert_ne!(none.decision_digest(), gpu.decision_digest());
+    // And it is still a pure function of the configuration.
+    assert_eq!(eight.decision_digest(), eight.decision_digest());
+    assert_eq!(
+        eight.decision_digest(),
+        controller(Some(&offer("cpu", "cpu_cores = 8\n", "aws_t4g"))).decision_digest()
+    );
+}
+
+#[test]
 fn a_bootstrap_offer_is_refused_unless_it_can_actually_be_sized() {
     // §6.7 aligns CPU bundle counts to the core count, so a cpu offer without
     // one cannot be sized and a count of zero cannot be divided by. A gpu

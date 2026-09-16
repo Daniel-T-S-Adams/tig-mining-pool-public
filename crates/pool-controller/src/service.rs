@@ -45,6 +45,37 @@ use crate::window::confirmed_window;
 /// poll tries again, so this bounds one poll's patience, not the pool's.
 const ASSEMBLY_ATTEMPTS: u32 = 3;
 
+/// Whether this block's reconciliation forbids claiming new work.
+///
+/// `Some` is a refusal and the reason; `None` means the pass may decide.
+///
+/// Extracted from [`Service::decide`] so it can be handed a report rather than
+/// reached through a poll: staging a `Contradicted` workflow end to end takes a
+/// fake serving a specific benchmark, and a rule tested only that way is a rule
+/// whose other branches are never exercised.
+///
+/// `BlockReport::blocks_claiming`'s own contract is "whether the controller
+/// must not claim new work after this pass" (§10's stop-for-operator, criterion
+/// G1), and the deciding pass is its first caller — so the first that has to
+/// honour it. A pass that found a duplicate confirmed precommit, or a workflow
+/// it could not evaluate, names one whose true state the pool does not have;
+/// deciding on top of that compounds the fee and the mapping break an operator
+/// has yet to untangle.
+///
+/// A `Blind` outcome refuses too. Its reads were incomplete, so the
+/// reconciliation that would have revealed such a workflow never ran, and
+/// "nothing blocked" from a pass that looked at nothing is not the same answer
+/// as "nothing blocks".
+fn claiming_refused(outcome: &Outcome) -> Option<Decided> {
+    match outcome {
+        Outcome::Reconciled(report) if report.blocks_claiming() => {
+            Some(Decided::BlockedForOperator)
+        }
+        Outcome::Blind { reason, .. } => Some(Decided::NotReconciled(reason.to_string())),
+        Outcome::Reconciled(_) => None,
+    }
+}
+
 /// What this controller's configuration tells the poll to do.
 ///
 /// One struct rather than nine positional parameters. `Service::new` took
@@ -303,7 +334,7 @@ impl<S: SnapshotSource + BenchmarkDataSource> Service<S> {
         // order is the document's: §10's reconciliation is what makes local
         // state safe to decide from, and a decision taken before it could be
         // made against a workflow this very block settled.
-        let decided = self.decide(&ingested.snapshot).await;
+        let decided = self.decide(&ingested.snapshot, &outcome).await;
 
         Ok(Tick::Ingested(Box::new(Ingested {
             block_id,
@@ -322,18 +353,49 @@ impl<S: SnapshotSource + BenchmarkDataSource> Service<S> {
     /// that stopped taking blocks in because a decision failed would trade a
     /// recoverable fault for an unrecoverable one. The outcome rides out on
     /// the `Tick` and the caller decides what to say about it.
-    async fn decide(&self, persisted: &PersistedSnapshot) -> Option<Result<Decided, String>> {
+    async fn decide(
+        &self,
+        persisted: &PersistedSnapshot,
+        outcome: &Outcome,
+    ) -> Option<Result<Decided, String>> {
         // No offer is not a failure to decide; it is a deployment that decides
         // nothing, which is slice 1's ordinary posture. `None` says that,
         // where `Some(Ok(NoAction))` would say the rules were run and found
         // nothing — a different fact.
         let offer = self.deciding.offer.as_ref()?;
 
+        // §10's stop-for-operator, and criterion G1. `blocks_claiming`'s own
+        // contract is "whether the controller must not claim new work after
+        // this pass", and this is the first caller of the claiming path — so
+        // the first that has to honour it. A pass that found a duplicate
+        // confirmed precommit, or a workflow it could not evaluate, names one
+        // whose true state the pool does not have; deciding on top of that
+        // compounds the fee and the mapping break an operator has yet to
+        // untangle.
+        //
+        // A `Blind` outcome blocks too. Its reads were incomplete, so the
+        // reconciliation that would have revealed such a workflow never ran,
+        // and "nothing blocked" from a pass that looked at nothing is not the
+        // same answer as "nothing blocks".
+        if let Some(refusal) = claiming_refused(outcome) {
+            return Some(Ok(refusal));
+        }
+
         let snapshot = match persisted.for_decision() {
             Ok(snapshot) => snapshot,
-            // C5's gate is `decide_once`'s too; short-circuiting here only
-            // avoids the reads below for a snapshot it would refuse anyway.
-            Err(_) => return None,
+            // C5's gate, reported rather than swallowed. Returning `None` here
+            // collapsed it into "this deployment decides nothing", which is a
+            // different fact — an operator would read it as an unconfigured
+            // offer.
+            //
+            // `decide_once` applies the same gate and returns the same answer;
+            // this is not belt-and-braces but a consequence of needing the
+            // snapshot's reads to gather the arguments below. The rule itself
+            // is tested where a failing snapshot can be handed to it directly,
+            // in `tests/decide.rs` — reaching it through the poll needs a block
+            // whose active set is non-empty while the cache is cold, which the
+            // fake's fixture has no way to produce.
+            Err(why) => return Some(Ok(Decided::SnapshotNotUsable(why.to_string()))),
         };
 
         let active_ids = match snapshot.active_benchmark_ids() {
@@ -451,5 +513,86 @@ where
             }
         }
         tokio::time::sleep(interval.saturating_sub(started.elapsed())).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use pool_snapshot::store::NotUsable;
+    use pool_workflow::restart::{NeedsAttention, RestartReport};
+
+    use super::*;
+    use crate::bind::BindReport;
+    use crate::reconciler::BlockReport;
+
+    fn report(needs_attention: Vec<NeedsAttention>) -> BlockReport {
+        BlockReport {
+            block_id: "b1".to_string(),
+            height: 100_080,
+            bind: BindReport { outcomes: vec![] },
+            restart: RestartReport {
+                advanced: vec![],
+                unchanged: vec![],
+                needs_attention,
+            },
+            expired: vec![],
+            expiry_withheld: vec![],
+            expiry_failed: vec![],
+        }
+    }
+
+    #[test]
+    fn a_clean_pass_may_claim_and_a_stopped_one_may_not() {
+        // §10's stop-for-operator and criterion G1. Both directions, because a
+        // gate that refused everything would pass a one-sided test while
+        // stopping the pool.
+        assert!(claiming_refused(&Outcome::Reconciled(report(vec![]))).is_none());
+
+        // `Contradicted`: TIG's confirmed evidence disagrees with a state the
+        // pool recorded as terminal. §10 answers that with an operator, not
+        // with more work.
+        let refused = claiming_refused(&Outcome::Reconciled(report(vec![
+            NeedsAttention::Contradicted {
+                workflow_id: "w1".to_string(),
+                benchmark_id: "b1".to_string(),
+                recorded_state: "STOPPED",
+            },
+        ])));
+        assert!(
+            matches!(refused, Some(Decided::BlockedForOperator)),
+            "{refused:?}"
+        );
+
+        // A bucket that does *not* block still does not, so the gate stays
+        // usable: §7 calls an aged benchmark ordinary, and stopping the pool
+        // every time a workflow got old would make the gate the outage.
+        assert!(
+            claiming_refused(&Outcome::Reconciled(report(vec![
+                NeedsAttention::OutsideWindow {
+                    workflow_id: "w1".to_string(),
+                    benchmark_id: "b1".to_string(),
+                },
+            ])))
+            .is_none(),
+            "an aged benchmark is ordinary; the gate must not become the outage"
+        );
+    }
+
+    #[test]
+    fn a_blind_pass_may_not_claim_either() {
+        // Its reads were incomplete, so the reconciliation that would have
+        // revealed a blocking workflow never ran. "Nothing blocked" from a
+        // pass that looked at nothing is not "nothing blocks".
+        let refused = claiming_refused(&Outcome::Blind {
+            block_id: "b1".to_string(),
+            height: 100_080,
+            reason: NotUsable::ReadsIncomplete,
+        });
+        assert!(
+            matches!(refused, Some(Decided::NotReconciled(_))),
+            "and says it was reconciliation that refused, not the snapshot read: {refused:?}"
+        );
     }
 }

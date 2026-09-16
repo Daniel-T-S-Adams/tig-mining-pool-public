@@ -465,7 +465,8 @@ slice-1 configuration must name.
   "Deferred to the slice that owns them" below.
 - K3. **One live testnet run** reaches a confirmed precommit and a created
   assignment, driven by the production binaries, with the run's block
-  heights and intent/attempt rows recorded in the PR. Reaching `ACTIVE` live
+  heights and intent/attempt rows recorded in the PR.
+  **Recorded:** [`docs/evidence/slice-1-live-run.md`](../evidence/slice-1-live-run.md). Reaching `ACTIVE` live
   is out of scope for the reason given in §1 and is an acceptance criterion
   of the slice that completes durable acceptance and proof construction.
 - K4. At least one crash test from G2 is repeated against live testnet on

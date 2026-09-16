@@ -1895,6 +1895,7 @@ mod tests {
                 // §6.2's length is a detail.
                 settings: entry["settings"].clone(),
                 num_nonces: Some(i64::try_from(num_nonces).unwrap()),
+                num_bundles: None,
                 block_confirmed: entry["state"]["block_confirmed"].as_i64().unwrap(),
                 block_started: entry["details"]["block_started"].as_i64().unwrap(),
             },

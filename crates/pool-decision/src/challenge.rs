@@ -18,7 +18,14 @@ pub enum OfferedCompute {
 }
 
 impl OfferedCompute {
-    fn matches(&self, challenge: ComputeType) -> bool {
+    /// §6.2's first test: CPU offers consider only CPU challenges, GPU only
+    /// GPU.
+    ///
+    /// Public because the caller assembling the decision's inputs has to apply
+    /// the same test — the §6.3 draw is over compute-compatible challenges, so
+    /// a caller that re-expressed this could rank a set `select_challenge`
+    /// then excluded, and the rank map is immutable audit evidence.
+    pub fn matches_challenge(&self, challenge: ComputeType) -> bool {
         matches!(
             (self, challenge),
             (OfferedCompute::Cpu { .. }, ComputeType::Cpu)
@@ -167,7 +174,10 @@ pub fn select_challenge(
     let mut considered = Vec::new();
 
     for challenge in &input.challenges {
-        if !input.offered_compute.matches(challenge.compute_type) {
+        if !input
+            .offered_compute
+            .matches_challenge(challenge.compute_type)
+        {
             excluded.insert(challenge.id.clone(), Excluded::IncompatibleComputeType);
             continue;
         }

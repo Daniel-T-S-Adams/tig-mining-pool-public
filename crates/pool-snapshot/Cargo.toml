@@ -12,6 +12,12 @@ serde = { version = "1", features = ["derive"] }
 sha2 = "0.10"
 serde_json = "1"
 sqlx = { version = "0.9", default-features = false, features = [
+    # Hyperparameters and per-bundle qualities are `jsonb`, so this crate binds
+    # and reads `serde_json::Value` directly. Declared here rather than
+    # inherited: feature unification made `cargo build -p pool-snapshot` work
+    # only because `pool-workflow` asked for it, so building this crate alone
+    # failed with eight trait-bound errors that said nothing about the cause.
+    "json",
     "postgres",
     "runtime-tokio",
     "tls-rustls-ring",

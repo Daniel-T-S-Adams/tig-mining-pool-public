@@ -193,6 +193,12 @@ fn precommits(body: &Value) -> Result<BTreeMap<String, ConfirmedPrecommit>, Wind
                     .get("details")
                     .and_then(|d| d.get("num_nonces"))
                     .and_then(Value::as_i64),
+                // §6.3's projection multiplies by this. A detail too, so it
+                // sits beside `num_nonces` rather than in `settings`.
+                num_bundles: entry
+                    .get("details")
+                    .and_then(|d| d.get("num_bundles"))
+                    .and_then(Value::as_i64),
                 // §7: "Confirmed settings/details replace proposed values."
                 // Carried whole rather than field by field, because the pool
                 // has no business deciding which of TIG's values matter.

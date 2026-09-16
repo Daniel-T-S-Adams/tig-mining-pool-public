@@ -71,6 +71,7 @@ async fn confirmed_workflow(pool: &PgPool, num_nonces: Option<i64>) {
                 "track_id": "t001"
             }),
             num_nonces,
+            num_bundles: None,
             block_confirmed: 100_081,
             block_started: 100_081,
         },

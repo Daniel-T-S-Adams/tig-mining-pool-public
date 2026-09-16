@@ -1222,6 +1222,25 @@ mod tests {
             })
         }
 
+        /// The same driver with a different write policy.
+        ///
+        /// The age rule `run_once` applies is `attempt age < call timeout`, and
+        /// a test of it needs both sides. Reading the *young* side off a
+        /// one-second timeout made it a race against the setup: the pass had to
+        /// run within a second of the attempt being written, and on a loaded
+        /// machine the staging alone took longer — so the attempt was already
+        /// aged and the assertion failed for a reason the rule has nothing to
+        /// do with. Issue #39.
+        ///
+        /// Asked from the generous side instead, where "younger than sixty
+        /// seconds" is true however slow the machine is.
+        fn driver_with<'a>(&'a self, lane: &'a PostLane) -> Driver<'a> {
+            Driver {
+                lane,
+                ..self.driver()
+            }
+        }
+
         fn driver(&self) -> Driver<'_> {
             Driver {
                 served_compute: &self.served_compute,
@@ -1806,7 +1825,12 @@ mod tests {
         // failed. So nothing is settled yet, and the lane stays closed.
         fake_post(&h.base, "/_fake/advance-block", None, None).await;
         let window = precommits_window(&h.base).await;
-        let early = run_once(&h.driver(), &window).await.unwrap();
+        // Asked against the shipped sixty-second timeout, not the harness's
+        // one-second one: the rule is the same comparison either way, and this
+        // side of it is then true however long the staging above took. See
+        // `driver_with`.
+        let patient = PostLane::new(policy());
+        let early = run_once(&h.driver_with(&patient), &window).await.unwrap();
         let w1 = early
             .outcomes
             .iter()
@@ -1823,7 +1847,8 @@ mod tests {
         ));
 
         // Past the call timeout no sender can still be waiting. Now it
-        // settles.
+        // settles — this half keeps the harness's one-second policy, which is
+        // what makes a 1500ms wait enough to age the attempt past it.
         tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
         let report = run_once(&h.driver(), &window).await.unwrap();
         let w1 = report

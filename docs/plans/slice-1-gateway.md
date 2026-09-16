@@ -383,13 +383,15 @@ slice-1 configuration must name.
   what tell them apart. The mapping from each point to its test is in
   `crates/tig-gateway/src/drive.rs`'s test-module doc.
 
-  **Outstanding:** the fourth point's controller half. §12's guarantee there
-  is "reconciliation advances monotonically from confirmed TIG evidence",
-  which §6 makes a controller transition. The gateway tests settle the
-  *attempt* from the confirmed read, which is what reopens the lane;
-  advancing the workflow from that same evidence is the reconciler's, and a
-  controller reconciliation test still owes it. G2 is not met until that
-  test exists.
+  The fourth point's controller half is
+  `tick::a_crash_after_tig_changed_state_is_recovered_by_the_controller_monotonically`.
+  §12's guarantee there is "reconciliation advances monotonically from
+  confirmed TIG evidence", which §6 makes a controller transition: the gateway
+  tests settle the *attempt* from the confirmed read, which is what reopens the
+  lane, and advancing the workflow from that same evidence is the reconciler's.
+  The test asserts monotonicity in all three of its senses — as far as the
+  evidence supports and no further, not twice on the same read (the revision is
+  unchanged by a second pass), and never backwards.
 - G3. A lease claimant that lost its fence cannot commit a late result
   (`architecture.md` §7.5 step 4, invariant 8). Test: reclaim with a higher
   fence, then attempt the stale commit.
@@ -454,6 +456,20 @@ slice-1 configuration must name.
 - J4. No transaction stays open across TIG network I/O
   (`architecture.md` §7.2, invariant 7). Test: assert transaction duration
   bounds under an injected slow TIG response.
+
+  **The test is waived for this slice**, with the repository owner's
+  agreement. The property holds by construction rather than by timing:
+  `PostgresAttemptLedger::begin_fenced` commits its transaction before
+  returning, and `drive::handle` calls the transmitter only afterwards, so no
+  transaction is open across the send. What is waived is the *measurement* —
+  `fake-tig` has no response-delay injection, so the test would need one built
+  to observe a duration that the structure already forbids being long.
+
+  It re-homes to checklist §10 step 5, which brings the timing instrumentation
+  that would make the measurement worth having. The risk carried is that a
+  later change could open a transaction across the send without the structure
+  making it obvious; §7.2's invariant and this note are what a reviewer has
+  until then.
 
 ### K. Evidence required to call the slice done
 

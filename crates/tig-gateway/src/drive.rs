@@ -929,10 +929,10 @@ mod tests {
     //! evidence", and §6 makes that a *controller* transition. The test named
     //! above stages §10's lost response and settles the **attempt**, which is
     //! what reopens the lane; advancing the workflow from the same confirmed
-    //! read is the reconciler's, and this crate cannot exercise it. That half
-    //! is owed by a controller reconciliation test — see G2 in
-    //! `docs/plans/slice-1-gateway.md`, which names it as outstanding rather
-    //! than letting this table read as complete coverage.
+    //! read is the reconciler's, and this crate cannot exercise it. The other
+    //! half is `pool-controller`'s
+    //! `tick::a_crash_after_tig_changed_state_is_recovered_by_the_controller_monotonically`,
+    //! which asserts the same server-side write count from that side.
     //!
     //! Inside the crate because a `TigApiKey` exists only through
     //! `credential::load`, which is crate-private on purpose. Requires

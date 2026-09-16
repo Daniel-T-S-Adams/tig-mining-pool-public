@@ -383,13 +383,25 @@ slice-1 configuration must name.
   what tell them apart. The mapping from each point to its test is in
   `crates/tig-gateway/src/drive.rs`'s test-module doc.
 
-  **Outstanding:** the fourth point's controller half. §12's guarantee there
-  is "reconciliation advances monotonically from confirmed TIG evidence",
-  which §6 makes a controller transition. The gateway tests settle the
-  *attempt* from the confirmed read, which is what reopens the lane;
-  advancing the workflow from that same evidence is the reconciler's, and a
-  controller reconciliation test still owes it. G2 is not met until that
-  test exists.
+  The fourth point's controller half is
+  `tick::a_crash_after_tig_changed_state_is_recovered_by_the_controller_monotonically`.
+  §12's guarantee there is "reconciliation advances monotonically from
+  confirmed TIG evidence", which §6 makes a controller transition: the gateway
+  tests settle the *attempt* from the confirmed read, which is what reopens the
+  lane, and advancing the workflow from that same evidence is the reconciler's.
+  The test asserts monotonicity in all three of its senses — as far as the
+  evidence supports and no further, not twice on the same read (the revision is
+  unchanged by a second pass), and never backwards: a restart pass over a
+  window that has *dropped* the confirmed precommit leaves the row, the
+  revision and the report where they were, because absence from §8's bounded
+  window is not evidence a write was undone. That last leg calls
+  `restart::reconcile_after_restart` with a synthetic empty window rather than
+  driving `reconcile_block`, because the property belongs to the function §6's
+  "advance confirmed TIG lifecycle" row delegates to, and a window that has
+  aged a benchmark out is not a state fake-tig can be walked into. It closes on
+  G2's load-bearing assertion from the controller's side: the fake's
+  `submit-precommit` count is still exactly one, which is the only observable
+  that tells "recovered" from "recovered with a duplicate".
 - G3. A lease claimant that lost its fence cannot commit a late result
   (`architecture.md` §7.5 step 4, invariant 8). Test: reclaim with a higher
   fence, then attempt the stale commit.

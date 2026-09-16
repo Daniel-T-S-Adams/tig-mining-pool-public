@@ -276,6 +276,14 @@ pub struct ConfirmedPrecommit {
     /// length from; the commitment path refuses rather than building a body
     /// against a number it does not have.
     pub num_nonces: Option<i64>,
+    /// TIG's `details.num_bundles`, the count `mining_system.md` §6.3's
+    /// projection multiplies a qualifier rate by.
+    ///
+    /// A detail like `num_nonces`, and optional for the same reason: a record
+    /// TIG served without it is one the pool must not invent a count for. §6.3
+    /// excludes such a benchmark from the projection rather than projecting
+    /// zero — the two have the same arithmetic effect and different meanings.
+    pub num_bundles: Option<i64>,
     pub block_confirmed: i64,
     /// TIG's `details.block_started`. Every guardrail in `tig_integration.md`
     /// §8 is an age measured from this, and it is TIG's value rather than one

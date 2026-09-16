@@ -34,7 +34,23 @@ use pool_decision::source::{SourceBenchmark, SourceSelection, SourceSelectionInp
 use pool_domain::{DrawRank, Network, challenge_tie_seed, draw_ranks};
 use pool_snapshot::Snapshot;
 use pool_snapshot::active_cache::ActiveBenchmarkMeta;
+use pool_workflow::restart::ConfirmedWindow;
 use serde_json::{Value, json};
+
+/// What the pool is deciding *for*.
+///
+/// Two compute vocabularies, deliberately both present. `compute` is
+/// `mining_system.md` §6.2's CPU/GPU class, which selects challenges and
+/// drives §6.7's alignment rule. `tig_compute_type` is `tig_integration.md`
+/// §3's protocol type — `aws_t4g`, `aws_c7i` — which is what the §6.1 body
+/// carries and what the decision record stores. §3 requires it be detected per
+/// worker and is explicit that a mismatch is "ineligible rather than coerced",
+/// so it is never derived from the class.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Offer {
+    pub compute: OfferedCompute,
+    pub tig_compute_type: String,
+}
 
 /// One challenge's configuration, as §6.7 and §6.1's body need it.
 ///
@@ -54,13 +70,24 @@ struct ChallengeConfig {
 pub struct Proposal {
     pub selected_challenge: String,
     pub selected_algorithm: String,
+    /// TIG's protocol compute type (`tig_integration.md` §3's `aws_*` set),
+    /// which is what the §6.1 body carries and what the decision record
+    /// stores. A property of the offer, not of the challenge.
     pub compute_type: String,
+    /// The challenge's CPU/GPU class. Recorded beside the type because §6.2
+    /// matched on it, and because the two are easy to confuse — `spike` in
+    /// `config/tig_integration.json` carries both, for the same reason.
+    pub compute_class: String,
     /// The decision record's `track_settings`, in the shape
     /// `PrecommitSubmission::from_decision` reads back.
     pub track_settings: Value,
     /// §6.3's audit evidence: the rank of every compute-compatible eligible
     /// challenge, not only the tied ones (criterion D2d).
     pub draw_ranks: BTreeMap<String, DrawRank>,
+    /// The seed the ranks were derived from, for the recorder. Derived once
+    /// here so the decision record and the ranks cannot come from two
+    /// derivations (criterion D2d).
+    pub tie_seed: [u8; 32],
     pub tie_candidates: Option<Vec<String>>,
     pub tie_winner: Option<String>,
     /// Kept whole so the caller can record why, not only what.
@@ -281,8 +308,6 @@ fn candidate_challenges(
 struct AlgorithmEvidence {
     /// §6.4's candidates, per challenge.
     by_challenge: BTreeMap<String, Vec<Algorithm>>,
-    /// §6.3's numerator: the pool's own qualifiers, per challenge per track.
-    pool_qualifiers_by_challenge_by_track: BTreeMap<String, BTreeMap<String, u128>>,
     /// §6.5's numerator: every player's qualifiers, per algorithm per track.
     ///
     /// Network-wide on purpose. §6.5 compares how an *algorithm* performs on a
@@ -300,7 +325,6 @@ struct AlgorithmEvidence {
 /// excludes.
 fn algorithm_evidence(
     snapshot: &Snapshot,
-    player_id: &str,
     block_round: u64,
 ) -> Result<AlgorithmEvidence, ProposeError> {
     const E: &str = "get-algorithms";
@@ -319,11 +343,25 @@ fn algorithm_evidence(
             .get("algorithm_id")
             .and_then(Value::as_str)
             .ok_or_else(|| shape(E, "/binarys[].algorithm_id", "a string"))?;
-        if binary
+        // `tig_integration.md` §5.1: usable means *confirmed*, compiled, and
+        // fetchable. Compilation alone is not the test — an unconfirmed binary
+        // is not yet part of the block's view, and one with no download URL is
+        // a binary no runtime can obtain. Either would let §6.4 step 1 select
+        // an algorithm the pool cannot actually run, and the precommit fee is
+        // paid before anyone finds out.
+        let confirmed = binary
+            .pointer("/state/block_confirmed")
+            .and_then(Value::as_u64)
+            .is_some();
+        let compiles = binary
             .pointer("/details/compile_success")
             .and_then(Value::as_bool)
-            .unwrap_or(false)
-        {
+            .unwrap_or(false);
+        let fetchable = binary
+            .pointer("/details/download_url")
+            .and_then(Value::as_str)
+            .is_some_and(|url| !url.is_empty());
+        if confirmed && compiles && fetchable {
             compiled.insert(id);
         }
     }
@@ -404,16 +442,6 @@ fn algorithm_evidence(
                         .or_default()
                         .entry(track_id.clone())
                         .or_default() += count;
-                    // TIG addresses are hex; compared case-insensitively for
-                    // the reason `tig_integration.md` §13 check 9 gives.
-                    if player.eq_ignore_ascii_case(player_id) {
-                        *evidence
-                            .pool_qualifiers_by_challenge_by_track
-                            .entry(challenge_id.to_string())
-                            .or_default()
-                            .entry(track_id.clone())
-                            .or_default() += count;
-                    }
                 }
             }
         }
@@ -499,92 +527,133 @@ fn track_stats(
 
 /// The pool's confirmed in-flight benchmarks, for §6.3's projection.
 ///
-/// In-flight is §2's definition: confirmed at TIG and not yet active. The
-/// active set is the block's, so a benchmark in both is not in flight — it is
-/// already contributing to the qualifier counts the projection adds to.
-fn in_flight(
+/// `mining_system.md` §2: a benchmark is in flight when its **precommit** is
+/// confirmed, TIG has selected its track, and it is not yet active or
+/// terminal. All four halves matter and each was got wrong once:
+///
+/// - the identity is on `precommits[].settings`, not on `benchmarks[]`. The
+///   first version of this read `benchmarks[].details.player_id`, a field live
+///   TIG does not publish there, so every entry failed the owner test and the
+///   projection was permanently empty — §6.3 silently degraded to the current
+///   raw factor, which piles successive decisions onto one challenge.
+/// - a confirmed *benchmark* is not the test. Requiring one excludes the
+///   principal in-flight state, a precommit confirmed and still computing.
+/// - stopped and fraud-confirmed are terminal (§7: a stopped benchmark never
+///   produces a proof). They never become active, so they never leave the
+///   non-active set, and projecting them inflates `expected_addition` on every
+///   decision from then on.
+/// - active work already contributes to the qualifier counts §6.3 adds to.
+///
+/// Takes the typed [`ConfirmedWindow`] rather than the raw body. `window.rs`
+/// says it is "the only place a TIG read becomes evidence, and the only place
+/// §7's mapping is expressed"; the raw reading this replaces was a second
+/// parser of the same document, and it had already drifted.
+fn in_flight(window: &ConfirmedWindow, player_id: &str) -> Vec<InFlightBenchmark> {
+    let active: BTreeSet<&str> = window.active.iter().map(String::as_str).collect();
+    let stopped: BTreeSet<&str> = window
+        .benchmarks
+        .values()
+        .filter(|b| b.stopped)
+        .map(|b| b.benchmark_id.as_str())
+        .collect();
+
+    window
+        .precommits
+        .values()
+        .filter(|p| {
+            !active.contains(p.benchmark_id.as_str())
+                && !stopped.contains(p.benchmark_id.as_str())
+                && !window.frauds.contains_key(&p.benchmark_id)
+        })
+        .filter(|p| {
+            p.settings
+                .get("player_id")
+                .and_then(Value::as_str)
+                .is_some_and(|owner| owner.eq_ignore_ascii_case(player_id))
+        })
+        .filter_map(|p| {
+            // A count TIG did not publish is not zero. §6.3 multiplies by it,
+            // and a benchmark contributing an invented count would move the
+            // factor that chooses the next challenge.
+            let num_bundles = u128::try_from(p.num_bundles?).ok()?;
+            Some(InFlightBenchmark {
+                benchmark_id: p.benchmark_id.clone(),
+                challenge_id: p
+                    .settings
+                    .get("challenge_id")
+                    .and_then(Value::as_str)?
+                    .to_string(),
+                algorithm_id: p
+                    .settings
+                    .get("algorithm_id")
+                    .and_then(Value::as_str)?
+                    .to_string(),
+                // §6.3 projects only a benchmark "whose selected algorithm and
+                // track are known", and excludes the rest rather than counting
+                // them as zero — the record has to show which happened.
+                track_id: Some(p.track_id.clone()).filter(|t| !t.is_empty()),
+                num_bundles,
+            })
+        })
+        .collect()
+}
+
+/// §6.3's `pool_q[c][t]`, from OPoW.
+///
+/// The authoritative published count, which is the same quantity
+/// `mining_system.md` §7 step 1 and invariant 13 read. An earlier version
+/// summed `get-algorithms`' per-algorithm per-player counts instead: a
+/// different endpoint, a different aggregation, and no document saying the two
+/// are equal. If they ever differ, a decision made from one and attributed
+/// from the other cannot be reconciled.
+///
+/// An absent player is an empty map, not an error: a pool that holds no
+/// qualifiers yet is the ordinary first case, and §6.3 reads a missing entry
+/// as zero.
+fn pool_qualifiers(
     snapshot: &Snapshot,
     player_id: &str,
-    active_ids: &BTreeSet<String>,
-) -> Result<Vec<InFlightBenchmark>, ProposeError> {
-    const E: &str = "get-benchmarks";
+) -> Result<BTreeMap<String, BTreeMap<String, u128>>, ProposeError> {
+    const E: &str = "get-opow";
     let body = read(snapshot, E)?;
-    let benchmarks = body
-        .get("benchmarks")
+    let entries = body
+        .get("opow")
         .and_then(Value::as_array)
-        .ok_or_else(|| shape(E, "/benchmarks", "a list"))?;
+        .ok_or_else(|| shape(E, "/opow", "a list"))?;
 
-    let mut out = Vec::new();
-    for benchmark in benchmarks {
-        let id = benchmark
-            .get("id")
-            .and_then(Value::as_str)
-            .ok_or_else(|| shape(E, "/benchmarks[].id", "a string"))?;
-        if active_ids.contains(id) {
-            continue;
-        }
-        let owner = benchmark
-            .pointer("/details/player_id")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
+    let mut out: BTreeMap<String, BTreeMap<String, u128>> = BTreeMap::new();
+    for entry in entries {
+        let owner = entry.get("player_id").and_then(Value::as_str).unwrap_or("");
         if !owner.eq_ignore_ascii_case(player_id) {
             continue;
         }
-        // §7: a benchmark is confirmed when its block_confirmed is set.
-        // Anything else is a write the pool sent and TIG has not recorded, and
-        // §6.3 projects only confirmed work.
-        if benchmark
-            .pointer("/state/block_confirmed")
-            .and_then(Value::as_u64)
-            .is_none()
-        {
+        let Some(by_challenge) = entry
+            .pointer("/block_data/num_qualifiers_by_challenge_by_track")
+            .and_then(Value::as_object)
+        else {
             continue;
+        };
+        for (challenge_id, by_track) in by_challenge {
+            let by_track = by_track.as_object().ok_or_else(|| {
+                shape(
+                    E,
+                    format!("/opow[{owner}].block_data.num_qualifiers_by_challenge_by_track.{challenge_id}"),
+                    "an object",
+                )
+            })?;
+            for (track_id, count) in by_track {
+                let count = as_u128(count).ok_or_else(|| {
+                    shape(
+                        E,
+                        format!("/opow[{owner}].block_data.num_qualifiers_by_challenge_by_track.{challenge_id}.{track_id}"),
+                        "an unsigned integer",
+                    )
+                })?;
+                out.entry(challenge_id.clone())
+                    .or_default()
+                    .insert(track_id.clone(), count);
+            }
         }
-        let challenge_id = benchmark
-            .pointer("/details/challenge_id")
-            .and_then(Value::as_str)
-            .ok_or_else(|| {
-                shape(
-                    E,
-                    format!("/benchmarks[{id}].details.challenge_id"),
-                    "a string",
-                )
-            })?;
-        let algorithm_id = benchmark
-            .pointer("/details/algorithm_id")
-            .and_then(Value::as_str)
-            .ok_or_else(|| {
-                shape(
-                    E,
-                    format!("/benchmarks[{id}].details.algorithm_id"),
-                    "a string",
-                )
-            })?;
-        let num_bundles = benchmark
-            .pointer("/details/num_bundles")
-            .and_then(Value::as_u64)
-            .ok_or_else(|| {
-                shape(
-                    E,
-                    format!("/benchmarks[{id}].details.num_bundles"),
-                    "an unsigned integer",
-                )
-            })?;
-
-        out.push(InFlightBenchmark {
-            benchmark_id: id.to_string(),
-            challenge_id: challenge_id.to_string(),
-            algorithm_id: algorithm_id.to_string(),
-            // Absent is `None`, not a guess. §6.3 excludes a benchmark whose
-            // track TIG has not selected, and the record has to show that it
-            // was excluded rather than that it contributed zero.
-            track_id: benchmark
-                .pointer("/details/track_id")
-                .and_then(Value::as_str)
-                .filter(|t| !t.is_empty())
-                .map(str::to_string),
-            num_bundles: u128::from(num_bundles),
-        });
     }
     Ok(out)
 }
@@ -598,6 +667,14 @@ fn in_flight(
 fn source_candidates(active: &[ActiveBenchmarkMeta]) -> Vec<SourceBenchmark> {
     active
         .iter()
+        // §6.6 step 3 *copies* the source's fuel budget. The cache keeps it
+        // optional because TIG does not always publish one, and a `None`
+        // admitted here with `unwrap_or_default` became a source offering a
+        // budget of 0 — which `select_source` would return and the precommit
+        // would submit. §6.6's last paragraph says a track with no valid
+        // source makes the challenge ineligible; that is the correct outcome,
+        // and a fabricated zero is not.
+        .filter(|meta| meta.fuel_budget.is_some())
         .map(|meta| SourceBenchmark {
             benchmark_id: meta.benchmark_id.clone(),
             algorithm_id: meta.algorithm_id.clone(),
@@ -621,6 +698,8 @@ fn source_candidates(active: &[ActiveBenchmarkMeta]) -> Vec<SourceBenchmark> {
                 .and_then(Value::as_object)
                 .map(|o| o.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
                 .unwrap_or_default(),
+            // Safe by the filter above, and written as a fallback only
+            // because `SourceBenchmark` takes a bare `u64`.
             fuel_budget: meta.fuel_budget.unwrap_or_default(),
         })
         .collect()
@@ -675,16 +754,16 @@ fn per_challenge(
 /// the denominators below are complete.
 pub fn propose(
     snapshot: &Snapshot,
+    window: &ConfirmedWindow,
     network: Network,
     player_id: &str,
-    offered_compute: OfferedCompute,
+    offer: &Offer,
     active: &[ActiveBenchmarkMeta],
 ) -> Result<Proposed, ProposeError> {
     let round = block_round(snapshot)?;
     let (mut challenges, configs) = candidate_challenges(snapshot, round)?;
-    let evidence = algorithm_evidence(snapshot, player_id, round)?;
+    let evidence = algorithm_evidence(snapshot, round)?;
 
-    let active_ids: BTreeSet<String> = active.iter().map(|m| m.benchmark_id.clone()).collect();
     let stats = track_stats(
         &evidence.qualifiers_by_algorithm_by_track,
         &active_bundles_by_algorithm_by_track(active),
@@ -723,21 +802,31 @@ pub fn propose(
     // §6.3's draw, over every compute-compatible eligible challenge — the full
     // map, because criterion D2d makes it the audit evidence and which
     // challenges were candidates at this block is not recoverable later.
+    // Exactly the set §6.3 chooses among: compute-compatible, and with every
+    // active track sourced. A superset would put challenges that were never
+    // candidates into an immutable audit record, and the record's whole job is
+    // to say which ones were.
+    let eligible: Vec<&Challenge> = challenges
+        .iter()
+        .filter(|c| offer.compute.matches_challenge(c.compute_type))
+        .filter(|c| {
+            c.active_tracks
+                .iter()
+                .all(|t| c.tracks_with_source.contains(t))
+        })
+        .collect();
     let seed = challenge_tie_seed(network, &snapshot.block_id);
     let ranks = draw_ranks(
         network,
         &snapshot.block_id,
-        challenges.iter().map(|c| c.id.as_str()),
+        eligible.iter().map(|c| c.id.as_str()),
     );
-    debug_assert_eq!(seed, challenge_tie_seed(network, &snapshot.block_id));
 
     let selection = pool_decision::challenge::select_challenge(&ChallengeSelectionInput {
-        offered_compute: offered_compute.clone(),
+        offered_compute: offer.compute.clone(),
         challenges: challenges.clone(),
-        pool_qualifiers_by_challenge_by_track: evidence
-            .pool_qualifiers_by_challenge_by_track
-            .clone(),
-        confirmed_in_flight_benchmarks: in_flight(snapshot, player_id, &active_ids)?,
+        pool_qualifiers_by_challenge_by_track: pool_qualifiers(snapshot, player_id)?,
+        confirmed_in_flight_benchmarks: in_flight(window, player_id),
         algorithm_track_stats: stats.clone(),
         draw_ranks: ranks.clone(),
     })?;
@@ -770,7 +859,7 @@ pub fn propose(
     // §6.7, for every active track: TIG chooses the final one during precommit
     // processing, so all of them are sized and submitted.
     let sizing = pool_decision::bundles::size_bundles(&BundleSizingInput {
-        offered_compute,
+        offered_compute: offer.compute.clone(),
         min_num_bundles: config.min_num_bundles,
         tracks: config
             .nonces_per_bundle
@@ -813,7 +902,14 @@ pub fn propose(
     }
 
     Ok(Proposed::Precommit(Box::new(Proposal {
-        compute_type: match config.compute_type {
+        // The protocol type the §6.1 body sends (`tig_integration.md` §3's
+        // `aws_*` set), which is the offer's and not the challenge's. The
+        // challenge publishes a *class*; the two are different vocabularies,
+        // and `config/tig_integration.json` keeps them as separate fields for
+        // that reason. Sending a class here would send `"cpu"` where TIG
+        // expects `"aws_c7i"`.
+        compute_type: offer.tig_compute_type.clone(),
+        compute_class: match config.compute_type {
             ComputeType::Cpu => "cpu".to_string(),
             ComputeType::Gpu => "gpu".to_string(),
         },
@@ -821,8 +917,16 @@ pub fn propose(
         selected_algorithm,
         track_settings: Value::Object(track_settings),
         draw_ranks: ranks,
+        tie_seed: seed,
+        // §6.3 records a draw outcome only when a draw happened. Set
+        // unconditionally it would assert, on every untied pass, that the
+        // winner came from a tiebreak it never entered — and invariant 25 is
+        // about a record an auditor can reproduce.
+        tie_winner: selection
+            .tie_candidates
+            .as_ref()
+            .and_then(|_| selection.selected.clone()),
         tie_candidates: selection.tie_candidates.clone(),
-        tie_winner: selection.selected.clone(),
         challenge_selection: selection,
         algorithm_selection: decided.algorithm.clone(),
         bundle_sizing: sizing,
@@ -851,7 +955,18 @@ mod tests {
         challenges: Vec<Value>,
         codes: Vec<Value>,
         binarys: Vec<Value>,
-        benchmarks: Vec<Value>,
+        /// `get-benchmarks` in TIG's real shape: identity and counts live on
+        /// `precommits[]`, and `benchmarks[]` carries only the bundle facts.
+        /// Getting this wrong is what made the first version of `in_flight`
+        /// read fields that do not exist, so the harness holds the collections
+        /// separately rather than letting a test invent one entry shape.
+        precommits: Vec<Value>,
+        benchmark_entries: Vec<Value>,
+        frauds: Vec<Value>,
+        /// `get-opow[].block_data.num_qualifiers_by_challenge_by_track` for
+        /// the pool: §6.3's `pool_q[c][t]`.
+        pool_qualifiers: Vec<(&'static str, &'static str, u64)>,
+        active_ids: Vec<String>,
     }
 
     impl Fixture {
@@ -864,8 +979,50 @@ mod tests {
                 challenges: vec![challenge("c001", "cpu", 25, &[("t1", 10)], &[("t1", 30)])],
                 codes: vec![code("c001_a001", "c001", 25, SOME_ADOPTION, &[])],
                 binarys: vec![binary("c001_a001", true)],
-                benchmarks: vec![],
+                precommits: vec![],
+                benchmark_entries: vec![],
+                frauds: vec![],
+                pool_qualifiers: vec![],
+                active_ids: vec![],
             }
+        }
+
+        fn benchmarks_body(&self) -> Value {
+            json!({
+                "precommits": self.precommits,
+                "benchmarks": self.benchmark_entries,
+                "proofs": [],
+                "frauds": self.frauds,
+            })
+        }
+
+        fn opow_body(&self) -> Value {
+            let mut by_challenge: serde_json::Map<String, Value> = serde_json::Map::new();
+            for (challenge, track, count) in &self.pool_qualifiers {
+                by_challenge
+                    .entry((*challenge).to_string())
+                    .or_insert_with(|| json!({}))
+                    .as_object_mut()
+                    .unwrap()
+                    .insert((*track).to_string(), json!(count));
+            }
+            json!({
+                "opow": [{
+                    "player_id": POOL,
+                    "block_data": {"num_qualifiers_by_challenge_by_track": by_challenge},
+                }],
+            })
+        }
+
+        /// The confirmed window, built by the module that owns §7's mapping.
+        ///
+        /// Not hand-assembled: routing the fixture through `confirmed_window`
+        /// is what makes these tests measure the real document. The shape bug
+        /// this replaced survived precisely because the test built its own.
+        fn window(&self) -> ConfirmedWindow {
+            let snapshot = self.snapshot();
+            crate::window::confirmed_window(&self.benchmarks_body(), &snapshot.block)
+                .expect("the fixture is a readable get-benchmarks body")
         }
 
         fn snapshot(&self) -> Snapshot {
@@ -875,8 +1032,8 @@ mod tests {
                 block: json!({
                     "block": {
                         "id": "block-1",
-                        "details": {"round": ROUND},
-                        "data": {"active_ids": {"benchmark": []}},
+                        "details": {"round": ROUND, "height": 100_080},
+                        "data": {"active_ids": {"benchmark": self.active_ids}},
                     }
                 }),
                 reads: BTreeMap::from([
@@ -892,10 +1049,8 @@ mod tests {
                             "advances": [],
                         }),
                     ),
-                    (
-                        "get-benchmarks".to_string(),
-                        json!({"benchmarks": self.benchmarks}),
-                    ),
+                    ("get-benchmarks".to_string(), self.benchmarks_body()),
+                    ("get-opow".to_string(), self.opow_body()),
                 ]),
                 tracks: BTreeMap::new(),
                 reads_complete: true,
@@ -963,10 +1118,18 @@ mod tests {
         })
     }
 
+    /// A binary in TIG's shape: confirmed, compiled, with a download URL.
+    ///
+    /// All three matter (`tig_integration.md` §5.1), so the helper carries all
+    /// three and the tests below remove them one at a time.
     fn binary(algorithm_id: &str, compile_success: bool) -> Value {
         json!({
             "algorithm_id": algorithm_id,
-            "details": {"compile_success": compile_success},
+            "details": {
+                "compile_success": compile_success,
+                "download_url": format!("https://example.invalid/get-binary-blob?algorithm_id={algorithm_id}"),
+            },
+            "state": {"block_confirmed": 473_764},
         })
     }
 
@@ -979,7 +1142,10 @@ mod tests {
         ActiveBenchmarkMeta {
             benchmark_id: benchmark_id.to_string(),
             player_id: OTHER.to_string(),
-            challenge_id: "c001".to_string(),
+            // The algorithm id encodes its challenge in TIG's scheme
+            // (`c008_a001`), so this stays consistent with the algorithm
+            // rather than being a third opinion about which challenge it is.
+            challenge_id: algorithm.split('_').next().unwrap_or(algorithm).to_string(),
             algorithm_id: algorithm.to_string(),
             track_id: track.to_string(),
             compute_type: Some("cpu".to_string()),
@@ -994,12 +1160,68 @@ mod tests {
         }
     }
 
-    fn cpu() -> OfferedCompute {
-        OfferedCompute::Cpu { cores: 8 }
+    /// A CPU offer on an arm instance. The class and the protocol type are
+    /// different vocabularies and this fixture keeps them visibly different,
+    /// because conflating them is how `"cpu"` reaches a field TIG reads as
+    /// `"aws_t4g"`.
+    fn cpu_offer() -> Offer {
+        Offer {
+            compute: OfferedCompute::Cpu { cores: 8 },
+            tig_compute_type: "aws_t4g".to_string(),
+        }
     }
 
     fn run(f: &Fixture, active: &[ActiveBenchmarkMeta]) -> Result<Proposed, ProposeError> {
-        propose(&f.snapshot(), Network::Testnet, POOL, cpu(), active)
+        propose(
+            &f.snapshot(),
+            &f.window(),
+            Network::Testnet,
+            POOL,
+            &cpu_offer(),
+            active,
+        )
+    }
+
+    /// A `precommits[]` entry in TIG's shape.
+    fn precommit_entry(
+        benchmark_id: &str,
+        player: &str,
+        challenge: &str,
+        algorithm: &str,
+        track: &str,
+        num_bundles: Option<u64>,
+        confirmed: bool,
+    ) -> Value {
+        let mut details = serde_json::Map::new();
+        details.insert("block_started".to_string(), json!(100));
+        details.insert("num_nonces".to_string(), json!(10));
+        if let Some(n) = num_bundles {
+            details.insert("num_bundles".to_string(), json!(n));
+        }
+        json!({
+            "benchmark_id": benchmark_id,
+            "details": details,
+            "settings": {
+                "player_id": player,
+                "challenge_id": challenge,
+                "algorithm_id": algorithm,
+                "track_id": track,
+            },
+            "state": {"block_confirmed": if confirmed { json!(101) } else { Value::Null }},
+        })
+    }
+
+    /// A `benchmarks[]` entry in TIG's shape: bundle facts only.
+    fn benchmark_entry(benchmark_id: &str, stopped: bool) -> Value {
+        json!({
+            "id": benchmark_id,
+            "details": {
+                "stopped": stopped,
+                "num_active_bundles": 1,
+                "average_quality_by_bundle": [50],
+            },
+            "state": {"block_confirmed": 102},
+        })
     }
 
     fn precommit(proposed: Proposed) -> Proposal {
@@ -1162,6 +1384,75 @@ mod tests {
     }
 
     #[test]
+    fn a_binary_that_is_unconfirmed_or_unfetchable_is_not_usable() {
+        // `tig_integration.md` §5.1: usable means confirmed, compiled *and*
+        // fetchable. Compilation alone would let §6.4 step 1 select an
+        // algorithm that is not yet in the block's view, or one no runtime can
+        // obtain — and the precommit fee is paid before anyone finds out.
+        for (b, why) in [
+            (
+                json!({
+                    "algorithm_id": "c001_a001",
+                    "details": {
+                        "compile_success": true,
+                        "download_url": "https://example.invalid/b",
+                    },
+                    "state": {},
+                }),
+                "unconfirmed",
+            ),
+            (
+                json!({
+                    "algorithm_id": "c001_a001",
+                    "details": {"compile_success": true},
+                    "state": {"block_confirmed": 1},
+                }),
+                "no download url",
+            ),
+            (
+                json!({
+                    "algorithm_id": "c001_a001",
+                    "details": {"compile_success": true, "download_url": ""},
+                    "state": {"block_confirmed": 1},
+                }),
+                "empty download url",
+            ),
+        ] {
+            let mut f = Fixture::workable();
+            f.binarys = vec![b];
+            assert!(
+                matches!(
+                    run(&f, &[active("b1", "c001_a001", "t1", Some(4))]).unwrap(),
+                    Proposed::NoAction(_)
+                ),
+                "a binary that is {why} must leave the algorithm unselectable"
+            );
+        }
+    }
+
+    #[test]
+    fn a_source_whose_fuel_budget_tig_did_not_publish_is_not_a_source() {
+        // §6.6 step 3 *copies* the source's fuel budget. The cache keeps it
+        // optional because TIG does not always publish one; admitting such an
+        // entry produced a source offering a budget of 0, which the precommit
+        // would then submit. §6.6's last paragraph says the track has no valid
+        // source and the challenge is ineligible — a fabricated zero is not
+        // the same answer.
+        let mut meta = active("b1", "c001_a001", "t1", Some(4));
+        meta.fuel_budget = None;
+        let f = Fixture::workable();
+
+        assert!(
+            source_candidates(&[meta.clone()]).is_empty(),
+            "an unpublished budget is not a source"
+        );
+        let Proposed::NoAction(selection) = run(&f, &[meta]).unwrap() else {
+            panic!("a track with no valid source must not be precommitted");
+        };
+        assert!(selection.excluded.contains_key("c001"), "{selection:?}");
+    }
+
+    #[test]
     fn adoption_is_compared_as_an_integer() {
         // TIG publishes adoption as an 18-decimal fixed-point integer in a
         // decimal string. Two values that differ only in their last digits are
@@ -1237,10 +1528,13 @@ mod tests {
 
     #[test]
     fn the_pool_s_qualifiers_are_its_own_and_an_algorithm_s_are_everyone_s() {
-        // §6.3's numerator is what *the pool* holds; §6.5's is how the
-        // algorithm performs network-wide. Reading one for the other is
-        // invisible in a single-player fixture, so this one has two players.
+        // §6.3's numerator is what *the pool* holds, published by OPoW — the
+        // same quantity §7 step 1 and invariant 13 read. §6.5's is how the
+        // algorithm performs network-wide, which is on the algorithm code.
+        // Two endpoints, two aggregations; an earlier version derived the
+        // first from the second, which no document says are equal.
         let f = Fixture {
+            pool_qualifiers: vec![("c001", "t1", 5)],
             codes: vec![code(
                 "c001_a001",
                 "c001",
@@ -1251,15 +1545,22 @@ mod tests {
             ..Fixture::workable()
         };
         let snapshot = f.snapshot();
-        let evidence = algorithm_evidence(&snapshot, POOL, ROUND).unwrap();
 
         assert_eq!(
-            evidence.pool_qualifiers_by_challenge_by_track["c001"]["t1"], 5,
-            "§6.3 counts only the pool's own"
+            pool_qualifiers(&snapshot, POOL).unwrap()["c001"]["t1"],
+            5,
+            "§6.3 reads the pool's own count from OPoW"
         );
         assert_eq!(
-            evidence.qualifiers_by_algorithm_by_track["c001_a001"]["t1"], 25,
+            algorithm_evidence(&snapshot, ROUND)
+                .unwrap()
+                .qualifiers_by_algorithm_by_track["c001_a001"]["t1"],
+            25,
             "§6.5 counts every player's"
+        );
+        assert!(
+            pool_qualifiers(&snapshot, OTHER).unwrap().is_empty(),
+            "another player's OPoW entry is not the pool's"
         );
     }
 
@@ -1316,10 +1617,12 @@ mod tests {
     }
 
     #[test]
-    fn the_draw_map_covers_every_candidate_not_only_the_tied_ones() {
-        // Criterion D2d: the full rank map is the audit evidence, and which
-        // challenges were candidates at this block is not recoverable later.
-        // A map built only when a tie happened could never be reconstructed.
+    fn the_draw_map_covers_every_eligible_challenge_not_only_the_tied_ones() {
+        // Criterion D2d: the rank map is the audit evidence, and which
+        // challenges were eligible at this block is not recoverable later. A
+        // map built only when a tie happened could never be reconstructed.
+        // Both challenges here are eligible; the *scope* of the set is
+        // `the_draw_map_holds_only_challenges_that_were_actually_candidates`.
         let mut f = Fixture::workable();
         f.challenges = vec![
             challenge("c001", "cpu", 25, &[("t1", 10)], &[("t1", 30)]),
@@ -1328,8 +1631,9 @@ mod tests {
         // The pool already holds qualifiers on c001 and none on c002, so
         // §6.3's factors are 5/30 and 0 — genuinely different, which is what
         // makes "not tied, still ranked" the thing being asserted.
+        f.pool_qualifiers = vec![("c001", "t1", 5)];
         f.codes = vec![
-            code("c001_a001", "c001", 25, SOME_ADOPTION, &[("t1", POOL, 5)]),
+            code("c001_a001", "c001", 25, SOME_ADOPTION, &[]),
             code("c002_a001", "c002", 25, SOME_ADOPTION, &[]),
         ];
         f.binarys = vec![binary("c001_a001", true), binary("c002_a001", true)];
@@ -1359,89 +1663,207 @@ mod tests {
     }
 
     #[test]
-    fn an_already_active_benchmark_is_not_also_in_flight() {
-        // §2's definition: in flight is confirmed and *not yet active*. An
-        // active benchmark already contributes to the qualifier counts §6.3
-        // reads, so projecting it as well would count the same work twice —
-        // in both the numerator and the denominator.
-        let f = Fixture {
-            benchmarks: vec![json!({
-                "id": "b1",
-                "details": {
-                    "player_id": POOL,
-                    "challenge_id": "c001",
-                    "algorithm_id": "c001_a001",
-                    "track_id": "t1",
-                    "num_bundles": 7,
-                },
-                "state": {"block_confirmed": 10},
-            })],
-            ..Fixture::workable()
-        };
-        let snapshot = f.snapshot();
-
-        let none_active = in_flight(&snapshot, POOL, &BTreeSet::new()).unwrap();
-        assert_eq!(none_active.len(), 1, "confirmed and not active: in flight");
-        assert_eq!(none_active[0].num_bundles, 7);
-
-        let active_now = in_flight(&snapshot, POOL, &BTreeSet::from(["b1".to_string()])).unwrap();
-        assert!(
-            active_now.is_empty(),
-            "active is not in flight: {active_now:?}"
+    fn the_draw_map_holds_only_challenges_that_were_actually_candidates() {
+        // Criterion D2d scopes the map to "every compute-compatible eligible
+        // challenge". A superset is not merely untidy: the rank map is written
+        // once into an immutable decision record whose job is to say which
+        // challenges were candidates at this block, and a GPU challenge or one
+        // missing a track source was never among them.
+        let mut f = Fixture::workable();
+        f.challenges = vec![
+            challenge("c001", "cpu", 25, &[("t1", 10)], &[("t1", 30)]),
+            // Wrong compute type for a CPU offer.
+            challenge("c009", "gpu", 25, &[("t1", 10)], &[("t1", 30)]),
+            // Right type, but one of its two tracks has no source.
+            challenge("c002", "cpu", 25, &[("t1", 10), ("t2", 10)], &[("t1", 30)]),
+        ];
+        f.codes = vec![
+            code("c001_a001", "c001", 25, SOME_ADOPTION, &[]),
+            code("c009_a001", "c009", 25, SOME_ADOPTION, &[]),
+            code("c002_a001", "c002", 25, SOME_ADOPTION, &[]),
+        ];
+        f.binarys = vec![
+            binary("c001_a001", true),
+            binary("c009_a001", true),
+            binary("c002_a001", true),
+        ];
+        let p = precommit(
+            run(
+                &f,
+                &[
+                    active("b1", "c001_a001", "t1", Some(4)),
+                    active("b2", "c009_a001", "t1", Some(4)),
+                    active("b3", "c002_a001", "t1", Some(4)),
+                ],
+            )
+            .unwrap(),
+        );
+        assert_eq!(
+            p.draw_ranks.keys().collect::<Vec<_>>(),
+            vec!["c001"],
+            "the GPU challenge and the partially-sourced one were never candidates"
+        );
+        assert_eq!(
+            p.draw_ranks.keys().collect::<Vec<_>>(),
+            p.challenge_selection.considered.iter().collect::<Vec<_>>(),
+            "the ranked set and the considered set are the same set"
         );
     }
 
     #[test]
-    fn another_player_s_benchmark_is_not_the_pool_s_projection() {
-        // §6.3 projects the pool's own in-flight work. Someone else's is
-        // already in the network counts, and adding it to the numerator would
-        // inflate the pool's projected share and steer the choice away from a
-        // challenge it should have picked.
-        let f = Fixture {
-            benchmarks: vec![json!({
-                "id": "b1",
-                "details": {
-                    "player_id": OTHER,
-                    "challenge_id": "c001",
-                    "algorithm_id": "c001_a001",
-                    "track_id": "t1",
-                    "num_bundles": 7,
-                },
-                "state": {"block_confirmed": 10},
-            })],
-            ..Fixture::workable()
-        };
-        assert!(
-            in_flight(&f.snapshot(), POOL, &BTreeSet::new())
-                .unwrap()
-                .is_empty()
+    fn a_pass_with_no_tie_records_no_draw_outcome() {
+        // §6.3 and D2d record a tied set and its winner "when a tie occurred".
+        // Set unconditionally, `tie_winner` asserts on every untied pass that
+        // the winner came from a tiebreak it never entered — and invariant 25
+        // is about a record an auditor can reproduce.
+        let mut f = Fixture::workable();
+        f.pool_qualifiers = vec![("c001", "t1", 5)];
+        f.challenges = vec![
+            challenge("c001", "cpu", 25, &[("t1", 10)], &[("t1", 30)]),
+            challenge("c002", "cpu", 25, &[("t1", 10)], &[("t1", 1)]),
+        ];
+        f.codes = vec![
+            code("c001_a001", "c001", 25, SOME_ADOPTION, &[]),
+            code("c002_a001", "c002", 25, SOME_ADOPTION, &[]),
+        ];
+        f.binarys = vec![binary("c001_a001", true), binary("c002_a001", true)];
+        let untied = precommit(
+            run(
+                &f,
+                &[
+                    active("b1", "c001_a001", "t1", Some(4)),
+                    active("b2", "c002_a001", "t1", Some(4)),
+                ],
+            )
+            .unwrap(),
+        );
+        assert!(untied.tie_candidates.is_none());
+        assert_eq!(untied.tie_winner, None, "no tie, so no draw outcome");
+
+        // The same fixture with both factors at zero does tie, and then the
+        // winner is the draw's — so the field is populated exactly when it
+        // means something.
+        f.pool_qualifiers = vec![];
+        let tied = precommit(
+            run(
+                &f,
+                &[
+                    active("b1", "c001_a001", "t1", Some(4)),
+                    active("b2", "c002_a001", "t1", Some(4)),
+                ],
+            )
+            .unwrap(),
+        );
+        assert_eq!(
+            tied.tie_candidates.as_deref(),
+            Some(["c001".to_string(), "c002".to_string()].as_slice()),
+        );
+        assert_eq!(
+            tied.tie_winner.as_deref(),
+            Some(tied.selected_challenge.as_str())
         );
     }
 
+    /// Every in-flight case over one fixture, so the §2 definition is tested
+    /// as the four-part test it is rather than four unrelated assertions.
+    ///
+    /// The table is the point: each row differs from the projected one in
+    /// exactly one respect, and the shapes are TIG's own — the bug this
+    /// replaced survived because the test invented a `benchmarks[].details`
+    /// that carries the identity, which live TIG puts on `precommits[].settings`.
     #[test]
-    fn an_unconfirmed_benchmark_is_not_projected() {
-        // §7 makes confirmation a read. A write the pool sent and TIG has not
-        // recorded is not evidence of anything, and projecting it would let a
-        // failed submission steer the next decision.
+    fn only_a_confirmed_unterminated_inactive_precommit_of_the_pool_is_projected() {
         let f = Fixture {
-            benchmarks: vec![json!({
-                "id": "b1",
-                "details": {
-                    "player_id": POOL,
-                    "challenge_id": "c001",
-                    "algorithm_id": "c001_a001",
-                    "track_id": "t1",
-                    "num_bundles": 7,
-                },
-                "state": {},
+            precommits: vec![
+                precommit_entry("b-flight", POOL, "c001", "c001_a001", "t1", Some(7), true),
+                precommit_entry("b-active", POOL, "c001", "c001_a001", "t1", Some(7), true),
+                precommit_entry("b-stopped", POOL, "c001", "c001_a001", "t1", Some(7), true),
+                precommit_entry("b-fraud", POOL, "c001", "c001_a001", "t1", Some(7), true),
+                precommit_entry(
+                    "b-unconfirmed",
+                    POOL,
+                    "c001",
+                    "c001_a001",
+                    "t1",
+                    Some(7),
+                    false,
+                ),
+                precommit_entry("b-other", OTHER, "c001", "c001_a001", "t1", Some(7), true),
+                precommit_entry("b-no-track", POOL, "c001", "c001_a001", "", Some(7), true),
+                precommit_entry("b-no-bundles", POOL, "c001", "c001_a001", "t1", None, true),
+            ],
+            benchmark_entries: vec![
+                benchmark_entry("b-stopped", true),
+                benchmark_entry("b-flight", false),
+            ],
+            frauds: vec![json!({
+                "benchmark_id": "b-fraud",
+                "state": {"block_confirmed": 103},
             })],
+            active_ids: vec!["b-active".to_string()],
             ..Fixture::workable()
         };
-        assert!(
-            in_flight(&f.snapshot(), POOL, &BTreeSet::new())
-                .unwrap()
-                .is_empty()
+
+        let flights = in_flight(&f.window(), POOL);
+        let projected: Vec<&str> = flights.iter().map(|b| b.benchmark_id.as_str()).collect();
+
+        // `b-no-track` is in flight but carries no track, so §6.3 records it
+        // as excluded from the projection rather than contributing zero — it
+        // is present with `track_id: None`, which is a different answer from
+        // being absent.
+        assert_eq!(
+            projected,
+            vec!["b-flight", "b-no-track"],
+            "one per §2 reason: active, stopped, fraud-confirmed, unconfirmed, \
+             another player's, and a count TIG did not publish are all out"
         );
+
+        let no_track = flights
+            .iter()
+            .find(|b| b.benchmark_id == "b-no-track")
+            .expect("present");
+        assert_eq!(
+            no_track.track_id, None,
+            "excluded from the projection, not zeroed"
+        );
+
+        let flight = flights
+            .iter()
+            .find(|b| b.benchmark_id == "b-flight")
+            .expect("present");
+        assert_eq!(
+            flight.num_bundles, 7,
+            "from precommits[].details.num_bundles"
+        );
+        assert_eq!(flight.challenge_id, "c001", "from precommits[].settings");
+        assert_eq!(
+            flight.algorithm_id, "c001_a001",
+            "from precommits[].settings"
+        );
+        assert_eq!(flight.track_id.as_deref(), Some("t1"));
+    }
+
+    #[test]
+    fn a_precommit_confirmed_and_still_computing_is_the_principal_in_flight_case() {
+        // Called out separately because an earlier version required a
+        // confirmed `benchmarks[]` entry, which excludes exactly this — the
+        // state most in-flight work is in. Nothing here has a benchmarks[]
+        // entry at all.
+        let f = Fixture {
+            precommits: vec![precommit_entry(
+                "b1",
+                POOL,
+                "c001",
+                "c001_a001",
+                "t1",
+                Some(3),
+                true,
+            )],
+            ..Fixture::workable()
+        };
+        let projected = in_flight(&f.window(), POOL);
+        assert_eq!(projected.len(), 1, "{projected:?}");
+        assert_eq!(projected[0].num_bundles, 3);
     }
 
     #[test]
@@ -1453,7 +1875,14 @@ mod tests {
         let mut snapshot = f.snapshot();
         snapshot.reads.remove("get-algorithms");
         assert_eq!(
-            propose(&snapshot, Network::Testnet, POOL, cpu(), &[]),
+            propose(
+                &snapshot,
+                &f.window(),
+                Network::Testnet,
+                POOL,
+                &cpu_offer(),
+                &[]
+            ),
             Err(ProposeError::MissingRead {
                 endpoint: "get-algorithms"
             })
@@ -1469,7 +1898,14 @@ mod tests {
         let p = precommit(run(&f, &[active("b1", "c001_a001", "t1", Some(4))]).unwrap());
         assert_eq!(p.selected_challenge, "c001");
         assert_eq!(p.selected_algorithm, "c001_a001");
-        assert_eq!(p.compute_type, "cpu");
+        assert_eq!(
+            p.compute_type, "aws_t4g",
+            "the record carries TIG's protocol type, which is the offer's"
+        );
+        assert_eq!(
+            p.compute_class, "cpu",
+            "and the challenge's class beside it, which §6.2 matched on"
+        );
         assert_eq!(
             p.track_settings.pointer("/t1/fuel_budget"),
             Some(&json!(5_000_000)),

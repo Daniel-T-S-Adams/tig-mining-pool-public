@@ -149,6 +149,15 @@ impl ActiveBenchmarkStore for Memory {
             .collect())
     }
 
+    async fn load(
+        &self,
+        _: Network,
+        ids: &[String],
+    ) -> Result<Vec<ActiveBenchmarkMeta>, StoreError> {
+        let rows = self.rows.lock().unwrap();
+        Ok(ids.iter().filter_map(|id| rows.get(id).cloned()).collect())
+    }
+
     async fn retain(
         &self,
         _: Network,

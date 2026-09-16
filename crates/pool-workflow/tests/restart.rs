@@ -24,6 +24,7 @@ fn precommit(benchmark: &str, block: i64) -> ConfirmedPrecommit {
         block_started: block - 2,
         // A *detail*, like `block_started` — not one of the settings below.
         num_nonces: Some(80),
+        num_bundles: None,
         track_id: "t002".to_string(),
         settings: json!({ "num_bundles": 5 }),
     }

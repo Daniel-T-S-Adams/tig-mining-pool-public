@@ -82,7 +82,7 @@ Paths are relative to `crates/` unless they begin with `scripts/`,
 | F4b | `workflow_state.rs` — `no_slice_1_workflow_is_attributable_to_a_member`, `a_terminal_reason_may_not_attribute_member_fault` |
 | F4c | `scripts/feature-gate.sh` in `make check`: the stub acceptance record is absent from a default `pool-controller` build |
 | F4d | `pool-controller/tests/stub_gate.rs` (5 tests) — `the_stub_refuses_a_live_endpoint_and_writes_nothing`, `a_stub_row_says_it_is_one` |
-| F5 | `workflow_state.rs` — `a_workflow_expires_at_the_guardrail_and_records_why`, `the_expiry_reason_is_a_bounded_code`, and the six sweep tests around them; `tick.rs::an_unsent_decision_expires_when_the_guardrail_passes_and_not_before` |
+| F5 | `workflow_state.rs` — eight deadline tests: `a_workflow_expires_at_the_guardrail_and_records_why`, `the_expiry_reason_is_a_bounded_code`, `a_precommit_that_never_confirmed_still_expires`, `a_precommit_confirmed_after_the_deadline_is_a_discrepancy`, and the four that hold the sweep back (`the_deadline_sweep_does_not_expire_a_workflow_whose_proof_tig_confirmed`, `the_deadline_sweep_does_not_expire_a_verified_workflow`, `an_unsettled_benchmark_write_holds_the_deadline_off_too`, `an_unsettled_precommit_is_never_expired_by_the_clock`); `tick.rs::an_unsent_decision_expires_when_the_guardrail_passes_and_not_before` |
 | F6 | `admission.rs` — `admission_creates_the_workflow_with_its_owner_and_open_interval`, `an_intent_cannot_exist_without_its_owner_mapping`, `a_workflow_cannot_exist_without_an_open_interval`; `workflow_state.rs::a_mainnet_workflow_cannot_be_pool_owned` |
 | F6a | `workflow_state.rs` — `one_workflow_owns_one_benchmark`, `a_workflow_cannot_be_re_pointed_at_another_benchmark` |
 
@@ -126,11 +126,11 @@ Paths are relative to `crates/` unless they begin with `scripts/`,
 
 | # | Where it is satisfied |
 |---|---|
-| K1 | `make check` — fmt, clippy `-D warnings`, 75 test suites, and the feature-gate, credential-boundary, secret-scan, image-pin, no-observed-constants and live-run-evidence selftests. Run on every PR by `.github/workflows/pr-checks.yml` |
+| K1 | `make check` — `cargo fmt --check`, clippy `-D warnings`, `cargo test --workspace` (80 targets, 636 tests at this commit), and the feature-gate, credential-boundary, secret-scan, live-run-evidence, image-pin and no-observed-constants gates, five of which carry a `--selftest` that plants what they are meant to catch. Run on every PR by `.github/workflows/pr-checks.yml` |
 | K2 | `pool-controller/tests/lifecycle.rs`, six ladders across five of the nine fixture cases, deterministic and run in CI (four waived, below). **One divergence from the criterion as written:** it says "against fake-tig", and the ladders are driven from a constructed `ConfirmedWindow` instead. What fake-tig covers is the step before — `window_against_fake_tig.rs::each_confirmed_state_a_real_server_serves_reaches_the_window` and `a_fraud_ruling_a_real_server_serves_reaches_the_window` assert that a real server's responses produce exactly that window, and `tick.rs` drives the controller against fake-tig end to end |
 | K3 | [`slice-1-live-run.md`](slice-1-live-run.md) — the run's block heights, intent and attempt rows |
 | K4 | [`slice-1-live-run.md`](slice-1-live-run.md), produced by `scripts/live-crash-test.sh` |
-| K5 | The spike-test disposition table in `plans/slice-1-gateway.md` §7 |
+| K5 | The disposition table in `plans/slice-1-gateway.md` §4, "K5's disposition" — one row per in-scope spike assertion, naming the slice-1 test it ported to or the checklist step it re-homed to, with the reason. (§7 is a different table: what becomes of the spike *crate*, which slice 1 does not clear) |
 
 ## Waivers
 

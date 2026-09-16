@@ -476,6 +476,11 @@ slice-1 configuration must name.
   in CI with no network. Six of `lifecycle.json`'s nine cases; the three that
   exercise the member API are deferred to checklist §10 step 2, recorded under
   "Deferred to the slice that owns them" below.
+
+  **Closed at five cases, six workflow ladders**, and driven against a
+  constructed confirmed window rather than against fake-tig. §9 and
+  `evidence/slice-1-criteria.md` record both divergences and the fourth
+  deferral, `fraud_confirmed_after_proof`.
 - K3. **One live testnet run** reaches a confirmed precommit and a created
   assignment, driven by the production binaries, with the run's block
   heights and intent/attempt rows recorded in the PR.
@@ -546,6 +551,9 @@ owner to shorten this slice without reducing the product:
   exercise the member API and artifact upload, which §2 defers to that step;
   driving them here means building a fake member and a fake upload path to
   throw away. The remaining six are K2's scope and stay.
+
+  **Closed as four**, not three: `fraud_confirmed_after_proof` is deferred by
+  the same rule, its ladder beginning in `VERIFYING`. See §9.
 
 Each deferral names the slice that owns it, so nothing is lost — only moved to
 where it can be built once.

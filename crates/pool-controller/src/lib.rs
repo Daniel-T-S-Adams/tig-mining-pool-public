@@ -12,6 +12,7 @@
 pub mod bind;
 pub mod commit;
 pub mod ingest;
+pub mod propose;
 pub mod reconciler;
 pub mod service;
 pub mod window;

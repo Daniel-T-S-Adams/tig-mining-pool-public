@@ -317,18 +317,7 @@ async fn every_in_scope_case_reaches_the_state_the_fixture_records() {
                 })
                 .unwrap_or(t.from);
 
-            // `PRECOMMIT_SUBMITTED` is where the fixture starts one case, and
-            // the implementation cannot advance from there: `bind` selects
-            // `DECIDED` only, and such a workflow has no `benchmark_id` for
-            // the restart pass to match on. Issue #44. Staged from `DECIDED`,
-            // which is where the pool actually sits while its precommit is
-            // unconfirmed — the K3 live run went straight from it.
-            let from = if chain_start == WorkflowState::PrecommitSubmitted {
-                WorkflowState::Decided
-            } else {
-                chain_start
-            };
-            stage(&pool, &workflow_id, &benchmark_id, from).await;
+            stage(&pool, &workflow_id, &benchmark_id, chain_start).await;
 
             // Every in-scope step of this workflow's ladder, in order. A case
             // is a sequence of evidence arrivals, and applying only the last
@@ -383,7 +372,7 @@ async fn every_in_scope_case_reaches_the_state_the_fixture_records() {
                 expected,
                 "{name}: {workflow} should reach {} from {}.\n  rule: {}",
                 expected.as_str(),
-                from.as_str(),
+                chain_start.as_str(),
                 t.rule
             );
             asserted += 1;
@@ -419,6 +408,14 @@ async fn every_in_scope_case_reaches_the_state_the_fixture_records() {
 
 /// The precommit's confirming evidence, applied directly rather than through
 /// `bind`.
+///
+/// It accepts a workflow at `PRECOMMIT_SUBMITTED` as well as `DECIDED`, which
+/// is why these ladders are staged where the fixture starts them. An earlier
+/// version of this test remapped them to `DECIDED` on the belief that the
+/// implementation could not advance from `PRECOMMIT_SUBMITTED` — true of
+/// `bind`, which is not the path this test takes, and the remap then asserted
+/// a transition the fixture does not record while the module doc claimed the
+/// two could not drift.
 ///
 /// Two things happen when a precommit confirms: the §10 tuple search decides
 /// *which* workflow the entry belongs to, and that workflow then advances on

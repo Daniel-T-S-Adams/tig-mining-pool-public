@@ -416,9 +416,12 @@ slice-1 configuration must name.
   `trace_id`) with the allow-listed field policy in `architecture.md` §10.1.
 - I2. The snapshot, workflow, PostgreSQL, and TIG metric groups of
   `architecture.md` §10.2 are exported. Metric labels carry no unbounded IDs.
+  **Deferred** to checklist §10 step 5 — see "Deferred to the slice that owns
+  them" below.
 - I3. Durable intents store the originating trace ID so work resumed after a
   restart stays correlated (`architecture.md` §10.1).
-- I4. Every `architecture.md` §10.3 alert that slice 1 can reach fires in a
+- I4. **Deferred** to checklist §10 step 5 with I2, which it depends on — see
+  below. Every `architecture.md` §10.3 alert that slice 1 can reach fires in a
   test:
   - TIG writes disabled by compatibility or authentication failure;
   - the latest accepted snapshot more than two target blocks old, or any
@@ -457,7 +460,9 @@ slice-1 configuration must name.
 - K1. `make check` passes from a clean checkout, including the new gates.
 - K2. The full lifecycle scenario — through commitment, sampled nonces,
   proof, stopped, fraud and active — runs deterministically against fake-tig
-  in CI with no network.
+  in CI with no network. Six of `lifecycle.json`'s nine cases; the three that
+  exercise the member API are deferred to checklist §10 step 2, recorded under
+  "Deferred to the slice that owns them" below.
 - K3. **One live testnet run** reaches a confirmed precommit and a created
   assignment, driven by the production binaries, with the run's block
   heights and intent/attempt rows recorded in the PR. Reaching `ACTIVE` live
@@ -488,6 +493,48 @@ slice-1 configuration must name.
   and 6–8. The upload, authorization, durable-acceptance and package-format
   assertions in `pool_upload.rs`, `pool_upload_authed.rs` and
   `member_package.rs` are **not** in slice-1 scope — see the §7 table.
+
+### K5's disposition
+
+Each in-scope spike assertion, and where it now lives. Verified by reading both
+sides rather than by matching names — the slice-1 tests assert the spike's
+server-side write count too, which is the assertion that distinguishes
+"recovered" from "recovered without a duplicate".
+
+| Spike test | Disposition |
+|---|---|
+| `gateway_fake_tig::precommit_to_confirmed_assignment` | Ported: `drive::a_prepared_intent_is_sent_once_and_its_attempt_recorded_around_the_send`, and evidenced live (K3) |
+| `gateway_fake_tig::ambiguous_outcome_is_not_resubmitted` | Ported: `drive::a_lost_response_is_recovered_by_search_and_the_lane_reopens` — same `OUTCOME_UNKNOWN`, same lane-held assertion, plus a server-side count of exactly one |
+| `failures_fake_tig::restart_after_ambiguous_write_adopts_without_resubmit` | Ported: the same test, which is also G2's third crash point |
+| `failures_fake_tig::restart_with_unsent_intent_resends_exactly_once` | Ported: `drive::a_crash_after_the_decision_leaves_the_intent_claimable` and `a_crash_before_the_request_left_stops_rather_than_paying_twice` |
+| `failures_fake_tig::circuit_breaker_stops_new_commitments` | **Re-homed** to checklist §10 steps 2 and 6–8. F4b forbids slice 1 asserting member trust, so porting it here would mean asserting a rule this slice may not hold. |
+| `active_fake_tig::full_chain_to_active_and_retention` | **Split.** The lifecycle half is K2's `active_full_happy_path`. Retention is checklist §10 step 3, which owns artifact retention. |
+
+The spike crate is not deleted — §7 governs that, and it is not slice 1's to
+clear.
+
+### Deferred to the slice that owns them
+
+`§8`'s "explicit written waiver" for three criteria, agreed with the repository
+owner to shorten this slice without reducing the product:
+
+- **I2 (metrics)** → checklist §10 **step 5**, "persistent reconciliation,
+  operator tooling, and monitoring". Nothing consumes metrics today: there is
+  no scrape target, no dashboard and no alert destination, so an exporter built
+  here would be written against nothing and rewritten against the real
+  deployment. Step 5 is where monitoring already lives in the plan.
+- **I4 (alert tests)** → the same step, for the same reason. With no alerting
+  system the test can only assert that a log line was written, which the code
+  does anyway and which proves nothing about whether anyone is woken.
+- **Three of `lifecycle.json`'s nine cases** —
+  `duplicate_capacity_offer_request`, `duplicate_durable_acceptance_receipt`
+  and `member_package_timeout_failed` → checklist §10 **step 2**. All three
+  exercise the member API and artifact upload, which §2 defers to that step;
+  driving them here means building a fake member and a fake upload path to
+  throw away. The remaining six are K2's scope and stay.
+
+Each deferral names the slice that owns it, so nothing is lost — only moved to
+where it can be built once.
 
 ## 5. Sequencing
 

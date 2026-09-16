@@ -1137,6 +1137,41 @@ owns it.
 against the fixture, so `get-algorithms` fails against `fake-tig` until the
 fixture is corrected.
 
+### 14.5 `get-opow` carries a list of players, not one
+
+`GET /get-opow?block_id=…` returns, on live testnet:
+
+```
+opow:           list — block_data, player_id   (2 entries)
+player_details: object
+```
+
+`opow` is a **list**, one entry per player, and the response carries a second
+top-level key. Observed 2026-09-16 at block `87aa13f33e0be98e7abfea47d3bb0c3d`,
+height 1331395.
+
+`fixtures/tig/v1/get-opow.json` has `opow` as a single **object** — one
+player's record, unwrapped — and no `player_details`. So the fixture and the
+API disagree about the envelope, in the same way §14.4 records for
+`get-algorithms`, and for the same likely reason: the fixture's provenance is
+**constructed** rather than captured, so this may be a derivation error rather
+than an envelope change. Establishing which belongs to §15's review;
+[issue #28](https://github.com/Daniel-T-S-Adams/tig-mining-pool-public/issues/28)
+already owns the `get-algorithms` half and this is the same question.
+
+The spike's S1 bullet above says that apart from `get-algorithms` and
+`get-player-data`, "other read envelopes nest under a single top-level resource
+key as expected". That reading is narrower than it sounds: `get-opow` does nest
+under a single resource key — `opow` — and what differs is whether that key
+holds one player or a list of them. S1 did not record the cardinality, so this
+is new evidence rather than a contradiction of it.
+
+**Consequence.** `mining_system.md` §6.3's `pool_q[c][t]` is read from this
+endpoint, so the reader must accept both shapes until a corrected fixture
+exists: the pinned object is what `fake-tig` serves, and the list is what
+testnet answers. `pool-controller`'s `propose::pool_qualifiers` reads either
+and cites this section.
+
 ### 14.3 An absent player is a success, not a 404
 
 `GET /get-player-data?block_id=…&player_id=…` answers an id TIG does not hold

@@ -236,6 +236,16 @@ fn candidate_challenges(
                 )
             })?;
 
+        // §6.2's eligibility is "settings for **every** active track", and
+        // `all()` over an empty set is true — so a challenge with no active
+        // tracks would be vacuously eligible, and §6.3 would score it
+        // `0/0 = 0`, the lowest factor there is. It would then win every
+        // decision, and the precommit would carry no track settings at all.
+        // A challenge with nothing to mine is not a candidate.
+        if active_tracks.is_empty() {
+            continue;
+        }
+
         let mut nonces_per_bundle = BTreeMap::new();
         for (track_id, track) in active_tracks {
             let nonces = track
@@ -616,10 +626,18 @@ fn pool_qualifiers(
 ) -> Result<BTreeMap<String, BTreeMap<String, u128>>, ProposeError> {
     const E: &str = "get-opow";
     let body = read(snapshot, E)?;
-    let entries = body
-        .get("opow")
-        .and_then(Value::as_array)
-        .ok_or_else(|| shape(E, "/opow", "a list"))?;
+    // Both envelopes, because the pin and the API disagree about this one
+    // (`tig_integration.md` §14.5): testnet answers a list of players, and
+    // `fixtures/tig/v1/get-opow.json` — which `fake-tig` serves verbatim —
+    // holds a single unwrapped player object. Reading only one shape means the
+    // pool cannot read §6.3's `pool_q[c][t]` against the other, and both are
+    // endpoints it has to work against today. Narrow deliberately: an envelope
+    // that is neither is a shape error, not a third case to guess at.
+    let entries: Vec<&Value> = match body.get("opow") {
+        Some(Value::Array(list)) => list.iter().collect(),
+        Some(one @ Value::Object(_)) => vec![one],
+        _ => return Err(shape(E, "/opow", "a list of players or one player")),
+    };
 
     let mut out: BTreeMap<String, BTreeMap<String, u128>> = BTreeMap::new();
     for entry in entries {
@@ -1380,6 +1398,86 @@ mod tests {
                 expected: "a boolean",
             }),
             "an unreadable ban must stop the pass, not default to unbanned"
+        );
+    }
+
+    #[test]
+    fn a_challenge_with_no_active_tracks_is_not_a_candidate() {
+        // §6.2's eligibility is "settings for **every** active track", and
+        // `all()` over an empty set is true — so a track-less challenge would
+        // be vacuously eligible and §6.3 would score it 0/0 = 0, the lowest
+        // factor there is. It would win every decision from then on, and the
+        // precommit would carry no track settings at all.
+        //
+        // Paired with a challenge that *is* minable and scores worse, so the
+        // assertion is that the empty one lost rather than that nothing was
+        // proposed.
+        let mut f = Fixture::workable();
+        f.pool_qualifiers = vec![("c001", "t1", 5)];
+        f.challenges = vec![
+            challenge("c001", "cpu", 25, &[("t1", 10)], &[("t1", 30)]),
+            challenge("c002", "cpu", 25, &[], &[]),
+        ];
+        f.codes = vec![
+            code("c001_a001", "c001", 25, SOME_ADOPTION, &[]),
+            code("c002_a001", "c002", 25, SOME_ADOPTION, &[]),
+        ];
+        f.binarys = vec![binary("c001_a001", true), binary("c002_a001", true)];
+
+        let p = precommit(run(&f, &[active("b1", "c001_a001", "t1", Some(4))]).unwrap());
+        assert_eq!(
+            p.selected_challenge, "c001",
+            "a challenge with nothing to mine must not out-score one that can be mined"
+        );
+        assert!(
+            !p.draw_ranks.contains_key("c002"),
+            "and it was never a candidate: {:?}",
+            p.draw_ranks.keys().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn the_opow_envelope_is_read_in_both_shapes_the_pool_meets() {
+        // §14.5: testnet answers `opow` as a list of players and the pinned
+        // fixture — which `fake-tig` serves verbatim — holds one unwrapped
+        // player object. The pool has to read §6.3's `pool_q[c][t]` against
+        // both endpoints today, so it reads both envelopes and nothing else.
+        let expected = BTreeMap::from([(
+            "c001".to_string(),
+            BTreeMap::from([("t1".to_string(), 5u128)]),
+        )]);
+        let listed = Fixture {
+            pool_qualifiers: vec![("c001", "t1", 5)],
+            ..Fixture::workable()
+        };
+        assert_eq!(pool_qualifiers(&listed.snapshot(), POOL).unwrap(), expected);
+
+        // The fixture's shape: one player, unwrapped.
+        let mut snapshot = listed.snapshot();
+        snapshot.reads.insert(
+            "get-opow".to_string(),
+            json!({
+                "opow": {
+                    "player_id": POOL,
+                    "block_data": {
+                        "num_qualifiers_by_challenge_by_track": {"c001": {"t1": 5}},
+                    },
+                },
+            }),
+        );
+        assert_eq!(pool_qualifiers(&snapshot, POOL).unwrap(), expected);
+
+        // A third shape is a shape error, not a case to guess at.
+        snapshot
+            .reads
+            .insert("get-opow".to_string(), json!({"opow": "unexpected"}));
+        assert_eq!(
+            pool_qualifiers(&snapshot, POOL),
+            Err(ProposeError::Shape {
+                endpoint: "get-opow",
+                path: "/opow".to_string(),
+                expected: "a list of players or one player",
+            })
         );
     }
 

@@ -377,20 +377,16 @@ pub struct OrchestrationConfig {
     /// — which compute types the gateway must have pinned runtimes for — and
     /// the compute a decision is made for is a different question.
     ///
-    /// **Nothing currently checks that the two agree, and the gate does not.**
-    /// An earlier version of this comment claimed it did. §13.5 scopes check 6
-    /// to the compute types "considered by the decision engine" and resolves
-    /// that to `served_compute`, so with `served_compute = []` the check skips
-    /// every challenge and passes vacuously — while this field could
-    /// independently have the controller deciding for CPU. The two processes
-    /// hold separate configurations and `pool-config` sees one at a time, so
-    /// the comparison cannot happen here.
+    /// **`pool-config` cannot check that the two agree** — it sees one
+    /// binary's configuration at a time, and with `served_compute = []` check
+    /// 6 has nothing to judge and passes vacuously while this field could
+    /// independently have the controller deciding for CPU.
     ///
-    /// Where it can happen is the write boundary: every intent names its
-    /// `compute_type`, and the gateway could refuse to transmit one outside
-    /// its served set. That is the real fix and it belongs to `tig-gateway`;
-    /// until it lands, keeping the two in step is an operator's job and this
-    /// comment says so rather than implying a gate that does not fire.
+    /// The comparison is made where the two facts meet: `claim::decide`
+    /// refuses any intent whose decision names a compute type outside the
+    /// gateway's served set, as a stop for an operator. §13.5 records the
+    /// arrangement. That binds what is actually sent to what the gateway has
+    /// pinned runtimes for, which is stronger than comparing two files.
     #[serde(default)]
     pub bootstrap_offer: Option<BootstrapOffer>,
 }

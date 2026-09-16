@@ -67,6 +67,25 @@ pub enum StopReason {
     /// write this intent never described, and could bind another workflow's
     /// confirmed benchmark to it.
     PayloadNotTheRecordedOne,
+    /// The decision names a compute type this gateway does not serve.
+    ///
+    /// `tig_integration.md` §13.5 scopes §13 check 6 — "are the pinned
+    /// runtimes right for the challenges the engine considers?" — to the
+    /// compute this deployment serves. The controller decides for its own
+    /// configured offer, and the two are separate configurations in separate
+    /// processes. When they disagree the gate cannot help: with an empty
+    /// served list check 6 has nothing to judge and passes, so a write for an
+    /// unserved compute type would go out with its runtime never verified —
+    /// and the fee is paid on submission.
+    ///
+    /// Checked here because this is where the two facts finally meet: the
+    /// decision's compute type and the gateway's served set. A stop rather
+    /// than a skip, because the intent is not going to become sendable on its
+    /// own — an operator has to reconcile the two configurations.
+    ComputeTypeNotServed {
+        compute_type: String,
+        served: Vec<String>,
+    },
     /// The intent records `OUTCOME_UNKNOWN` and no attempt exists.
     ///
     /// §7.3 writes that state in the same transaction that marks an attempt
@@ -213,6 +232,7 @@ pub struct SiblingGenerations {
 /// response — §5's latest 120-block window. It is consulted only when
 /// reconciliation is actually owed, so a caller with nothing to reconcile need
 /// not have fetched it.
+#[allow(clippy::too_many_arguments)]
 pub fn decide(
     intent: &WriteIntent,
     attempts: &[WriteAttempt],
@@ -220,11 +240,26 @@ pub fn decide(
     siblings: SiblingGenerations,
     submitted: &PrecommitSubmission,
     confirmed_precommits: &[serde_json::Value],
+    // The compute types this gateway serves (`gateway.served_compute`).
+    served_compute: &[String],
 ) -> ClaimDecision {
     if intent.write_kind != WriteKind::Precommit {
         return ClaimDecision::Skip {
             reason: SkipReason::NotAPrecommit {
                 kind: intent.write_kind.as_str(),
+            },
+        };
+    }
+    // Before anything else, because it is the cheapest question and the one
+    // whose wrong answer costs a fee. See `StopReason::ComputeTypeNotServed`.
+    if !served_compute
+        .iter()
+        .any(|served| served == &submitted.compute_type)
+    {
+        return ClaimDecision::StopForOperator {
+            reason: StopReason::ComputeTypeNotServed {
+                compute_type: submitted.compute_type.clone(),
+                served: served_compute.to_vec(),
             },
         };
     }

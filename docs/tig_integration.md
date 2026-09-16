@@ -863,6 +863,26 @@ that reach it. That set is a fact about the deployment and must be wired from
 its configuration; a gateway that defaulted it to empty would pass this check
 by saying nothing.
 
+**Two configurations now carry that fact, and the gateway reconciles them.**
+The controller decides for `[orchestration.bootstrap_offer]` — slice 1 has no
+members, so a deployment that decides anything must say what it decides for —
+while this check is scoped by the gateway's `gateway.served_compute`. They are
+separate processes with separate configuration files, and nothing loading one
+can see the other.
+
+The gap that opens is precise: with `served_compute` empty this check has
+nothing to judge and passes, while the controller may be deciding for CPU. The
+comparison is therefore made where the two facts finally meet — the write
+boundary. `claim::decide` refuses any intent whose decision names a compute
+type outside `served_compute`, as a **stop for an operator** rather than a
+skip: the intent will not become sendable on its own, and the two
+configurations have to be reconciled by a person.
+
+That is a stronger guarantee than comparing the files would be. It binds what
+is actually *sent* to what this gateway has pinned runtimes for, which is what
+this check exists to establish, and it holds however the two configurations
+came to disagree.
+
 **A deployment serving nothing has nothing to judge.** Slice 1 is that: no
 members, nothing mined. This is not §13.2's kind of acknowledgement — it is
 true, and it stops being true the moment compute is configured, at which point

@@ -7,6 +7,15 @@
 //! cannot attribute, and breaks §10's permanent one-benchmark mapping.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+/// What the gateway under test serves.
+///
+/// Every decision these tests build names `aws_t4g`, so a served set without
+/// it would stop every claim for an operator — the new refusal doing its job,
+/// and saying nothing about the paths below. The refusal has its own test.
+fn served() -> Vec<String> {
+    vec!["aws_t4g".to_string()]
+}
+
 use std::collections::BTreeMap;
 
 use pool_domain::Network;
@@ -117,7 +126,8 @@ fn an_intent_that_never_left_the_gateway_is_transmitted() {
             LIVE,
             ONLY,
             &submitted(),
-            &[]
+            &[],
+            &served(),
         ),
         ClaimDecision::Transmit
     );
@@ -139,7 +149,8 @@ fn a_workflow_that_ended_gets_no_write() {
             ENDED,
             ONLY,
             &submitted(),
-            &[]
+            &[],
+            &served(),
         ),
         ClaimDecision::Skip {
             reason: SkipReason::WorkflowEnded { state: "EXPIRED" }
@@ -169,6 +180,7 @@ fn an_unresolved_write_is_reconciled_even_when_the_workflow_ended() {
             ONLY,
             &submitted(),
             &[matching_precommit("bench_a", Some(100))],
+            &served(),
         ),
         ClaimDecision::AlreadyConfirmed {
             benchmark_id: "bench_a".to_string()
@@ -197,7 +209,8 @@ fn a_terminal_workflow_with_nothing_in_flight_is_skipped_without_consulting_tig(
             ENDED,
             ONLY,
             &submitted(),
-            &two
+            &two,
+            &served(),
         ),
         ClaimDecision::Skip {
             reason: SkipReason::WorkflowEnded { state: "EXPIRED" }
@@ -224,7 +237,7 @@ fn two_unsent_generations_produce_one_write() {
     let mut older = intent(IntentState::Prepared);
     older.generation = 1;
     assert_eq!(
-        decide(&older, &[], LIVE, siblings, &submitted(), &[]),
+        decide(&older, &[], LIVE, siblings, &submitted(), &[], &served()),
         ClaimDecision::Skip {
             reason: SkipReason::SupersededByNewerGeneration { newest: 2 }
         },
@@ -234,7 +247,7 @@ fn two_unsent_generations_produce_one_write() {
     let mut newest = intent(IntentState::Prepared);
     newest.generation = 2;
     assert_eq!(
-        decide(&newest, &[], LIVE, siblings, &submitted(), &[]),
+        decide(&newest, &[], LIVE, siblings, &submitted(), &[], &served()),
         ClaimDecision::Transmit,
         "exactly one of the two is sent"
     );
@@ -254,7 +267,7 @@ fn a_generation_whose_sibling_was_sent_stops_for_an_operator() {
     let mut newest = intent(IntentState::Prepared);
     newest.generation = 2;
     assert_eq!(
-        decide(&newest, &[], LIVE, siblings, &submitted(), &[]),
+        decide(&newest, &[], LIVE, siblings, &submitted(), &[], &served()),
         ClaimDecision::StopForOperator {
             reason: StopReason::SiblingGenerationTransmitted { generation: 2 }
         }
@@ -277,6 +290,7 @@ fn a_write_tig_refused_is_not_an_ambiguity() {
             ONLY,
             &submitted(),
             &[],
+            &served(),
         ),
         ClaimDecision::Skip {
             reason: SkipReason::Refused
@@ -297,7 +311,8 @@ fn an_unknown_outcome_with_no_attempt_is_a_contradiction_not_a_send() {
             LIVE,
             ONLY,
             &submitted(),
-            &[]
+            &[],
+            &served(),
         ),
         ClaimDecision::StopForOperator {
             reason: StopReason::UnknownOutcomeWithNoAttempt
@@ -314,7 +329,7 @@ fn a_non_precommit_intent_is_not_treated_as_one() {
     benchmark.write_kind = WriteKind::Benchmark;
     benchmark.benchmark_id = Some("bench_a".to_string());
     assert_eq!(
-        decide(&benchmark, &[], LIVE, ONLY, &submitted(), &[]),
+        decide(&benchmark, &[], LIVE, ONLY, &submitted(), &[], &served()),
         ClaimDecision::Skip {
             reason: SkipReason::NotAPrecommit { kind: "benchmark" }
         }
@@ -335,6 +350,7 @@ fn attempts_belonging_to_another_intent_stop_rather_than_answer() {
         ONLY,
         &submitted(),
         &[],
+        &served(),
     );
     assert!(
         matches!(
@@ -352,7 +368,15 @@ fn a_settled_intent_is_left_alone() {
     // §7.3 makes CONFIRMED and REJECTED terminal, so there is no write left.
     for state in [IntentState::Confirmed, IntentState::Rejected] {
         assert_eq!(
-            decide(&intent(state), &[], LIVE, ONLY, &submitted(), &[]),
+            decide(
+                &intent(state),
+                &[],
+                LIVE,
+                ONLY,
+                &submitted(),
+                &[],
+                &served()
+            ),
             ClaimDecision::Skip {
                 reason: SkipReason::AlreadySettled
             },
@@ -375,6 +399,7 @@ fn a_lost_response_whose_write_landed_is_settled_and_not_resent() {
         ONLY,
         &submitted(),
         &[matching_precommit("bench_a", Some(100))],
+        &served(),
     );
     assert_eq!(
         found,
@@ -397,6 +422,7 @@ fn a_matching_write_that_has_not_confirmed_is_waited_for_not_resent() {
             ONLY,
             &submitted(),
             &[matching_precommit("bench_a", None)],
+            &served(),
         ),
         ClaimDecision::AwaitConfirmation
     );
@@ -417,6 +443,7 @@ fn two_matching_candidates_stop_for_an_operator() {
             matching_precommit("bench_a", Some(100)),
             matching_precommit("bench_b", None),
         ],
+        &served(),
     );
     match decision {
         ClaimDecision::StopForOperator {
@@ -452,6 +479,7 @@ fn a_sent_write_the_search_cannot_account_for_stops_rather_than_resending() {
                 ONLY,
                 &submitted(),
                 &[],
+                &served(),
             ),
             ClaimDecision::StopForOperator {
                 reason: StopReason::WriteUnaccountedFor
@@ -478,6 +506,7 @@ fn a_begun_attempt_on_a_prepared_intent_still_reconciles_first() {
             ONLY,
             &submitted(),
             &[matching_precommit("bench_a", Some(100))],
+            &served(),
         ),
         ClaimDecision::AlreadyConfirmed {
             benchmark_id: "bench_a".to_string()
@@ -497,6 +526,7 @@ fn an_unreadable_record_stops_instead_of_being_skipped() {
         ONLY,
         &submitted(),
         &[json!({ "precommit": {}, "settings": {}, "details": {} })],
+        &served(),
     );
     assert!(
         matches!(
@@ -534,6 +564,7 @@ fn a_submission_that_is_not_the_recorded_payload_cannot_bind_a_benchmark() {
             ONLY,
             &drifted,
             &[other],
+            &served(),
         ),
         ClaimDecision::StopForOperator {
             reason: StopReason::PayloadNotTheRecordedOne
@@ -555,7 +586,7 @@ fn an_older_generation_reads_as_superseded_after_the_newest_is_sent() {
     let mut older = intent(IntentState::Prepared);
     older.generation = 1;
     assert_eq!(
-        decide(&older, &[], LIVE, after_send, &submitted(), &[]),
+        decide(&older, &[], LIVE, after_send, &submitted(), &[], &served()),
         ClaimDecision::Skip {
             reason: SkipReason::SupersededByNewerGeneration { newest: 2 }
         }
@@ -577,6 +608,7 @@ fn an_accepted_attempt_reconciles_rather_than_reading_as_refused() {
             ONLY,
             &submitted(),
             &[matching_precommit("bench_a", Some(100))],
+            &served(),
         ),
         ClaimDecision::AlreadyConfirmed {
             benchmark_id: "bench_a".to_string()
@@ -590,6 +622,7 @@ fn an_accepted_attempt_reconciles_rather_than_reading_as_refused() {
             ONLY,
             &submitted(),
             &[matching_precommit("bench_a", None)],
+            &served(),
         ),
         ClaimDecision::AwaitConfirmation,
         "accepted and not yet confirmed is waited for, not skipped"
@@ -1017,4 +1050,70 @@ fn another_kind_of_intent_is_not_this_paths() {
             reason: SkipReason::NotAPrecommit { .. }
         }
     ));
+}
+
+#[test]
+fn an_intent_for_a_compute_type_this_gateway_does_not_serve_stops_for_an_operator() {
+    // `tig_integration.md` §13.5 scopes §13 check 6 — "are the pinned runtimes
+    // right for the challenges the engine considers?" — to the compute this
+    // deployment serves. The controller decides for its own configured offer,
+    // and the two are separate configurations in separate processes.
+    //
+    // When they disagree the gate cannot help. With an empty served list check
+    // 6 has nothing to judge and passes, so an intent for an unserved compute
+    // type would be transmitted with its runtime never verified — and the fee
+    // is paid on submission. This is where the two facts finally meet.
+    let prepared = intent(IntentState::Prepared);
+
+    // The premise: this exact claim is `Transmit` when the type is served.
+    assert_eq!(
+        decide(&prepared, &[], LIVE, ONLY, &submitted(), &[], &served()),
+        ClaimDecision::Transmit,
+        "otherwise the refusal below would prove nothing"
+    );
+
+    // The slice-1 posture: a gateway that serves nothing. Check 6 passed
+    // vacuously for it, so this refusal is the only thing standing between the
+    // decision and a paid-for write.
+    let decision = decide(&prepared, &[], LIVE, ONLY, &submitted(), &[], &[]);
+    assert_eq!(
+        decision,
+        ClaimDecision::StopForOperator {
+            reason: StopReason::ComputeTypeNotServed {
+                compute_type: "aws_t4g".to_string(),
+                served: vec![],
+            }
+        },
+        "a gateway serving nothing transmits nothing"
+    );
+
+    // Served, but something else. The same refusal: `aws_c7g` is a real CPU
+    // type, and a gateway pinned for it has not verified `aws_t4g`'s runtime.
+    let decision = decide(
+        &prepared,
+        &[],
+        LIVE,
+        ONLY,
+        &submitted(),
+        &[],
+        &["aws_c7g".to_string()],
+    );
+    assert!(
+        matches!(
+            decision,
+            ClaimDecision::StopForOperator {
+                reason: StopReason::ComputeTypeNotServed { .. }
+            }
+        ),
+        "a near miss is still a miss: {decision:?}"
+    );
+
+    // A stop, not a skip. The intent is not going to become sendable on its
+    // own — an operator has to reconcile the two configurations — and a skip
+    // would leave it looking like ordinary contention that the next pass
+    // clears.
+    assert!(
+        !matches!(decision, ClaimDecision::Skip { .. }),
+        "a skip reads as 'nothing owed', which this is not"
+    );
 }

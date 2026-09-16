@@ -189,10 +189,19 @@ settled="$(psql "SELECT count(*) FROM pool.tig_write_attempt
 #
 # The observable is its own log: a pass that reached this intent emits an
 # outcome line for it, whatever it decided.
-if [[ "$settled" != "1" ]] && ! grep -q '"event":"gateway.intent.outcome"' "$log" 2>/dev/null; then
-    echo "INCOMPLETE: the restarted gateway never reached this intent." >&2
-    echo "No pass decided anything, so §10's search did not run and the state" >&2
-    echo "below is the crash's, not a recovery's. Gateway log: $log" >&2
+# Keyed on *this* intent's id, not the event name. The table holds unresolved
+# attempts from earlier runs by design — this script's own crash leaves one —
+# so an outcome line for any of them would satisfy a bare event-name grep while
+# saying nothing about whether the intent under test was ever decided.
+crashed_intent="$(psql "SELECT i.intent_id::text
+                          FROM pool.tig_write_intent i
+                          JOIN pool.tig_write_attempt a ON a.intent_id = i.intent_id
+                         WHERE a.attempt_id = '$crashed_attempt'::uuid")"
+if [[ "$settled" != "1" ]] \
+   && ! grep -q "\"intent_id\":\"$crashed_intent\"" "$log" 2>/dev/null; then
+    echo "INCOMPLETE: the restarted gateway never reached intent $crashed_intent." >&2
+    echo "No pass decided it, so §10's search did not run and the state below is" >&2
+    echo "the crash's, not a recovery's. Gateway log: $log" >&2
     grep -oE '"event":"[a-z._]+"' "$log" 2>/dev/null | sort | uniq -c | tail -5 >&2
     exit 2
 fi
@@ -200,13 +209,20 @@ fi
 # G2: "exactly one where a write reached TIG, and exactly zero where it did
 # not". Both branches below read this count — the recovered one to prove there
 # is no duplicate, the unresolved one to prove there is nothing to have found.
+# Joined on the whole key. `migrations/0005` makes a decision unique per
+# `(network, workflow_id, generation)`, and §7.3 allows a workflow more than
+# one generation — so joining on `workflow_id` alone can pair the attempt with
+# another generation's decision and read the tuple off the wrong one. `LIMIT 1`
+# would then pick silently.
 tuple="$(psql "SELECT d.anchor_block_id || ' ' || d.selected_challenge || ' ' ||
                       d.selected_algorithm
                  FROM pool.precommit_decision d
-                 JOIN pool.tig_write_intent i USING (workflow_id)
+                 JOIN pool.tig_write_intent i
+                   ON i.network = d.network
+                  AND i.workflow_id = d.workflow_id
+                  AND i.generation = d.generation
                  JOIN pool.tig_write_attempt a ON a.intent_id = i.intent_id
-                WHERE a.attempt_id = '$crashed_attempt'::uuid
-                LIMIT 1")"
+                WHERE a.attempt_id = '$crashed_attempt'::uuid")"
 read -r anchor challenge algorithm <<<"${tuple:-}"
 # An empty tuple matches nothing at TIG, which would read as "zero precommits"
 # and print a pass. The join can come up empty for reasons that have nothing to

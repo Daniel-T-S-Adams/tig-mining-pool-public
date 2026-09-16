@@ -579,8 +579,11 @@ or a written waiver — the record is
 testnet run behind criteria K3 and K4 is
 [`evidence/slice-1-live-run.md`](evidence/slice-1-live-run.md). Four criteria
 were waived, each re-homed to the step that owns it: the metrics exporter and
-alert tests to step 5, three member-dependent lifecycle cases to step 2, and
-J4's transaction-duration measurement to step 5.
+alert tests to step 5; **four** of `lifecycle.json`'s nine cases to step 2 —
+`duplicate_capacity_offer_request`, `duplicate_durable_acceptance_receipt` and
+`member_package_timeout_failed`, which need a member, plus
+`fraud_confirmed_after_proof`, whose ladder begins in `VERIFYING` and so needs
+artifacts; and J4's transaction-duration measurement to step 5.
 
 The product must advance in vertical slices. Each slice should include its
 minimum schema, migration, APIs, implementation, tests, observability, and

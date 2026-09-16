@@ -30,8 +30,23 @@ db_name="$(grep -E '^name *=' "$config" | head -1 | sed -E 's/^[^=]*= *"?([^"]*)
 psql() { docker exec -i "$POOL_PG_CONTAINER" psql -U postgres -d "$db_name" -tAc "$1"; }
 
 attempts_now() { psql "SELECT count(*) FROM pool.tig_write_attempt" | tr -d '[:space:]'; }
+
+# "Unresolved" is the ledger's definition, not `outcome IS NULL`:
+# `migrations/0004` says "Unresolved includes AMBIGUOUS ... Treating a recorded
+# AMBIGUOUS as resolved would reopen the lane", and its partial index and
+# `WriteAttempt::is_unresolved` both read it that way. AMBIGUOUS *is* §10's
+# stop-for-operator state with the serialized lane still shut, so counting it
+# as settled would print "recovered by finding the write" over a pool that is
+# stuck.
+#
+# Scoped to the attempt this run created. The table can hold unresolved
+# attempts from earlier runs — the crash this script performs leaves one by
+# design — and a verdict taken over the whole table would be about a previous
+# run's state.
 unresolved_now() {
-    psql "SELECT count(*) FROM pool.tig_write_attempt WHERE outcome IS NULL" | tr -d '[:space:]'
+    psql "SELECT count(*) FROM pool.tig_write_attempt
+           WHERE attempt_id = '$crashed_attempt'::uuid
+             AND (outcome IS NULL OR outcome = 'AMBIGUOUS')" | tr -d '[:space:]'
 }
 
 before="$(attempts_now)"
@@ -79,6 +94,15 @@ if [[ "$killed" != yes ]]; then
     echo "Nothing was crashed, so nothing is proved — this is not a pass." >&2
     exit 2
 fi
+
+# This run's attempt: the newest row, which the wait above just watched appear.
+crashed_attempt="$(psql "SELECT attempt_id::text FROM pool.tig_write_attempt
+                          ORDER BY started_at DESC LIMIT 1")"
+if [[ -z "$crashed_attempt" ]]; then
+    echo "INCOMPLETE: the attempt row vanished between the wait and the read." >&2
+    exit 2
+fi
+echo "this run's attempt: $crashed_attempt"
 
 # And whether the kill actually landed in the window. G2's crash point is
 # defined by the durable state it leaves: an attempt with a NULL outcome,
@@ -139,13 +163,33 @@ psql "SELECT a.attempt_no, coalesce(a.outcome, 'STILL UNRESOLVED') AS outcome,
 # recovery, and this run showed why that is wrong: the kill landed before the
 # request left, TIG holds nothing for the tuple, and refusing to guess is
 # exactly what §10 asks for.
-if [[ "$(unresolved_now)" == "0" ]]; then
+settled="$(psql "SELECT count(*) FROM pool.tig_write_attempt
+                  WHERE attempt_id = '$crashed_attempt'::uuid
+                    AND outcome = 'ACCEPTED' AND benchmark_id IS NOT NULL")"
+if [[ "$settled" == "1" ]]; then
     echo
-    echo "recovered by finding the write: the attempt settled from a confirmed read."
+    echo "recovered by finding the write: the attempt settled ACCEPTED with the"
+    echo "benchmark id §10's search recovered from a confirmed read."
     echo "G2 expects exactly one entry for this tuple; confirm with the §10 scan."
     echo
     echo "gateway log: $log"
     exit 0
+fi
+
+# Before reading the counts: did the restarted gateway actually run §10's
+# search? A gateway that never got that far — write gate refused, database
+# unreachable, a failing pass — leaves durable state identical to one that
+# searched and refused to guess. Recording that as a correct recovery would
+# credit the pool for reasoning it never did.
+#
+# The observable is its own log: a pass that reached this intent emits an
+# outcome line for it, whatever it decided.
+if ! grep -q '"event":"gateway.intent.outcome"' "$log" 2>/dev/null; then
+    echo "INCOMPLETE: the restarted gateway never reached this intent." >&2
+    echo "No pass decided anything, so §10's search did not run and the state" >&2
+    echo "below is the crash's, not a recovery's. Gateway log: $log" >&2
+    grep -oE '"event":"[a-z._]+"' "$log" 2>/dev/null | sort | uniq -c | tail -5 >&2
+    exit 2
 fi
 
 echo
@@ -157,9 +201,17 @@ tuple="$(psql "SELECT d.anchor_block_id || ' ' || d.selected_challenge || ' ' ||
                  FROM pool.precommit_decision d
                  JOIN pool.tig_write_intent i USING (workflow_id)
                  JOIN pool.tig_write_attempt a ON a.intent_id = i.intent_id
-                WHERE a.outcome IS NULL
+                WHERE a.attempt_id = '$crashed_attempt'::uuid
                 LIMIT 1")"
-read -r anchor challenge algorithm <<<"$tuple"
+read -r anchor challenge algorithm <<<"${tuple:-}"
+# An empty tuple matches nothing at TIG, which would read as "zero precommits"
+# and print a pass. The join can come up empty for reasons that have nothing to
+# do with the recovery — so this is INCOMPLETE, not evidence.
+if [[ -z "${anchor:-}" || -z "${challenge:-}" || -z "${algorithm:-}" ]]; then
+    echo "INCOMPLETE: could not read the decision tuple for the crashed attempt." >&2
+    echo "An empty tuple matches nothing at TIG and would read as a pass." >&2
+    exit 2
+fi
 echo "  tuple: block=$anchor challenge=$challenge algorithm=$algorithm"
 
 base_url="$(grep -E '^base_url *=' "$config" | head -1 | sed -E 's/^[^=]*= *"?([^"]*)"?.*/\1/')"

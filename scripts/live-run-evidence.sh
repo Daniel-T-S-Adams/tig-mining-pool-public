@@ -143,11 +143,13 @@ echo
 # and reconciliation, exactly one confirmed precommit matches the tuple.
 echo "## §10 tuple scan (K4)"
 echo
-key="${TIG_API_KEY_FILE:-$root/secrets/tig-testnet-api-key}"
-if [[ ! -r "$key" ]]; then
-    echo "SKIPPED: no readable API key at $key"
-    exit 0
-fi
+# No credential. `tig_integration.md` §4 makes these reads public — verified
+# against testnet, which answers both with HTTP 200 and no `X-Api-Key` — and
+# `architecture.md` §2.2 gives the key to `tig-gateway` alone. An earlier
+# version of this script read `secrets/tig-testnet-api-key` and passed it on
+# curl's command line, which §9 forbids outright and which
+# `scripts/credential-boundary.sh` exists to prevent: argv is world-readable
+# in /proc for the life of the process. It was not needed for anything.
 # `get-benchmarks` is served only for the *latest* block, and testnet advances
 # every 15 seconds — so the block can move between reading its id and asking
 # for the window. Retried rather than reported as a failure: a race is not
@@ -155,12 +157,11 @@ fi
 # duplicate found".
 scan=""
 for attempt in 1 2 3 4 5; do
-    block_id="$(curl -sS -H "X-Api-Key: $(cat "$key")" "$base_url/get-block" \
+    block_id="$(curl -sS "$base_url/get-block" \
                 | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d.get("block",d)["id"])' \
                 2>/dev/null)" || true
     if [[ -z "$block_id" ]]; then sleep 3; continue; fi
-    scan="$(curl -sS -H "X-Api-Key: $(cat "$key")" \
-            "$base_url/get-benchmarks?block_id=$block_id&player_id=$player")" || true
+    scan="$(curl -sS "$base_url/get-benchmarks?block_id=$block_id&player_id=$player")" || true
     if [[ "$scan" == \{* ]]; then break; fi
     echo "attempt $attempt: ${scan:0:120}" >&2
     scan=""

@@ -26,7 +26,7 @@ use std::time::{Duration, Instant};
 use pool_domain::{Network, TraceId};
 use pool_snapshot::AnchoredRead;
 use pool_snapshot::active_cache::{ActiveBenchmarkStore, Advance, BenchmarkDataSource};
-use pool_snapshot::store::{BlockSnapshotStore, PersistedSnapshot};
+use pool_snapshot::store::{BlockSnapshotStore, NotUsable, PersistedSnapshot};
 use pool_snapshot::{
     PostgresActiveBenchmarkStore, PostgresSnapshotStore, Snapshot, SnapshotSource,
 };
@@ -66,13 +66,38 @@ const ASSEMBLY_ATTEMPTS: u32 = 3;
 /// reconciliation that would have revealed such a workflow never ran, and
 /// "nothing blocked" from a pass that looked at nothing is not the same answer
 /// as "nothing blocks".
-fn claiming_refused(outcome: &Outcome) -> Option<Decided> {
-    match outcome {
-        Outcome::Reconciled(report) if report.blocks_claiming() => {
-            Some(Decided::BlockedForOperator)
+fn claiming_refused(reconciliation: Reconciliation) -> Option<Decided> {
+    match reconciliation {
+        Reconciliation::Ran {
+            blocks_claiming: true,
+        } => Some(Decided::BlockedForOperator),
+        Reconciliation::Ran {
+            blocks_claiming: false,
+        } => None,
+        Reconciliation::DidNotRun { reason } => Some(Decided::NotReconciled(reason.to_string())),
+    }
+}
+
+/// What reconciling this block concluded, as the claiming gate reads it.
+///
+/// Not an `Outcome`: the warm-up path decides from a block reconciled several
+/// polls earlier and has only the answer, not the report. Taking the answer
+/// makes both callers supply the same thing and neither able to supply a
+/// report the gate would re-derive differently.
+#[derive(Debug, Clone, Copy)]
+enum Reconciliation {
+    Ran { blocks_claiming: bool },
+    DidNotRun { reason: NotUsable },
+}
+
+impl Reconciliation {
+    fn of(outcome: &Outcome) -> Self {
+        match outcome {
+            Outcome::Reconciled(report) => Self::Ran {
+                blocks_claiming: report.blocks_claiming(),
+            },
+            Outcome::Blind { reason, .. } => Self::DidNotRun { reason: *reason },
         }
-        Outcome::Blind { reason, .. } => Some(Decided::NotReconciled(reason.to_string())),
-        Outcome::Reconciled(_) => None,
     }
 }
 
@@ -164,6 +189,13 @@ struct Seen {
     /// Whether a snapshot of this block has been persisted usable for a
     /// decision. Once true there is nothing left to warm.
     usable: bool,
+    /// Whether reconciling from this block forbade claiming new work.
+    ///
+    /// The answer, not the report: it is all the deciding pass reads, and the
+    /// warm-up may complete several polls later. §10's claiming gate is a fact
+    /// about the pass that read the block, not about the poll that happens to
+    /// finish the cache.
+    blocks_claiming: bool,
 }
 
 /// What one poll came to.
@@ -191,6 +223,9 @@ pub enum Tick {
         /// Whether this pass completed the warm-up and persisted the block
         /// as usable for a decision.
         now_usable: bool,
+        /// What §5.1 step 4 did once the block became usable, or `None` when
+        /// it did not or the deployment decides nothing.
+        decided: Option<Result<Decided, String>>,
     },
     /// A new block was taken in and reconciled from.
     Ingested(Box<Ingested>),
@@ -322,19 +357,22 @@ impl<S: SnapshotSource + BenchmarkDataSource> Service<S> {
         )
         .await?;
 
-        if let Outcome::Reconciled(_) = &outcome
+        if let Outcome::Reconciled(report) = &outcome
             && let Ok(snapshot) = ingested.snapshot.for_reconciliation()
         {
             self.last = Some(Seen {
                 snapshot: snapshot.clone(),
                 usable: ingested.snapshot.for_decision().is_ok(),
+                blocks_claiming: report.blocks_claiming(),
             });
         }
         // §5.1 step 4, after reconciliation and from the same snapshot. The
         // order is the document's: §10's reconciliation is what makes local
         // state safe to decide from, and a decision taken before it could be
         // made against a workflow this very block settled.
-        let decided = self.decide(&ingested.snapshot, &outcome).await;
+        let decided = self
+            .decide(&ingested.snapshot, Reconciliation::of(&outcome))
+            .await;
 
         Ok(Tick::Ingested(Box::new(Ingested {
             block_id,
@@ -356,7 +394,7 @@ impl<S: SnapshotSource + BenchmarkDataSource> Service<S> {
     async fn decide(
         &self,
         persisted: &PersistedSnapshot,
-        outcome: &Outcome,
+        reconciliation: Reconciliation,
     ) -> Option<Result<Decided, String>> {
         // No offer is not a failure to decide; it is a deployment that decides
         // nothing, which is slice 1's ordinary posture. `None` says that,
@@ -377,7 +415,7 @@ impl<S: SnapshotSource + BenchmarkDataSource> Service<S> {
         // reconciliation that would have revealed such a workflow never ran,
         // and "nothing blocked" from a pass that looked at nothing is not the
         // same answer as "nothing blocks".
-        if let Some(refusal) = claiming_refused(outcome) {
+        if let Some(refusal) = claiming_refused(reconciliation) {
             return Some(Ok(refusal));
         }
 
@@ -456,6 +494,10 @@ impl<S: SnapshotSource + BenchmarkDataSource> Service<S> {
         };
         let cache = ingestor.warm_cache(&seen.snapshot).await?;
         let now_usable = cache.covers_active_set();
+        // Taken before the borrow of `self` below, which `decide` needs.
+        let block_id = seen.snapshot.block_id.clone();
+        let blocks_claiming = seen.blocks_claiming;
+        let mut decided = None;
         if now_usable {
             seen.snapshot.active_cache_ready = true;
             let persisted = self
@@ -464,11 +506,31 @@ impl<S: SnapshotSource + BenchmarkDataSource> Service<S> {
                 .await
                 .map_err(IngestError::from)?;
             seen.usable = persisted.for_decision().is_ok();
+
+            // The block that *completes* the warm-up is decided from here.
+            //
+            // The deciding pass otherwise runs only at the poll that first
+            // ingests a block, and §5.2 says the warm-up "may span several
+            // blocks" — so after any restart with a non-empty active set, the
+            // block that finally became usable was silently skipped and the
+            // pool waited for the next one. A live run showed exactly that:
+            // block 1331560 became usable through this path and the first
+            // decision was anchored to 1331561.
+            //
+            // Nothing else changes. `decide` applies C5 and the claiming gate
+            // as it does on the ingest path, and the reconciliation this block
+            // already had is what `blocks_claiming` is read from — recorded on
+            // `Seen` when the block was taken in, since a block only reaches
+            // here after `Outcome::Reconciled`.
+            decided = self
+                .decide(&persisted, Reconciliation::Ran { blocks_claiming })
+                .await;
         }
         Ok(Tick::CacheAdvanced {
-            block_id: seen.snapshot.block_id.clone(),
+            block_id,
             cache,
             now_usable,
+            decided,
         })
     }
 }
@@ -548,18 +610,20 @@ mod tests {
         // §10's stop-for-operator and criterion G1. Both directions, because a
         // gate that refused everything would pass a one-sided test while
         // stopping the pool.
-        assert!(claiming_refused(&Outcome::Reconciled(report(vec![]))).is_none());
+        assert!(
+            claiming_refused(Reconciliation::of(&Outcome::Reconciled(report(vec![])))).is_none()
+        );
 
         // `Contradicted`: TIG's confirmed evidence disagrees with a state the
         // pool recorded as terminal. §10 answers that with an operator, not
         // with more work.
-        let refused = claiming_refused(&Outcome::Reconciled(report(vec![
+        let refused = claiming_refused(Reconciliation::of(&Outcome::Reconciled(report(vec![
             NeedsAttention::Contradicted {
                 workflow_id: "w1".to_string(),
                 benchmark_id: "b1".to_string(),
                 recorded_state: "STOPPED",
             },
-        ])));
+        ]))));
         assert!(
             matches!(refused, Some(Decided::BlockedForOperator)),
             "{refused:?}"
@@ -569,12 +633,12 @@ mod tests {
         // usable: §7 calls an aged benchmark ordinary, and stopping the pool
         // every time a workflow got old would make the gate the outage.
         assert!(
-            claiming_refused(&Outcome::Reconciled(report(vec![
+            claiming_refused(Reconciliation::of(&Outcome::Reconciled(report(vec![
                 NeedsAttention::OutsideWindow {
                     workflow_id: "w1".to_string(),
                     benchmark_id: "b1".to_string(),
                 },
-            ])))
+            ]))))
             .is_none(),
             "an aged benchmark is ordinary; the gate must not become the outage"
         );
@@ -585,11 +649,11 @@ mod tests {
         // Its reads were incomplete, so the reconciliation that would have
         // revealed a blocking workflow never ran. "Nothing blocked" from a
         // pass that looked at nothing is not "nothing blocks".
-        let refused = claiming_refused(&Outcome::Blind {
+        let refused = claiming_refused(Reconciliation::of(&Outcome::Blind {
             block_id: "b1".to_string(),
             height: 100_080,
             reason: NotUsable::ReadsIncomplete,
-        });
+        }));
         assert!(
             matches!(refused, Some(Decided::NotReconciled(_))),
             "and says it was reconciliation that refused, not the snapshot read: {refused:?}"

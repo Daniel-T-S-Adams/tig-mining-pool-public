@@ -223,8 +223,8 @@ async fn run(config: &Config, once: bool) -> Result<(), String> {
 /// admitted under. Without this the outcome the service deliberately carried
 /// out on the `Tick` was discarded by its only caller, including under
 /// `--once`, which is the mode K3 uses.
-fn report_decision(ingested: &service::Ingested) {
-    let Some(decided) = &ingested.decided else {
+fn report_decision(block_id: &str, decided: &Option<Result<Decided, String>>) {
+    let Some(decided) = decided else {
         // No offer. Logged nowhere on purpose: a deployment that decides
         // nothing would otherwise emit a line every block saying so, and
         // §10.3's rule is that a bucket filling on every pass is one nobody
@@ -234,7 +234,7 @@ fn report_decision(ingested: &service::Ingested) {
     match decided {
         Ok(Decided::Admitted(admitted)) => tracing::info!(
             event = "controller.decision.admitted",
-            block_id = %ingested.block_id,
+            block_id = %block_id,
             workflow_id = %admitted.intent.workflow_id,
             intent_id = %admitted.intent.intent_id,
             trace_id = admitted
@@ -248,17 +248,17 @@ fn report_decision(ingested: &service::Ingested) {
         ),
         Ok(Decided::NoAction) => tracing::debug!(
             event = "controller.decision.no_action",
-            block_id = %ingested.block_id,
+            block_id = %block_id,
             "nothing compute-compatible and eligible"
         ),
         Ok(Decided::SnapshotNotUsable(why)) => tracing::debug!(
             event = "controller.decision.snapshot_not_usable",
-            block_id = %ingested.block_id,
+            block_id = %block_id,
             reason = %why,
         ),
         Ok(Decided::NotReconciled(why)) => tracing::debug!(
             event = "controller.decision.not_reconciled",
-            block_id = %ingested.block_id,
+            block_id = %block_id,
             reason = %why,
             "the block was not reconciled from, so nothing was claimed from it"
         ),
@@ -267,12 +267,12 @@ fn report_decision(ingested: &service::Ingested) {
         // reconciliation line beside it names which workflows.
         Ok(Decided::BlockedForOperator) => tracing::warn!(
             event = "controller.decision.blocked",
-            block_id = %ingested.block_id,
+            block_id = %block_id,
             "reconciliation stopped the claiming path; no decision was made"
         ),
         Err(error) => tracing::warn!(
             event = "controller.decision.failed",
-            block_id = %ingested.block_id,
+            block_id = %block_id,
             error = %error,
             "the block was taken in; the deciding pass did not complete"
         ),
@@ -295,6 +295,7 @@ fn report(tick: &Tick) {
             block_id,
             cache,
             now_usable,
+            decided,
         } => {
             tracing::info!(
                 event = "controller.cache.advanced",
@@ -311,6 +312,10 @@ fn report(tick: &Tick) {
                     error = %error,
                 );
             }
+            // The block that completed the warm-up is decided from, so its
+            // outcome is reported here too — otherwise the first decision
+            // after any restart would appear nowhere.
+            report_decision(block_id, decided);
         }
         Tick::Ingested(ingested) => {
             tracing::info!(
@@ -337,7 +342,7 @@ fn report(tick: &Tick) {
                     observed_block_id = %ingested.block_id,
                 );
             }
-            report_decision(ingested);
+            report_decision(&ingested.block_id, &ingested.decided);
             match &ingested.outcome {
                 Outcome::Blind { reason, .. } => {
                     tracing::warn!(

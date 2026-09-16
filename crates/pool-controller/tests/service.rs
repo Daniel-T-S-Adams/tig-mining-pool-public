@@ -558,6 +558,7 @@ async fn a_warm_up_that_did_not_finish_continues_on_the_next_poll() {
         block_id,
         cache,
         now_usable,
+        ..
     } = service.tick().await.unwrap()
     else {
         panic!("the same block continues its warm-up");
@@ -803,5 +804,80 @@ async fn a_deployment_with_an_offer_decides_from_the_block_it_just_took_in() {
     assert!(
         err.contains("get-algorithms"),
         "and it names the read it could not use: {err}"
+    );
+}
+
+#[tokio::test]
+async fn the_block_that_completes_the_warm_up_is_decided_from() {
+    // §5.2's warm-up "may span several blocks", and the deciding pass used to
+    // run only at the poll that first *ingests* a block. So the block that
+    // finally became usable was skipped and the pool waited for the next one —
+    // on every restart with a non-empty active set.
+    //
+    // A live run showed it: block 1331560 became usable through
+    // `continue_warm_up` and the first decision was anchored to 1331561. Not
+    // unsafe, but a wasted block and an operator watching a pool that had
+    // warmed and still decided nothing.
+    //
+    // Staged the same way `a_warm_up_that_did_not_finish_continues_on_the_next_poll`
+    // does: one active benchmark whose first fetch fails, so the first poll
+    // takes the block in unusable and the second completes it.
+    let Some(db) = TempDb::migrated("service_warm_up_decides").await else {
+        return;
+    };
+    let controller = db.pool_as("pool_controller").await;
+    let tig = fake_tig().await;
+    activate_one(&tig.app).await;
+    let (source, poll) = clients(&tig.base);
+    let flaky = Flaky::over(source);
+    flaky
+        .benchmark_data_failures_left
+        .store(1, Ordering::SeqCst);
+    let mut service = Service::new(
+        controller.clone(),
+        flaky,
+        poll,
+        Network::Testnet,
+        PLAYER,
+        Policy {
+            guardrails: guardrails(),
+            cache_budget: 10,
+            deciding: Deciding {
+                offer: Some(Offer {
+                    compute: OfferedCompute::Cpu { cores: 8 },
+                    tig_compute_type: "aws_t4g".to_string(),
+                }),
+                unverified_limit: 4,
+                failure_charge_atoms: "0".to_string(),
+                reserve_policy_version: "unchosen-pre-build-5.2".to_string(),
+                config_digest: [0xef; 32],
+            },
+        },
+    );
+
+    // First poll: taken in, cache incomplete, so C5 refuses.
+    let Tick::Ingested(first) = service.tick().await.unwrap() else {
+        panic!("the block is taken in");
+    };
+    assert!(!first.cache.covers_active_set(), "{:?}", first.cache);
+    assert!(
+        matches!(first.decided, Some(Ok(Decided::SnapshotNotUsable(_)))),
+        "the premise: the first poll could not decide: {:?}",
+        first.decided
+    );
+
+    // Second poll: same block, warm-up completes — and the pass runs.
+    let Tick::CacheAdvanced {
+        now_usable,
+        decided,
+        ..
+    } = service.tick().await.unwrap()
+    else {
+        panic!("the same block continues its warm-up");
+    };
+    assert!(now_usable, "the premise: this poll completed the warm-up");
+    assert!(
+        decided.is_some(),
+        "the block that became usable must be decided from, not skipped"
     );
 }

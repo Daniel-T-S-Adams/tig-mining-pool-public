@@ -36,6 +36,14 @@ fn stored_count(meta: &ActiveBenchmarkMeta, field: &str, value: u64) -> Result<i
 /// A row that cannot be read is [`StoreError::Corrupt`], never a default: the
 /// values here are denominators and source settings, and a zero substituted
 /// for an unreadable count would change a decision rather than fail one.
+///
+/// Those paths are unreachable through the schema — `migrations/0014`
+/// constrains the counts, the heights and the quality list, and the controller
+/// cannot write the table at all. They are kept because an `i64` column has to
+/// become a `u64` field somehow and reporting is the right answer if it ever
+/// cannot; the schema's half of the guarantee is asserted by
+/// `the_schema_refuses_every_shape_load_would_have_to_call_corrupt`, so a
+/// later migration cannot drop it silently.
 fn row_to_meta(row: &sqlx::postgres::PgRow) -> Result<ActiveBenchmarkMeta, StoreError> {
     use sqlx::Row;
 

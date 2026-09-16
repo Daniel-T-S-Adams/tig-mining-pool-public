@@ -1017,7 +1017,20 @@ async fn submit_precommit(
         .and_then(Value::as_str)
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
-    let fee_paid = (base_fee + per_nonce_fee * u128::from(num_nonces)).to_string();
+    // `mining_system.md` §6.8: the fee scales with **bundles**, not nonces,
+    // despite `per_nonce_fee`'s name. Settled during the protocol spike (S6)
+    // against the pinned upstream commit, where
+    // `tig-protocol/src/contracts/benchmarks.rs` computes
+    // `submission_fee = base_fee + per_nonce_fee * num_bundles` and separately
+    // sets `num_nonces = num_bundles * num_nonces_per_bundle`.
+    //
+    // This fake previously multiplied by nonces, which is the derivation §6.8
+    // names as refuted — `fixtures/tig/v1/expected.json` states that rule and
+    // the document records it as the losing side. A fake that charges a
+    // different fee from TIG is a fake the pool's fee-balance reasoning can be
+    // developed against and then fail live, which is the whole failure mode a
+    // test double exists to prevent.
+    let fee_paid = (base_fee + per_nonce_fee * u128::from(num_bundles)).to_string();
 
     let seq = w.next_bench_seq;
     w.next_bench_seq += 1;

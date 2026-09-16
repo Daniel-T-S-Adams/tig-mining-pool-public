@@ -27,6 +27,7 @@ fn precommit(workflow: &str, generation: i32, digest: u8) -> NewIntent {
         benchmark_id: None,
         payload_digest: [digest; 32],
         payload_artifact_id: None,
+        trace_id: None,
     }
 }
 
@@ -42,6 +43,7 @@ fn benchmark(workflow: &str, generation: i32, benchmark_id: &str, digest: u8) ->
         // names the built payload it sends. Keyed by benchmark and digest, so
         // each variation these tests create cites its own.
         payload_artifact_id: Some(format!("artifact/{workflow}/{benchmark_id}/{digest:02x}")),
+        trace_id: None,
     }
 }
 
@@ -785,4 +787,77 @@ async fn the_claimable_set_is_what_still_owes_tig_a_write() {
         .await
         .unwrap();
     assert_eq!(after.len(), 1, "{after:?}");
+}
+
+#[tokio::test]
+async fn every_column_of_the_table_reaches_the_typed_intent() {
+    // `trace_id` was added to the table and to four of the five statements
+    // that read it. The fifth — the claim path — then returned intents that
+    // parsed fine and carried no trace, so a column stored faithfully by the
+    // controller arrived nowhere. The column list is shared now, but sharing
+    // one list is not what keeps it *complete*: this is.
+    //
+    // The comparison is against the database's own catalogue, so a migration
+    // that adds a column fails here until someone decides what the typed
+    // intent does with it. `IGNORED` is the deliberate-omission list, and
+    // every entry has to say why.
+    const IGNORED: [(&str, &str); 2] = [
+        // Bookkeeping the row keeps and no caller reads. Neither is part of
+        // §7.3's identity, and `updated_at` is set by the trigger on every
+        // write, so a typed field would be stale the moment it was read.
+        ("created_at", "row bookkeeping, not part of the intent"),
+        ("updated_at", "set by the trigger; a copy would be stale"),
+    ];
+
+    let Some(db) = TempDb::migrated("intent_columns").await else {
+        return;
+    };
+    let pool = db.pool_as("pool_controller").await;
+    pool_test_support::seed_workflows(&pool, "testnet", &["w1"]).await;
+
+    let columns: Vec<String> = sqlx::query_scalar(
+        "SELECT column_name FROM information_schema.columns
+          WHERE table_schema = 'pool' AND table_name = 'tig_write_intent'
+          ORDER BY column_name",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert!(
+        columns.len() > 5,
+        "the catalogue query found nothing to check: {columns:?}"
+    );
+
+    // Read one real row through the repository and ask which columns the
+    // statement actually projected. A name the query never selected is a
+    // column the typed intent cannot be carrying.
+    let repo = PostgresIntentRepository::new(pool.clone());
+    repo.create(precommit("w1", 1, 0xaa)).await.unwrap();
+    let projected: Vec<String> = sqlx::query(
+        "SELECT * FROM pool.tig_write_intent WHERE workflow_id = 'w1' AND generation = 1",
+    )
+    .fetch_one(&pool)
+    .await
+    .map(|row| {
+        use sqlx::Column;
+        row.columns().iter().map(|c| c.name().to_string()).collect()
+    })
+    .unwrap();
+    assert_eq!(
+        projected.len(),
+        columns.len(),
+        "the catalogue and a SELECT * disagree about the table"
+    );
+
+    for column in &columns {
+        if IGNORED.iter().any(|(name, _)| name == column) {
+            continue;
+        }
+        assert!(
+            pool_workflow::intent_columns_read().contains(&column.as_str()),
+            "column {column:?} exists on pool.tig_write_intent but no statement \
+             that feeds a typed WriteIntent selects it. Either read it into \
+             WriteIntent, or add it to IGNORED here with the reason."
+        );
+    }
 }

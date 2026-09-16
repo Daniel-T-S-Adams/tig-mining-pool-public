@@ -23,10 +23,10 @@
 //!   the check has something to read when it lands, and no accounting batch
 //!   is posted.
 
-use pool_domain::Network;
+use pool_domain::{Network, TraceId};
 use sqlx::{PgPool, Row};
 
-use crate::intent::{IntentState, WriteIntent, WriteKind};
+use crate::intent::WriteIntent;
 
 /// The lease key for `pg_advisory_xact_lock`.
 ///
@@ -114,6 +114,14 @@ pub struct NewDecision {
     pub config_digest: [u8; 32],
     /// The §7.3 payload digest of the precommit body this decision produces.
     pub payload_digest: [u8; 32],
+    /// The trace the deciding pass ran under (`architecture.md` §10.1,
+    /// criterion I3). Stored on the intent, where the gateway reads it back
+    /// after a restart — by then nothing else about this call survives.
+    ///
+    /// One trace per deciding pass rather than per intent: a tick that admits
+    /// three precommits is one unit of work, and `intent_id` is what
+    /// distinguishes the three within it.
+    pub trace_id: Option<TraceId>,
 }
 
 /// A committed decision and the intent created with it.
@@ -481,8 +489,8 @@ pub async fn admit_precommit(
     let intent_row = sqlx::query(concat!(
         "INSERT INTO pool.tig_write_intent
                  (network, workflow_id, write_kind, generation, benchmark_id,
-                  payload_digest, payload_artifact_id)
-             SELECT $1, $2, 'precommit', $3, NULL, $4, NULL
+                  payload_digest, payload_artifact_id, trace_id)
+             SELECT $1, $2, 'precommit', $3, NULL, $4, NULL, $5
               WHERE NOT ",
         // §10: a precommit that reached TIG makes a second generation a
         // second benchmark for one decision. Asked inside the INSERT
@@ -490,13 +498,14 @@ pub async fn admit_precommit(
         // transaction holds no lock on, so an attempt starting between a
         // read and this write would not be seen by it.
         crate::attempt::transmitted_precommit_exists!(),
-        " RETURNING intent_id::text AS intent_id, network, workflow_id, write_kind,
-                       generation, benchmark_id, payload_digest, payload_artifact_id, state",
+        " RETURNING ",
+        crate::intent::intent_columns!(),
     ))
     .bind(decision.network.as_str())
     .bind(&decision.workflow_id)
     .bind(decision.generation)
     .bind(decision.payload_digest.as_slice())
+    .bind(decision.trace_id.map(|t| t.to_hex()))
     .fetch_optional(&mut *tx)
     .await
     // §7.3 treats this key as a conflict, not an availability problem.
@@ -526,17 +535,14 @@ pub async fn admit_precommit(
         });
     };
 
-    let intent = WriteIntent {
-        intent_id: intent_row.try_get("intent_id").map_err(unavailable)?,
-        network: decision.network,
-        workflow_id: decision.workflow_id.clone(),
-        write_kind: WriteKind::Precommit,
-        generation: decision.generation,
-        benchmark_id: None,
-        payload_digest: decision.payload_digest,
-        payload_artifact_id: None,
-        state: IntentState::Prepared,
-    };
+    // Read through the same function every other intent read uses. Building
+    // one here from the values just bound would produce an intent that agrees
+    // with this caller whatever the row holds, and would have to be revisited
+    // for every column added to the table — which is how `trace_id` reached
+    // four of five statements and not the fifth.
+    let intent = crate::intent::row_to_intent(&intent_row).map_err(|e| {
+        AdmissionError::Unavailable(format!("the admitted intent did not read back: {e}"))
+    })?;
 
     tx.commit().await.map_err(unavailable)?;
 

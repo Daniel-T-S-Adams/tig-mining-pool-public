@@ -7,10 +7,12 @@ use std::fmt;
 use std::str::FromStr;
 
 pub mod challenge_tie;
+pub mod trace;
 
 pub use challenge_tie::{
     CHALLENGE_TIE_DOMAIN, DrawRank, challenge_tie_seed, draw_rank, draw_ranks,
 };
+pub use trace::{TraceId, TraceIdError};
 
 /// The TIG network a process operates against.
 ///

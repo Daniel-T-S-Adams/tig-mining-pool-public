@@ -106,7 +106,7 @@ async fn a_confirmed_precommit_with_both_preconditions_gets_its_commitment() {
     confirmed_workflow(&pool, Some(4)).await;
     preconditions(&pool, &submission).await;
 
-    let intent = create_commitment_intent(&pool, NET, &fake(), "w1", ARTIFACT, &submission)
+    let intent = create_commitment_intent(&pool, NET, &fake(), "w1", ARTIFACT, &submission, None)
         .await
         .expect("the write is owed and both preconditions hold");
     assert_eq!(intent.benchmark_id.as_deref(), Some(BENCH));
@@ -114,7 +114,7 @@ async fn a_confirmed_precommit_with_both_preconditions_gets_its_commitment() {
     assert_eq!(intent.payload_digest, benchmark_digest(&submission));
 
     // Idempotent: the crash-retry path re-creates the identical intent.
-    let again = create_commitment_intent(&pool, NET, &fake(), "w1", ARTIFACT, &submission)
+    let again = create_commitment_intent(&pool, NET, &fake(), "w1", ARTIFACT, &submission, None)
         .await
         .unwrap();
     assert_eq!(again.intent_id, intent.intent_id);
@@ -133,7 +133,7 @@ async fn a_fabricated_precondition_is_refused_against_a_live_endpoint() {
     confirmed_workflow(&pool, Some(4)).await;
     preconditions(&pool, &submission).await;
 
-    let err = create_commitment_intent(&pool, NET, &live(), "w1", ARTIFACT, &submission)
+    let err = create_commitment_intent(&pool, NET, &live(), "w1", ARTIFACT, &submission, None)
         .await
         .expect_err("a stubbed precondition may not become a real write");
     assert!(
@@ -189,7 +189,7 @@ async fn a_real_precondition_is_fine_against_a_live_endpoint() {
     .await
     .unwrap();
 
-    create_commitment_intent(&pool, NET, &live(), "w1", ARTIFACT, &submission)
+    create_commitment_intent(&pool, NET, &live(), "w1", ARTIFACT, &submission, None)
         .await
         .expect("an earned precondition is what a live write rests on");
 }
@@ -203,7 +203,7 @@ async fn a_commitment_is_owed_only_from_a_confirmed_precommit() {
     let submission = committed(4);
     pool_test_support::seed_workflows(&pool, "testnet", &["w1"]).await;
 
-    let err = create_commitment_intent(&pool, NET, &fake(), "w1", ARTIFACT, &submission)
+    let err = create_commitment_intent(&pool, NET, &fake(), "w1", ARTIFACT, &submission, None)
         .await
         .expect_err("a DECIDED workflow has confirmed nothing");
     assert!(
@@ -233,7 +233,7 @@ async fn the_quality_vector_must_be_the_length_the_confirmed_precommit_fixed() {
     confirmed_workflow(&pool, Some(4)).await;
     preconditions(&pool, &wrong).await;
 
-    let err = create_commitment_intent(&pool, NET, &fake(), "w1", ARTIFACT, &wrong)
+    let err = create_commitment_intent(&pool, NET, &fake(), "w1", ARTIFACT, &wrong, None)
         .await
         .expect_err("three qualities for four nonces");
     assert!(err.to_string().contains("num_nonces is 4"), "{err}");
@@ -266,10 +266,10 @@ async fn a_second_commitment_intent_for_one_workflow_is_refused() {
     confirmed_workflow(&pool, Some(4)).await;
     preconditions(&pool, &submission).await;
 
-    let first = create_commitment_intent(&pool, NET, &fake(), "w1", ARTIFACT, &submission)
+    let first = create_commitment_intent(&pool, NET, &fake(), "w1", ARTIFACT, &submission, None)
         .await
         .expect("the first commitment is owed");
-    let again = create_commitment_intent(&pool, NET, &fake(), "w1", ARTIFACT, &submission)
+    let again = create_commitment_intent(&pool, NET, &fake(), "w1", ARTIFACT, &submission, None)
         .await
         .expect("asking twice is not an error");
 
@@ -317,7 +317,8 @@ async fn the_merkle_root_must_be_sixty_four_lowercase_hex_characters() {
             merkle_root: root,
             ..committed(4)
         };
-        let err = match create_commitment_intent(&pool, NET, &fake(), "w1", ARTIFACT, &wrong).await
+        let err = match create_commitment_intent(&pool, NET, &fake(), "w1", ARTIFACT, &wrong, None)
+            .await
         {
             Ok(_) => panic!("a {label} merkle_root must be refused"),
             Err(err) => err,
@@ -348,7 +349,7 @@ async fn a_workflow_with_no_confirmed_length_is_refused_rather_than_unchecked() 
     confirmed_workflow(&pool, None).await;
     preconditions(&pool, &submission).await;
 
-    let err = create_commitment_intent(&pool, NET, &fake(), "w1", ARTIFACT, &submission)
+    let err = create_commitment_intent(&pool, NET, &fake(), "w1", ARTIFACT, &submission, None)
         .await
         .expect_err("no length, no commitment");
     assert!(
@@ -377,7 +378,7 @@ async fn a_commitment_for_another_benchmark_is_refused() {
     };
     preconditions(&pool, &other).await;
 
-    let err = create_commitment_intent(&pool, NET, &fake(), "w1", ARTIFACT, &other)
+    let err = create_commitment_intent(&pool, NET, &fake(), "w1", ARTIFACT, &other, None)
         .await
         .expect_err("the workflow owns bench_a");
     assert!(matches!(err, CommitError::WrongBenchmark { .. }), "{err}");
@@ -400,7 +401,7 @@ async fn an_intent_whose_digest_is_not_the_built_payloads_is_refused() {
         merkle_root: "cd".repeat(32),
         solution_quality: (0..4).collect(),
     };
-    let err = create_commitment_intent(&pool, NET, &fake(), "w1", ARTIFACT, &different)
+    let err = create_commitment_intent(&pool, NET, &fake(), "w1", ARTIFACT, &different, None)
         .await
         .expect_err("the built payload says otherwise");
     assert!(

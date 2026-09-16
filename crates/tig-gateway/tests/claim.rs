@@ -73,6 +73,7 @@ fn intent(state: IntentState) -> WriteIntent {
         // it. The real path records exactly this value at admission.
         payload_digest: tig_gateway::transmit::precommit_digest(&submitted()),
         payload_artifact_id: None,
+        trace_id: None,
         state,
     }
 }
@@ -642,6 +643,7 @@ fn benchmark_intent(state: IntentState) -> WriteIntent {
         // genuinely is this intent's.
         payload_digest: benchmark_digest(&commitment()),
         payload_artifact_id: Some("artifact/w1/commitment".to_string()),
+        trace_id: None,
         state,
     }
 }

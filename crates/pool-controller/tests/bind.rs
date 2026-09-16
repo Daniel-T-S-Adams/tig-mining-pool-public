@@ -128,6 +128,7 @@ fn decision(workflow: &str, generation: i32) -> NewDecision {
         reserve_inputs: json!({}),
         precommit_reserve: "0".to_string(),
         config_digest: [0xef; 32],
+        trace_id: None,
         payload_digest: precommit_digest(&submission()),
     }
 }

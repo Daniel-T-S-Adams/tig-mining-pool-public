@@ -8,6 +8,10 @@ version = "0.1.0"
 
 [dependencies]
 blake3 = "1"
+# §10.1's trace ids are drawn from the OS: a shared or absent id makes two
+# units of work read as one story, so there is no fallback to fall back to.
+getrandom = "0.3"
+thiserror = "2"
 
 [dev-dependencies]
 blake3 = "1"

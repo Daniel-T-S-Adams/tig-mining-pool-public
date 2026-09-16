@@ -111,6 +111,7 @@ fn decision_with_tie(workflow: &str, generation: i32, tie: Option<RecordedTie>) 
         }),
         precommit_reserve: "40002000000000000000".to_string(),
         config_digest: [0xef; 32],
+        trace_id: None,
         payload_digest: [generation as u8; 32],
     }
 }

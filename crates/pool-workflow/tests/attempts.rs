@@ -27,6 +27,7 @@ fn intent(workflow: &str, kind: WriteKind, benchmark: Option<&str>) -> NewIntent
             WriteKind::Proof => Some(format!("artifact/{workflow}/proof")),
             WriteKind::Precommit => None,
         },
+        trace_id: None,
     }
 }
 

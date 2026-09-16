@@ -32,6 +32,7 @@ fn benchmark_intent(workflow: &str, benchmark: &str) -> NewIntent {
         benchmark_id: Some(benchmark.to_string()),
         payload_digest: PAYLOAD,
         payload_artifact_id: Some(COMMITMENT_ARTIFACT.to_string()),
+        trace_id: None,
     }
 }
 
@@ -55,6 +56,7 @@ fn proof_intent(workflow: &str, benchmark: &str, artifact: Option<&str>) -> NewI
         benchmark_id: Some(benchmark.to_string()),
         payload_digest: PAYLOAD,
         payload_artifact_id: artifact.map(str::to_string),
+        trace_id: None,
     }
 }
 
@@ -317,6 +319,7 @@ async fn a_precommit_needs_neither_precondition() {
             benchmark_id: None,
             payload_digest: PAYLOAD,
             payload_artifact_id: None,
+            trace_id: None,
         })
         .await
         .expect("a precommit has no package and no proof to vouch for");

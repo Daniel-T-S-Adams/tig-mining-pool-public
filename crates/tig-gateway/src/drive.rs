@@ -14,7 +14,7 @@
 //! is what reopens the lane — and leaves the workflow for the next
 //! reconciliation pass to advance from the same evidence.
 
-use pool_domain::Network;
+use pool_domain::{Network, TraceId};
 use pool_workflow::{
     AttemptError, AttemptOutcome, BenchmarkSubmission, IntentError, LeaseError, LeaseKind,
     PostgresAttemptLedger, PostgresIntentRepository, PrecommitSubmission, TigWriteIntentRepository,
@@ -81,6 +81,14 @@ pub struct IntentOutcome {
     pub intent_id: String,
     pub workflow_id: String,
     pub generation: i32,
+    /// The trace the controller admitted this intent under (`architecture.md`
+    /// §10.1, criterion I3).
+    ///
+    /// Carried through the outcome rather than looked up when logging: the
+    /// point of storing it is that the gateway may be a different process on
+    /// the far side of a restart, and by the time a line is written the only
+    /// place that trace exists is the row this intent was read from.
+    pub trace_id: Option<TraceId>,
     pub decision: Option<ClaimDecision>,
     pub acted: Acted,
 }
@@ -240,6 +248,7 @@ pub async fn run_once(
                 intent_id: intent.intent_id.clone(),
                 workflow_id: intent.workflow_id.clone(),
                 generation: intent.generation,
+                trace_id: intent.trace_id,
                 decision,
                 acted,
             },
@@ -248,6 +257,7 @@ pub async fn run_once(
                 intent_id: intent.intent_id.clone(),
                 workflow_id: intent.workflow_id.clone(),
                 generation: intent.generation,
+                trace_id: intent.trace_id,
                 decision: None,
                 acted: Acted::Failed {
                     error: e.to_string(),
@@ -319,6 +329,7 @@ pub async fn run_once_benchmarks(
                 intent_id: intent.intent_id.clone(),
                 workflow_id: intent.workflow_id.clone(),
                 generation: intent.generation,
+                trace_id: intent.trace_id,
                 decision,
                 acted,
             },
@@ -327,6 +338,7 @@ pub async fn run_once_benchmarks(
                 intent_id: intent.intent_id.clone(),
                 workflow_id: intent.workflow_id.clone(),
                 generation: intent.generation,
+                trace_id: intent.trace_id,
                 decision: None,
                 acted: Acted::Failed {
                     error: e.to_string(),
@@ -1094,6 +1106,7 @@ mod tests {
             precommit_reserve: "0".to_string(),
             config_digest: [0xef; 32],
             payload_digest: precommit_digest(&submission),
+            trace_id: None,
         }
     }
 
@@ -1214,6 +1227,55 @@ mod tests {
                 key: &self.key,
             }
         }
+    }
+
+    #[tokio::test]
+    async fn the_admitting_trace_reaches_the_gateway_through_the_row() {
+        // Criterion I3 / `architecture.md` §10.1: "Durable jobs and intents
+        // store the originating trace ID so work resumed after a restart
+        // remains correlated." The gateway is a separate process from the
+        // controller that admitted this intent, so the only path from one to
+        // the other is the column — nothing in this call stack was present
+        // when the decision was made.
+        //
+        // Asserted on the outcome the run loop logs from, not on the row,
+        // because a value stored and never carried forward correlates nothing:
+        // that is the failure this criterion is about.
+        let Some(h) = Harness::new("drive_trace").await else {
+            return;
+        };
+        let trace = TraceId::draw().unwrap();
+        let mut decided = decision("w1", 1);
+        decided.trace_id = Some(trace);
+        admit_precommit(&h.controller, &decided, 4).await.unwrap();
+
+        let report = run_once(&h.driver(), &[]).await.unwrap();
+        assert_eq!(report.outcomes.len(), 1, "{report:?}");
+        assert_eq!(
+            report.outcomes[0].trace_id,
+            Some(trace),
+            "the intent's originating trace must reach the outcome the gateway logs"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_intent_admitted_without_a_trace_is_still_driven() {
+        // The column is nullable and §10.1 asks that the id be stored, not
+        // that work be refused without one. A controller whose OS refused
+        // randomness should lose correlation, not stop transmitting — so this
+        // asserts the absence is carried as an absence and the send still
+        // happens, rather than the intent being skipped or failing.
+        let Some(h) = Harness::new("drive_no_trace").await else {
+            return;
+        };
+        admit_precommit(&h.controller, &decision("w1", 1), 4)
+            .await
+            .unwrap();
+
+        let report = run_once(&h.driver(), &[]).await.unwrap();
+        assert_eq!(report.outcomes.len(), 1, "{report:?}");
+        assert_eq!(report.outcomes[0].trace_id, None);
+        assert_eq!(report.outcomes[0].decision, Some(ClaimDecision::Transmit));
     }
 
     #[tokio::test]
@@ -1880,6 +1942,7 @@ mod tests {
                 benchmark_id: Some(benchmark_id),
                 payload_digest: benchmark_digest(&submission),
                 payload_artifact_id: Some(artifact_id),
+                trace_id: None,
             })
             .await
             .unwrap();
@@ -2236,6 +2299,7 @@ mod tests {
             intent_id: "i1".into(),
             workflow_id: "w1".into(),
             generation: 1,
+            trace_id: None,
             decision,
             acted,
         }

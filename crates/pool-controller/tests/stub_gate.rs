@@ -64,6 +64,7 @@ async fn the_stub_satisfies_the_preconditions_it_stands_in_for() {
         benchmark_id: Some("bench_a".to_string()),
         payload_digest: PAYLOAD,
         payload_artifact_id: None,
+        trace_id: None,
     })
     .await
     .expect_err("invariant 4 is still in force");
@@ -81,6 +82,7 @@ async fn the_stub_satisfies_the_preconditions_it_stands_in_for() {
         benchmark_id: Some("bench_a".to_string()),
         payload_digest: PAYLOAD,
         payload_artifact_id: Some("artifact/w1/commitment".to_string()),
+        trace_id: None,
     })
     .await
     .expect_err("acceptance without a built commitment is half a precondition");
@@ -104,6 +106,7 @@ async fn the_stub_satisfies_the_preconditions_it_stands_in_for() {
         benchmark_id: Some("bench_a".to_string()),
         payload_digest: PAYLOAD,
         payload_artifact_id: Some("artifact/w1/commitment".to_string()),
+        trace_id: None,
     })
     .await
     .expect("both halves now hold");
@@ -127,6 +130,7 @@ async fn the_stub_satisfies_the_preconditions_it_stands_in_for() {
         benchmark_id: Some("bench_a".to_string()),
         payload_digest: PAYLOAD,
         payload_artifact_id: Some("artifact/w1/proof".to_string()),
+        trace_id: None,
     })
     .await
     .expect("invariant 5 is satisfied by the stub payload");

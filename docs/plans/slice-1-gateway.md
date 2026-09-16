@@ -1,9 +1,10 @@
 ---
 title: "Slice 1: TIG gateway and restart-safe protocol state machine"
-status: active
+status: implemented
 created: 2026-08-15
 source: docs/pre_build_checklist.md §8 (last item) and §10 step 1
-last_verified: 2026-09-04
+last_verified: 2026-09-16
+closed: 2026-09-16
 ---
 
 # Slice 1 plan: TIG gateway and restart-safe protocol state machine
@@ -621,3 +622,39 @@ file adds a row here in the same PR.
   found them (`CLAUDE.md` mandatory workflow §6).
 - `pre_build_checklist.md` §10 step 1 is recorded as complete and this plan's
   status is flipped to `implemented`.
+
+## 9. Closing record
+
+Slice 1 closed on **2026-09-16**. This plan is now `implemented`: the code and
+its tests outrank it, per `CLAUDE.md`'s source-of-truth rule, and what follows
+is the record of how it closed rather than an instruction for future work.
+
+**Where each criterion is satisfied:**
+[`evidence/slice-1-criteria.md`](../evidence/slice-1-criteria.md) — all 61, one
+line each, naming the test, the `make check` gate, or the evidence document.
+
+**The live run:** [`evidence/slice-1-live-run.md`](../evidence/slice-1-live-run.md)
+— K3's block heights, intent and attempt rows, and K4's crash on the precommit
+path, both against testnet with the production binaries.
+
+**Waived:** four criteria, listed with their decisions in the criteria record —
+I2 and I4 (metrics and alert tests, to checklist §10 step 5), three of
+`lifecycle.json`'s nine cases in K2 (to step 2), and J4's transaction-duration
+test (to step 5, decision in issue #50). §7.2's invariant itself is not waived;
+only its measurement is.
+
+**What these runs also found**, each fixed in its own change: the gateway
+raised a stop-for-operator on every healthy write between acceptance and
+confirmation (#41); the block completing cache warm-up was never decided from
+(#37); and a workflow recorded as `PRECOMMIT_SUBMITTED` is never bound, because
+the binding selects `DECIDED` only (issue #44, latent — nothing reaches that
+state today). None was reachable against `fake-tig`.
+
+The slice's own risks and carried questions are §6 above. The one defect the
+live runs found that is still open is issue #44.
+
+A note for anyone chasing a reference: numbers cited in
+`pre_build_checklist.md` and the spike report predate this repository and come
+from the repository those documents were written in, so a `#31` there is not
+`#31` here. References written from slice 1 onward — including every number in
+this section and in the criteria record — are this repository's.

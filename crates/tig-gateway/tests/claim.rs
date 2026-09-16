@@ -9,11 +9,18 @@
 
 /// What the gateway under test serves.
 ///
-/// Every decision these tests build names `aws_t4g`, so a served set without
-/// it would stop every claim for an operator — the new refusal doing its job,
-/// and saying nothing about the paths below. The refusal has its own test.
+/// `served_compute`'s vocabulary is §13.5's CPU/GPU **class**, not §3's `aws_*`
+/// protocol type: `evidence::active_challenge_runtimes` filters live challenges
+/// by their `config.type` with it. The decisions these tests build name
+/// `aws_t4g`, whose class is `cpu`, so this is `["cpu"]` — the configuration a
+/// real deployment has.
+///
+/// It said `["aws_t4g"]` and hid a real defect: the claim check compared the
+/// type against the class list, so `["cpu"]` stopped every intent and
+/// `["aws_t4g"]` failed check 6. Neither configuration could work, and the
+/// harness's invented vocabulary was the only one that did.
 fn served() -> Vec<String> {
-    vec!["aws_t4g".to_string()]
+    vec!["cpu".to_string()]
 }
 
 use std::collections::BTreeMap;
@@ -1081,14 +1088,16 @@ fn an_intent_for_a_compute_type_this_gateway_does_not_serve_stops_for_an_operato
         ClaimDecision::StopForOperator {
             reason: StopReason::ComputeTypeNotServed {
                 compute_type: "aws_t4g".to_string(),
+                compute_class: Some("cpu".to_string()),
                 served: vec![],
             }
         },
-        "a gateway serving nothing transmits nothing"
+        "a gateway serving nothing transmits nothing, and the stop names the \
+         class it would have needed"
     );
 
-    // Served, but something else. The same refusal: `aws_c7g` is a real CPU
-    // type, and a gateway pinned for it has not verified `aws_t4g`'s runtime.
+    // The other class. A gateway serving only GPU has not verified any CPU
+    // challenge's runtime, which is what check 6 would have established.
     let decision = decide(
         &prepared,
         &[],
@@ -1096,7 +1105,7 @@ fn an_intent_for_a_compute_type_this_gateway_does_not_serve_stops_for_an_operato
         ONLY,
         &submitted(),
         &[],
-        &["aws_c7g".to_string()],
+        &["gpu".to_string()],
     );
     assert!(
         matches!(
@@ -1105,7 +1114,39 @@ fn an_intent_for_a_compute_type_this_gateway_does_not_serve_stops_for_an_operato
                 reason: StopReason::ComputeTypeNotServed { .. }
             }
         ),
-        "a near miss is still a miss: {decision:?}"
+        "the wrong class is still the wrong class: {decision:?}"
+    );
+
+    // And a type the pin cannot classify at all. §3: "ineligible rather than
+    // coerced" — so it is refused even by a gateway that serves everything.
+    //
+    // The intent is re-bound to the unknown submission: §7.3's digest check
+    // comes first and would otherwise answer `PayloadNotTheRecordedOne`, which
+    // is correct but a different refusal from the one under test.
+    let mut unknown = submitted();
+    unknown.compute_type = "aws_z9x".to_string();
+    let mut bound = intent(IntentState::Prepared);
+    bound.payload_digest = tig_gateway::transmit::precommit_digest(&unknown);
+    let decision = decide(
+        &bound,
+        &[],
+        LIVE,
+        ONLY,
+        &unknown,
+        &[],
+        &["cpu".to_string(), "gpu".to_string()],
+    );
+    assert!(
+        matches!(
+            decision,
+            ClaimDecision::StopForOperator {
+                reason: StopReason::ComputeTypeNotServed {
+                    compute_class: None,
+                    ..
+                }
+            }
+        ),
+        "an unclassifiable type is refused, and says the pin could not place it: {decision:?}"
     );
 
     // A stop, not a skip. The intent is not going to become sendable on its
@@ -1115,5 +1156,43 @@ fn an_intent_for_a_compute_type_this_gateway_does_not_serve_stops_for_an_operato
     assert!(
         !matches!(decision, ClaimDecision::Skip { .. }),
         "a skip reads as 'nothing owed', which this is not"
+    );
+}
+
+#[test]
+fn an_unsettled_write_is_still_reconciled_when_the_served_set_no_longer_matches() {
+    // The ordering, and it is a fix rather than a preference.
+    // `migrations/0004`'s unresolved-precommit index is network-wide, so one
+    // unsettled attempt closes §10's lane for *every* workflow in the pool.
+    //
+    // If the served-set stop ran first, an operator narrowing `served_compute`
+    // while a write was in flight would shut that lane until they widened it
+    // again — and the write itself would stay unsettled, because reconciling
+    // it is the only thing that reopens the lane. Reconciliation only reads;
+    // nothing is resubmitted, so §7.3 and §10's never-blindly-resubmit rule
+    // hold either way.
+    let mut ambiguous = intent(IntentState::OutcomeUnknown);
+    ambiguous.state = IntentState::OutcomeUnknown;
+    let unresolved = attempt(None);
+
+    let decision = decide(
+        &ambiguous,
+        &[unresolved],
+        LIVE,
+        ONLY,
+        &submitted(),
+        // The confirmed window carries the write, so the search settles it.
+        &[matching_precommit("bench-live", Some(100_081))],
+        // And this gateway no longer serves its class.
+        &["gpu".to_string()],
+    );
+
+    assert_eq!(
+        decision,
+        ClaimDecision::AlreadyConfirmed {
+            benchmark_id: "bench-live".to_string()
+        },
+        "an in-flight write is settled from confirmed reads whatever the served \
+         set says; stopping first would hold §10's lane shut network-wide"
     );
 }

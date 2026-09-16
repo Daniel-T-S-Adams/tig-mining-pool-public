@@ -82,8 +82,16 @@ pub enum StopReason {
     /// decision's compute type and the gateway's served set. A stop rather
     /// than a skip, because the intent is not going to become sendable on its
     /// own — an operator has to reconcile the two configurations.
+    ///
+    /// Compared as a class. `served_compute` is §13.5's CPU/GPU vocabulary and
+    /// the decision names §3's protocol type; the pin's
+    /// `compute_class_by_vendor` maps one to the other.
     ComputeTypeNotServed {
         compute_type: String,
+        /// The class the pin maps that type to, or `None` when it maps it to
+        /// nothing — two different refusals, and an operator fixes them
+        /// differently.
+        compute_class: Option<String>,
         served: Vec<String>,
     },
     /// The intent records `OUTCOME_UNKNOWN` and no attempt exists.
@@ -226,6 +234,47 @@ pub struct SiblingGenerations {
     pub sibling_transmitted: bool,
 }
 
+/// §3's compute type, as the CPU/GPU class `served_compute` speaks.
+///
+/// From the pinned compatibility table, which is the only place the mapping is
+/// written down — `tig_integration.md` §3's own table names a worker class per
+/// vendor row, and `config/tig_integration.json` records it as
+/// `compute_class_by_vendor`.
+///
+/// `None` for a type the pin does not carry. The caller refuses on it rather
+/// than falling back, because §3 says an unknown compute type is "ineligible
+/// rather than coerced".
+fn compute_class_of(compute_type: &str) -> Option<&'static str> {
+    static PINNED: &str = include_str!("../../../config/tig_integration.json");
+    // Parsed per call. This runs once per claimable intent, against a string
+    // compiled into the binary, and a cached global would be a lifetime for a
+    // value that is already immutable.
+    let pinned: serde_json::Value = serde_json::from_str(PINNED).ok()?;
+    let by_vendor = pinned
+        .pointer("/compute_compatibility/compute_types_by_vendor")?
+        .as_object()?;
+    let class_by_vendor = pinned
+        .pointer("/compute_compatibility/compute_class_by_vendor")?
+        .as_object()?;
+    for (vendor, types) in by_vendor {
+        let carries = types
+            .as_array()
+            .is_some_and(|list| list.iter().any(|t| t.as_str() == Some(compute_type)));
+        if !carries {
+            continue;
+        }
+        return match class_by_vendor
+            .get(vendor)
+            .and_then(serde_json::Value::as_str)
+        {
+            Some("cpu") => Some("cpu"),
+            Some("gpu") => Some("gpu"),
+            _ => None,
+        };
+    }
+    None
+}
+
 /// Decide what to do with one claimed intent.
 ///
 /// `confirmed_precommits` is the `precommits` array of a `get-benchmarks`
@@ -247,19 +296,6 @@ pub fn decide(
         return ClaimDecision::Skip {
             reason: SkipReason::NotAPrecommit {
                 kind: intent.write_kind.as_str(),
-            },
-        };
-    }
-    // Before anything else, because it is the cheapest question and the one
-    // whose wrong answer costs a fee. See `StopReason::ComputeTypeNotServed`.
-    if !served_compute
-        .iter()
-        .any(|served| served == &submitted.compute_type)
-    {
-        return ClaimDecision::StopForOperator {
-            reason: StopReason::ComputeTypeNotServed {
-                compute_type: submitted.compute_type.clone(),
-                served: served_compute.to_vec(),
             },
         };
     }
@@ -316,6 +352,36 @@ pub fn decide(
         .any(|a| a.is_unresolved() || a.outcome == Some(AttemptOutcome::Accepted));
     if unsettled {
         return reconciled(submitted, confirmed_precommits);
+    }
+
+    // Now that nothing is in flight, whether this deployment may send it at
+    // all. After the reconciliation above and not before: that branch only
+    // *reads*, and stopping ahead of it would leave an already-sent write
+    // unsettled — which closes §10's lane for every workflow in the pool,
+    // network-wide, until an operator edits configuration.
+    //
+    // Compared as a **class**, not a protocol type. `served_compute` is §13.5's
+    // CPU/GPU vocabulary — `evidence::active_challenge_runtimes` filters live
+    // challenges by their `config.type` with it — while a decision names §3's
+    // `aws_*` type. An earlier version of this check compared the two
+    // directly, which made every configuration unusable: with `["cpu"]` no
+    // intent ever matched and the pool could never transmit, and with
+    // `["aws_t4g"]` check 6 refused a type no challenge declares and the write
+    // gate never opened at all.
+    match compute_class_of(&submitted.compute_type) {
+        Some(class) if served_compute.iter().any(|served| served == class) => {}
+        // A type the pin cannot classify is refused, not passed. §3 is
+        // explicit that an unknown compute type is "ineligible rather than
+        // coerced", and this is the last place that can hold.
+        _ => {
+            return ClaimDecision::StopForOperator {
+                reason: StopReason::ComputeTypeNotServed {
+                    compute_type: submitted.compute_type.clone(),
+                    compute_class: compute_class_of(&submitted.compute_type).map(str::to_string),
+                    served: served_compute.to_vec(),
+                },
+            };
+        }
     }
 
     // Every attempt was definitively refused. Not an ambiguity, and putting it

@@ -1183,10 +1183,13 @@ mod tests {
         key: TigApiKey,
         lane: PostLane,
         commitment: Option<BenchmarkSubmission>,
-        /// What the harness's gateway serves. The decisions these tests build
-        /// name `aws_t4g`, so this does too — a harness serving nothing would
-        /// have every claim stop for an operator, which is the new refusal
-        /// doing its job and would say nothing about the paths under test.
+        /// What the harness's gateway serves, in `served_compute`'s own
+        /// vocabulary: §13.5's CPU/GPU **class**, not §3's `aws_*` type.
+        ///
+        /// This said `["aws_t4g"]` and hid a real defect — the claim check was
+        /// comparing a protocol type against a class list, so no real
+        /// configuration could ever have worked. A harness that invents a
+        /// vocabulary tests the invention.
         served_compute: Vec<String>,
         _key_path: PathBuf,
     }
@@ -1214,7 +1217,7 @@ mod tests {
                 key,
                 lane: PostLane::new(policy),
                 commitment: None,
-                served_compute: vec!["aws_t4g".to_string()],
+                served_compute: vec!["cpu".to_string()],
                 _key_path: key_path,
             })
         }

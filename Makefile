@@ -29,6 +29,7 @@ feature-gate:
 # `make db-scan`, which needs a database.
 secret-scan:
 	./scripts/secret-scan.sh --selftest
+	./scripts/live-run-evidence.sh --selftest
 
 # architecture.md §1 pins images by version and digest. The postgres pin
 # lives in three places; this proves they have not drifted apart, so the A4

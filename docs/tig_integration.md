@@ -873,10 +873,20 @@ can see the other.
 The gap that opens is precise: with `served_compute` empty this check has
 nothing to judge and passes, while the controller may be deciding for CPU. The
 comparison is therefore made where the two facts finally meet — the write
-boundary. `claim::decide` refuses any intent whose decision names a compute
-type outside `served_compute`, as a **stop for an operator** rather than a
-skip: the intent will not become sendable on its own, and the two
-configurations have to be reconciled by a person.
+boundary. `claim::decide` refuses any intent the gateway does not serve, as a
+**stop for an operator** rather than a skip: the intent will not become
+sendable on its own, and the two configurations have to be reconciled by a
+person.
+
+**The comparison is between classes.** `served_compute` speaks this section's
+CPU/GPU vocabulary — it scopes the check above, which filters live challenges
+by their `config.type` — while a decision names §3's protocol type, `aws_t4g`
+and the rest. The two are different vocabularies and §3 keeps them apart. The
+gateway maps the decision's type to its class through the pinned
+`compute_compatibility.compute_class_by_vendor` table, which is where §3's own
+table is recorded, and refuses a type the pin cannot classify: §3 says an
+unknown compute type is "ineligible rather than coerced", and this is the last
+place that can hold.
 
 That is a stronger guarantee than comparing the files would be. It binds what
 is actually *sent* to what this gateway has pinned runtimes for, which is what

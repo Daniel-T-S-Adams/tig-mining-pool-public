@@ -30,6 +30,9 @@ const ROUND: u64 = 133;
 /// Any non-zero adoption. Not TIG's 18-decimal scale: §12 forbids compiling an
 /// observed value in, and every comparison here is between integers.
 const SOME_ADOPTION: &str = "7";
+/// §11.4's `P[s]`, as TIG publishes it: a decimal atom string. Arbitrary, for
+/// the reason above.
+const PENALTY: &str = "50";
 
 fn block() -> Value {
     json!({
@@ -37,6 +40,10 @@ fn block() -> Value {
             "id": BLOCK,
             "details": {"round": ROUND, "height": HEIGHT},
             "data": {"active_ids": {"benchmark": []}},
+            // §11.4's P[s]. A small arbitrary value: the real penalty is an
+            // observed constant §12 forbids compiling in, and every assertion
+            // here is exact integer arithmetic.
+            "config": {"reports": {"penalty_amount": PENALTY}},
         }
     })
 }
@@ -230,21 +237,38 @@ async fn a_pass_commits_a_decision_its_intent_and_the_workflow_they_belong_to() 
     // D2c: the reserve's inputs are recorded, and the amount is the §6.8 fee
     // for the sized track plus the configured failure charge.
     let inputs: Value = row.get("reserve_inputs");
+    // §11.4: `P[s] * B[t] + F[s,t] + X`, per track, and the maximum of those.
+    // Every input recorded, not just the total — §11.5 requires the exact
+    // penalty with every reservation, and a maximum with no inputs cannot be
+    // checked against the formula that produced it.
     assert_eq!(
-        inputs["live_method_penalties"],
-        json!([]),
-        "computed, and there were none — slice 1 has no members to report"
+        inputs["penalty_amount_atoms"],
+        json!(PENALTY),
+        "P[s] is the block's config.reports.penalty_amount, not a member count"
     );
     assert_eq!(inputs["policy_version"], json!("unchosen-pre-build-5.2"));
+    let track = &inputs["by_track"]["t1"];
     assert_eq!(
-        inputs["by_track"]["t1"]["tig_fee_atoms"],
-        json!("128"),
-        "§6.8: 100 + 7 * 4 bundles"
+        track["num_bundles"],
+        json!(4),
+        "B[t], from §6.7's alignment"
     );
     assert_eq!(
+        track["method_reserve_atoms"],
+        json!("200"),
+        "P[s] * B[t] = 50 * 4 — the term an earlier version dropped entirely"
+    );
+    assert_eq!(
+        track["tig_fee_atoms"],
+        json!("128"),
+        "F[s,t] per §6.8: 100 + 7 * 4 bundles"
+    );
+    assert_eq!(track["failure_charge_atoms"], json!("1000"), "X");
+    assert_eq!(track["assignment_reserve_atoms"], json!("1328"));
+    assert_eq!(
         row.get::<String, _>("precommit_reserve"),
-        "1128",
-        "the fee plus the configured failure charge, as the maximum across tracks"
+        "1328",
+        "the maximum across proposed tracks; one track here, so its own"
     );
 
     // D2d: the rank map is the audit evidence.
@@ -369,4 +393,86 @@ async fn two_passes_over_one_snapshot_are_two_workflows_not_one() {
     };
     assert_ne!(first.intent.workflow_id, second.intent.workflow_id);
     assert_ne!(first.intent.intent_id, second.intent.intent_id);
+}
+
+#[tokio::test]
+async fn an_unreadable_penalty_or_charge_stops_the_pass_rather_than_reserving_less() {
+    // §11.4's reserve exists to cover exposure, so every way of getting it
+    // wrong that this pass can reach must fail rather than under-state it.
+    // Both of these were substitutions before: `P[s]` was never read at all,
+    // and the charge was parsed with `unwrap_or(0)` — which would have written
+    // the configured string into `reserve_inputs` and a zero into
+    // `precommit_reserve`, two halves of one record disagreeing.
+    let Some(db) = TempDb::migrated("decide_reserve_inputs").await else {
+        return;
+    };
+    let pool = db.pool_as("pool_controller").await;
+    let window = confirmed_window(&benchmarks_body(), &block()).unwrap();
+
+    // A block with no `config.reports.penalty_amount`.
+    let mut no_penalty = snapshot();
+    no_penalty.block = json!({
+        "block": {
+            "id": BLOCK,
+            "details": {"round": ROUND, "height": HEIGHT},
+            "data": {"active_ids": {"benchmark": []}},
+        }
+    });
+    let persisted = persist(&pool, no_penalty).await;
+    let err = decide_once(
+        &pool,
+        NET,
+        POOL,
+        &offer(),
+        &persisted,
+        &window,
+        &active(),
+        4,
+        "1000",
+        "unchosen-pre-build-5.2",
+        [0xef; 32],
+        None,
+    )
+    .await
+    .expect_err("P[s] is required");
+    assert!(
+        err.to_string().contains("penalty_amount"),
+        "the refusal names what is missing: {err}"
+    );
+
+    // A charge that is canonical digits — so `Config` accepts it — and wider
+    // than the arithmetic. Shape validation alone does not catch this.
+    let usable = persist(&pool, {
+        let mut s = snapshot();
+        s.block_id = format!("{BLOCK}-charge");
+        s
+    })
+    .await;
+    let oversized = "9".repeat(40);
+    let err = decide_once(
+        &pool,
+        NET,
+        POOL,
+        &offer(),
+        &usable,
+        &window,
+        &active(),
+        4,
+        &oversized,
+        "unchosen-pre-build-5.2",
+        [0xef; 32],
+        None,
+    )
+    .await
+    .expect_err("a charge wider than the arithmetic is not a charge");
+    assert!(
+        err.to_string().contains("failure charge"),
+        "the refusal names it: {err}"
+    );
+
+    let intents: i64 = sqlx::query_scalar("SELECT count(*) FROM pool.tig_write_intent")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(intents, 0, "neither refusal wrote an intent");
 }

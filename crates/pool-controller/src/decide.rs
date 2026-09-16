@@ -76,40 +76,68 @@ pub enum DecideError {
     HeightOutOfRange { height: u64 },
     #[error("no workflow id could be drawn: {0}")]
     NoWorkflowId(String),
+    #[error(
+        "the anchor block carries no config.reports.penalty_amount, which is \
+         accounting.md §11.4's P[s]"
+    )]
+    NoPenaltyAmount,
+    #[error(
+        "the configured failure charge {0:?} is not an atom count that fits the \
+         reserve arithmetic (accounting.md §3)"
+    )]
+    FailureChargeUnreadable(String),
 }
 
-/// The §11.4 reservation inputs this slice can compute, and the maximum.
+/// `accounting.md` §11.4's reservation, and the inputs criterion D2c records.
 ///
-/// Criterion D2c: slice 1 records `P[s]`, `B[t]`, `F[s,t]`, the `X` policy
-/// version and the resulting maximum across proposed tracks, and posts no
-/// accounting batch.
+/// ```text
+/// B[t]        = proposed num_bundles for track t
+/// P[s]        = live config.reports.penalty_amount at snapshot s
+/// F[s,t]      = exact precommit fee implied by live challenge config and B[t]
+/// X[policy]   = charge reserved for one chargeable failed benchmark
 ///
-/// `P[s]` is empty here and says so: live method-report penalties require
-/// members and reports, which slice 1 has neither of. That is recorded as an
-/// empty list rather than omitted, because an absent field reads as "not
-/// computed" and an empty one reads as "computed, and there were none" — and
-/// only the second is true.
+/// assignment_reserve[s,t] = P[s] * B[t] + F[s,t] + X[policy]
+/// precommit_reserve       = max over every proposed track t
+/// ```
+///
+/// The maximum, because TIG selects the track only after the precommit.
+///
+/// **`P[s]` is a block configuration value**, read from the anchor snapshot's
+/// `config.reports.penalty_amount` — not a count of member reports. An earlier
+/// version of this function read it as the latter, recorded an empty list and
+/// dropped `P[s] * B[t]` entirely, which under-stated the pool-owned
+/// benchmark's method-verification exposure by the whole method term and wrote
+/// a reserve that could not be re-derived to §11.4's formula. §11.4 is
+/// explicit, and a settled definition is not this function's to reinterpret.
+///
+/// Every input is recorded, not just the total: §11.5 requires the exact
+/// penalty value with every reservation, and a maximum with no inputs cannot be
+/// checked against the formula that produced it.
 fn reserve(
     proposal: &Proposal,
-    failure_charge_atoms: &str,
+    penalty_amount: u128,
+    failure_charge_atoms: u128,
     policy_version: &str,
 ) -> (Value, String) {
-    let charge: u128 = failure_charge_atoms.parse().unwrap_or(0);
     let mut by_track = serde_json::Map::new();
     let mut max = 0u128;
     for (track, num_bundles) in &proposal.bundle_sizing.num_bundles {
         let fee = proposal.fee_by_track.get(track).copied().unwrap_or(0);
-        // `max(P[s] * B[t] + F[s,t] + X)`. With no live penalties the first
-        // term is zero, and saturating rather than wrapping because a reserve
-        // that wrapped would under-state the exposure it exists to cover.
-        let total = fee.saturating_add(charge);
+        let method = penalty_amount.saturating_mul(u128::from(*num_bundles));
+        // Saturating rather than wrapping: a reserve that wrapped would
+        // under-state the exposure it exists to cover, which is the one
+        // direction §11.4 cannot tolerate.
+        let total = method
+            .saturating_add(fee)
+            .saturating_add(failure_charge_atoms);
         by_track.insert(
             track.clone(),
             json!({
                 "num_bundles": num_bundles,
+                "method_reserve_atoms": method.to_string(),
                 "tig_fee_atoms": fee.to_string(),
-                "failure_charge_atoms": failure_charge_atoms,
-                "reserve_atoms": total.to_string(),
+                "failure_charge_atoms": failure_charge_atoms.to_string(),
+                "assignment_reserve_atoms": total.to_string(),
             }),
         );
         max = max.max(total);
@@ -117,8 +145,7 @@ fn reserve(
 
     (
         json!({
-            // The empty list is the statement; see this function's doc.
-            "live_method_penalties": [],
+            "penalty_amount_atoms": penalty_amount.to_string(),
             "policy_version": policy_version,
             "by_track": by_track,
             "note": "accounting.md §11.4 inputs only; slice 1 posts no batch \
@@ -128,7 +155,21 @@ fn reserve(
     )
 }
 
-/// A workflow id: 32 lowercase hex characters, drawn from the OS.
+/// §11.4's `P[s]`, from the anchor snapshot's block.
+///
+/// Required, not defaulted. A zero read for an unreadable penalty would remove
+/// the method term from every reserve silently, which is the same failure the
+/// formula's own history here already had once.
+fn penalty_amount(snapshot: &pool_snapshot::Snapshot) -> Result<u128, DecideError> {
+    let block = snapshot.block.get("block").unwrap_or(&snapshot.block);
+    block
+        .pointer("/config/reports/penalty_amount")
+        .and_then(Value::as_str)
+        .and_then(|v| v.parse::<u128>().ok())
+        .ok_or(DecideError::NoPenaltyAmount)
+}
+
+/// A workflow id: 32 lowercase hex characters, drawn from the OS./// A workflow id: 32 lowercase hex characters, drawn from the OS.
 ///
 /// Drawn rather than derived from the decision's inputs. A derived id would
 /// make a second decision for the same block and challenge collide with the
@@ -185,8 +226,17 @@ pub async fn decide_once(
     // among the ones already occupying the limit and refused a pass early.
     let workflow_id = workflow_id()?;
 
+    // Parsed before use, not with a fallback. `Config` validates the shape,
+    // but `decide_once` is public and a caller that bypassed it would
+    // otherwise commit a record whose `reserve_inputs` and `precommit_reserve`
+    // disagree — the string written verbatim into one and a substituted zero
+    // into the other. A canonical atom string can still be wider than the
+    // arithmetic, which shape-checking alone does not catch.
+    let charge = failure_charge_atoms
+        .parse::<u128>()
+        .map_err(|_| DecideError::FailureChargeUnreadable(failure_charge_atoms.to_string()))?;
     let (reserve_inputs, precommit_reserve) =
-        reserve(&proposal, failure_charge_atoms, policy_version);
+        reserve(&proposal, penalty_amount(snapshot)?, charge, policy_version);
 
     // The §7.3 digest, taken from the same reconstruction the gateway will use
     // to produce the bytes it sends. One function, so the intent cannot be

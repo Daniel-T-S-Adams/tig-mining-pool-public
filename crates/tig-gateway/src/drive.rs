@@ -929,10 +929,10 @@ mod tests {
     //! evidence", and §6 makes that a *controller* transition. The test named
     //! above stages §10's lost response and settles the **attempt**, which is
     //! what reopens the lane; advancing the workflow from the same confirmed
-    //! read is the reconciler's, and this crate cannot exercise it. That half
-    //! is owed by a controller reconciliation test — see G2 in
-    //! `docs/plans/slice-1-gateway.md`, which names it as outstanding rather
-    //! than letting this table read as complete coverage.
+    //! read is the reconciler's, and this crate cannot exercise it. The other
+    //! half is `pool-controller`'s
+    //! `tick::a_crash_after_tig_changed_state_is_recovered_by_the_controller_monotonically`,
+    //! which asserts the same server-side write count from that side.
     //!
     //! Inside the crate because a `TigApiKey` exists only through
     //! `credential::load`, which is crate-private on purpose. Requires
@@ -1220,6 +1220,25 @@ mod tests {
                 served_compute: vec!["cpu".to_string()],
                 _key_path: key_path,
             })
+        }
+
+        /// The same driver with a different write policy.
+        ///
+        /// The age rule `run_once` applies is `attempt age < call timeout`, and
+        /// a test of it needs both sides. Reading the *young* side off a
+        /// one-second timeout made it a race against the setup: the pass had to
+        /// run within a second of the attempt being written, and on a loaded
+        /// machine the staging alone took longer — so the attempt was already
+        /// aged and the assertion failed for a reason the rule has nothing to
+        /// do with. Issue #39.
+        ///
+        /// Asked from the generous side instead, where "younger than sixty
+        /// seconds" is true however slow the machine is.
+        fn driver_with<'a>(&'a self, lane: &'a PostLane) -> Driver<'a> {
+            Driver {
+                lane,
+                ..self.driver()
+            }
         }
 
         fn driver(&self) -> Driver<'_> {
@@ -1806,7 +1825,12 @@ mod tests {
         // failed. So nothing is settled yet, and the lane stays closed.
         fake_post(&h.base, "/_fake/advance-block", None, None).await;
         let window = precommits_window(&h.base).await;
-        let early = run_once(&h.driver(), &window).await.unwrap();
+        // Asked against the shipped sixty-second timeout, not the harness's
+        // one-second one: the rule is the same comparison either way, and this
+        // side of it is then true however long the staging above took. See
+        // `driver_with`.
+        let patient = PostLane::new(policy());
+        let early = run_once(&h.driver_with(&patient), &window).await.unwrap();
         let w1 = early
             .outcomes
             .iter()
@@ -1823,7 +1847,8 @@ mod tests {
         ));
 
         // Past the call timeout no sender can still be waiting. Now it
-        // settles.
+        // settles — this half keeps the harness's one-second policy, which is
+        // what makes a 1500ms wait enough to age the attempt past it.
         tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
         let report = run_once(&h.driver(), &window).await.unwrap();
         let w1 = report

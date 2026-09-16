@@ -30,6 +30,7 @@ use pool_snapshot::{
     SnapshotSource, TigSnapshotSource,
 };
 use pool_test_support::TempDb;
+use pool_workflow::restart::{self, ConfirmedWindow};
 use pool_workflow::{
     AnchorSnapshot, AttemptOutcome, DecisionPayloadInputs, Guardrails, IntentState, NewDecision,
     PostgresAttemptLedger, PostgresIntentRepository, PrecommitSubmission, RecordedDraw,
@@ -807,4 +808,181 @@ fn the_restart_pass_keeps_its_own_say() {
     );
     assert!(!informational.blocks_claiming());
     assert_eq!(informational.needs_attention().len(), 1);
+}
+
+#[tokio::test]
+async fn a_crash_after_tig_changed_state_is_recovered_by_the_controller_monotonically() {
+    // **G2's fourth crash point, controller half.** `architecture.md` §12:
+    // "Controller dies after TIG changes state: reconciliation advances
+    // monotonically from confirmed TIG evidence."
+    //
+    // The gateway's crash tests settle the *attempt* from the confirmed read,
+    // which is what reopens §10's serialized lane. Advancing the *workflow*
+    // from that same evidence is §6's reconciler, and until this test it was
+    // the one half of G2 nothing asserted — the plan says so itself.
+    //
+    // The crash is staged, not simulated with a signal: what a controller
+    // crash at this point leaves is a durable state — TIG holds a confirmed
+    // precommit and the local workflow has not moved — and that state is
+    // reached here by sending, letting TIG confirm, and then reconciling from
+    // a *fresh* pass with nothing carried in memory, which is what a restarted
+    // process has.
+    let Some(db) = TempDb::migrated("tick_crash_point_four").await else {
+        return;
+    };
+    let controller = db.pool_as("pool_controller").await;
+    let gateway = db.pool_as("pool_gateway").await;
+    let tig = fake_tig().await;
+    let anchor = ingest_anchor(&controller, &tig).await;
+
+    let admitted = admit_precommit(&controller, &decision("w1", &anchor), 4)
+        .await
+        .unwrap();
+    let benchmark_id =
+        send_precommit(&tig, &gateway, &admitted.intent.intent_id, &anchor.block_id).await;
+
+    // TIG's state changes. The controller does nothing — this is the window
+    // the crash sits in.
+    tig.advance(1);
+    assert_eq!(
+        state(&controller, "w1").await,
+        WorkflowState::Decided,
+        "the premise: TIG has confirmed and the pool has not noticed"
+    );
+
+    // A fresh pass, as a restarted controller makes.
+    let ingested = ingest_live(&controller, &tig).await;
+    let Outcome::Reconciled(first) =
+        reconcile_block(&controller, NET, PLAYER, &guardrails(), &ingested.snapshot)
+            .await
+            .unwrap()
+    else {
+        panic!("a complete snapshot must be reconciled");
+    };
+
+    assert_eq!(
+        state(&controller, "w1").await,
+        WorkflowState::PrecommitConfirmed,
+        "§12: reconciliation advances from confirmed TIG evidence"
+    );
+    assert!(
+        !first.blocks_claiming(),
+        "an ordinary recovery is not an operator condition: {:?}",
+        first.needs_attention()
+    );
+
+    // Monotonic, in all three of its senses.
+    //
+    // It advanced **as far as the evidence supports and no further**: TIG has
+    // confirmed the precommit and nothing else, so a workflow that had run on
+    // to BENCHMARK_CONFIRMED would have invented a confirmation no read
+    // carried.
+    let w = workflow::find(&controller, NET, "w1")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(w.benchmark_id.as_deref(), Some(benchmark_id.as_str()));
+    assert!(
+        w.confirmed_track_id.is_some(),
+        "F2: TIG's settings replace the proposed ones: {w:?}"
+    );
+
+    // It does **not advance twice** on the same evidence. A second pass over
+    // an unchanged window is what every subsequent poll is, and a transition
+    // that re-fired would move the workflow on a read it had already consumed.
+    let revision_after_first = w.revision;
+    let ingested = ingest_live(&controller, &tig).await;
+    let Outcome::Reconciled(second) =
+        reconcile_block(&controller, NET, PLAYER, &guardrails(), &ingested.snapshot)
+            .await
+            .unwrap()
+    else {
+        panic!("a complete snapshot must be reconciled");
+    };
+    let w = workflow::find(&controller, NET, "w1")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        w.state,
+        WorkflowState::PrecommitConfirmed,
+        "a second pass over the same evidence changes nothing"
+    );
+    assert_eq!(
+        w.revision, revision_after_first,
+        "and writes nothing: a bumped revision is a transition that re-fired"
+    );
+    assert!(!second.blocks_claiming(), "{:?}", second.needs_attention());
+
+    let intent: String =
+        sqlx::query_scalar("SELECT state FROM pool.tig_write_intent WHERE intent_id = $1::uuid")
+            .bind(&admitted.intent.intent_id)
+            .fetch_one(&controller)
+            .await
+            .unwrap();
+    assert_eq!(
+        intent, "CONFIRMED",
+        "the write that landed is recorded as landed"
+    );
+
+    // And it never goes **backwards** — which needs a window that has *dropped*
+    // the evidence, not one that still carries it. §8's window is the latest
+    // 120 blocks, so a confirmed precommit eventually falls out of it, and a
+    // pass that read absence as un-confirmation would walk a recovered workflow
+    // back to where the crash left it, on every poll thereafter.
+    //
+    // The earlier version of this test asserted only that a second pass over
+    // the *same* window changed nothing, and the plan then claimed a coverage
+    // the test did not deliver.
+    let empty = ConfirmedWindow {
+        at_block: i64::try_from(ingested.snapshot.record().height).unwrap() + 1,
+        ..ConfirmedWindow::default()
+    };
+    let report = restart::reconcile_after_restart(&controller, NET, &empty)
+        .await
+        .unwrap();
+    let w = workflow::find(&controller, NET, "w1")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        w.state,
+        WorkflowState::PrecommitConfirmed,
+        "a window that dropped the precommit is not evidence it never confirmed"
+    );
+    assert_eq!(
+        w.revision, revision_after_first,
+        "and nothing is written on the way to not moving"
+    );
+    assert!(
+        !report.blocks_claiming(),
+        "an aged-out benchmark is ordinary (§7), not an operator condition: {report:?}"
+    );
+    // The *report* must not claim a backwards move either. `advance_one`
+    // returns where the workflow ended, and the caller classifies a returned
+    // state that differs from the row as `advanced` — so a pass that answered
+    // "absent, therefore PRECOMMIT_SUBMITTED" would tell §10's operator the
+    // workflow had moved back, even with the row untouched.
+    assert!(
+        report.advanced.is_empty(),
+        "nothing advanced from an empty window: {:?}",
+        report.advanced
+    );
+    assert!(
+        report.unchanged.iter().any(|id| id == "w1"),
+        "and the workflow is reported at rest: {report:?}"
+    );
+
+    // G2's load-bearing assertion, from the controller's side: the count at
+    // the server. Every durable row checked above would read exactly the same
+    // if one of these passes had *also* sent a second precommit, and a write
+    // count is the only observable that tells "recovered" from "recovered with
+    // a duplicate" — which is what §10 and `architecture.md` invariant 14
+    // exist to prevent. One write: the `send_precommit` this test made.
+    let state = call(&tig.app, "GET", "/_fake/state", None, None).await;
+    assert_eq!(
+        state["writes_received"]["submit-precommit"],
+        json!(1),
+        "reconciliation reads; it must not have sent anything"
+    );
 }

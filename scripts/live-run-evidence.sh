@@ -20,8 +20,10 @@ root="$(cd "$(dirname "$0")/.." && pwd)"
 
 # K4's assertion is a *detector*, and a detector nothing tests is one that can
 # quietly stop detecting — at which point the criterion reads as passing
-# because nothing was found. These four cases are the ones it has to tell
-# apart, and the duplicate is the one that must fail.
+# because nothing was found. These cases are the ones it has to tell apart,
+# in both of its modes: the duplicate must fail the scan, and the single-tuple
+# mode `live-crash-test.sh` reads its verdict from must count this decision's
+# write and nothing else.
 if [[ "${1:-}" == "--selftest" ]]; then
     scratch="$(mktemp -d)"
     trap 'rm -rf "$scratch"' EXIT
@@ -30,43 +32,125 @@ if [[ "${1:-}" == "--selftest" ]]; then
 import json, sys
 scratch, player = sys.argv[1], sys.argv[2]
 
-def precommit(bid, challenge="c001", confirmed=1):
+FUEL = 5000000000000
+
+def precommit(bid, challenge="c001", confirmed=1, track="t1",
+              compute="aws_t4g", num_bundles=4, hyper=2, details_extra=None):
+    details = {
+        "compute_type": compute,
+        "num_bundles": num_bundles,
+        "fuel_budget": FUEL,
+        "hyperparameters": {} if hyper is None else {"exploration_level": hyper},
+    }
+    if details_extra is not None:
+        details.update(details_extra)
     return {
         "benchmark_id": bid,
         "settings": {
             "player_id": player, "block_id": "b1", "challenge_id": challenge,
-            "algorithm_id": f"{challenge}_a001", "track_id": "t1",
+            "algorithm_id": f"{challenge}_a001", "track_id": track,
         },
-        "details": {"compute_type": "aws_t4g"},
+        "details": details,
         "state": {"block_confirmed": confirmed},
     }
+
+other_player = dict(precommit("bench-1"),
+                    settings=dict(precommit("bench-1")["settings"],
+                                  player_id="0xsomeone-else"))
 
 cases = {
     "one": [precommit("bench-1")],
     "duplicate": [precommit("bench-1"), precommit("bench-2")],
     "two-challenges": [precommit("bench-1"), precommit("bench-2", "c003")],
     "unconfirmed": [precommit("bench-1", confirmed=None)],
-    "other-player": [dict(precommit("bench-1"),
-                          settings=dict(precommit("bench-1")["settings"],
-                                        player_id="0xsomeone-else"))],
+    "other-player": [other_player],
+    # The single-tuple mode's cases. Each is one entry that differs from the
+    # decision below in exactly one part of §10's tuple, so a matcher that
+    # dropped that part would count it.
+    "wrong-track": [precommit("bench-1", track="t9")],
+    "wrong-compute": [precommit("bench-1", compute="nvidia_a10g")],
+    "wrong-bundles": [precommit("bench-1", num_bundles=5)],
+    "wrong-hyper": [precommit("bench-1", hyper=3)],
+    # TIG returns hyperparameters as strings and the pool picks them as
+    # values; `reconcile.rs` renders both sides before comparing, so this is
+    # the same precommit, not a different one.
+    "hyper-as-string": [dict(precommit("bench-1"),
+                             details=dict(precommit("bench-1")["details"],
+                                          hyperparameters={"exploration_level": "2"}))],
+    # `candidate_of` calls a record it cannot read a shape error rather than
+    # a miss — "a record that cannot be parsed might be the pool's own". A
+    # miss would read as "the write is not at TIG", which is the direction
+    # that licenses a resend. One case per half of the rule: a missing number
+    # and a missing string.
+    "no-bundles": [dict(precommit("bench-1"),
+                        details={"compute_type": "aws_t4g", "fuel_budget": FUEL})],
+    "no-track": [dict(precommit("bench-1"),
+                      settings={"player_id": player, "block_id": "b1",
+                                "challenge_id": "c001", "algorithm_id": "c001_a001"})],
+    "no-compute": [dict(precommit("bench-1"),
+                        details={"num_bundles": 4, "fuel_budget": FUEL,
+                                 "hyperparameters": {}})],
+    "no-id": [{k: v for k, v in precommit("bench-1").items() if k != "benchmark_id"}],
+    "bad-hyper": [dict(precommit("bench-1"),
+                       details=dict(precommit("bench-1")["details"],
+                                    hyperparameters="exploration_level=2"))],
+    "negative-bundles": [precommit("bench-1", num_bundles=-1)],
 }
 for name, precommits in cases.items():
     with open(f"{scratch}/{name}.json", "w") as f:
         json.dump({"precommits": precommits}, f)
+
+with open(f"{scratch}/decision.json", "w") as f:
+    json.dump({
+        "anchor_block_id": "b1",
+        "selected_challenge": "c001",
+        "selected_algorithm": "c001_a001",
+        "compute_type": "aws_t4g",
+        "track_settings": {
+            "t1": {"num_bundles": 4, "fuel_budget": FUEL,
+                   "hyperparameters": {"exploration_level": 2}},
+            "t2": {"num_bundles": 4, "fuel_budget": FUEL,
+                   "hyperparameters": {"exploration_level": 2}},
+        },
+    }, f)
 MAKE
 
     scan="$root/scripts/lib/tuple-scan.py"
+    fail() { echo "live-run-evidence selftest FAILED: $1" >&2; exit 1; }
+
     for name in one two-challenges unconfirmed other-player; do
-        if ! python3 "$scan" "$p" "$scratch/$name.json" >/dev/null; then
-            echo "live-run-evidence selftest FAILED: $name must not read as a duplicate" >&2
-            exit 1
-        fi
+        python3 "$scan" "$p" "$scratch/$name.json" >/dev/null \
+            || fail "$name must not read as a duplicate"
     done
-    if python3 "$scan" "$p" "$scratch/duplicate.json" >/dev/null; then
-        echo "live-run-evidence selftest FAILED: a duplicate tuple must fail K4" >&2
-        exit 1
-    fi
-    echo "live-run-evidence selftest: detects a duplicate §10 tuple and passes four that are not"
+    ! python3 "$scan" "$p" "$scratch/duplicate.json" >/dev/null \
+        || fail "a duplicate tuple must fail K4"
+
+    # The single-tuple mode. The two counts are the verdict
+    # `live-crash-test.sh` branches on — confirmed matches, then unconfirmed
+    # ones, which §7 and §10 keep distinct from absence — so each case names
+    # the pair it must produce.
+    counted() {
+        python3 "$scan" --target "$p" "$scratch/$1.json" "$scratch/decision.json" \
+            | cut -d' ' -f1,2
+    }
+    for case in one:"1 0" duplicate:"2 0" hyper-as-string:"1 0" unconfirmed:"0 1" \
+                other-player:"0 0" wrong-track:"0 0" wrong-compute:"0 0" \
+                wrong-bundles:"0 0" wrong-hyper:"0 0"; do
+        got="$(counted "${case%%:*}")" || fail "${case%%:*} could not be scanned"
+        [[ "$got" == "${case##*:}" ]] \
+            || fail "${case%%:*} counted [$got] for the target tuple, expected [${case##*:}]"
+    done
+    for case in no-bundles no-track no-compute no-id bad-hyper negative-bundles; do
+        status=0
+        python3 "$scan" --target "$p" "$scratch/$case.json" "$scratch/decision.json" \
+            >/dev/null 2>&1 || status=$?
+        [[ "$status" == "2" ]] \
+            || fail "$case must be a shape error (exit 2), got $status"
+    done
+
+    echo "live-run-evidence selftest: detects a duplicate §10 tuple, passes four that" \
+         "are not, counts one decision's tuple across nine cases, and refuses six" \
+         "windows it cannot read"
     exit 0
 fi
 

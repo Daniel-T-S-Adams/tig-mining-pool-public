@@ -63,3 +63,15 @@ internal_pool_unverified_limit = 4
 # reads per block, so this is roughly what a poll has left. A local
 # placeholder like the limit above, not a proposed value.
 active_cache_fetches_per_poll = 10
+# `accounting.md` §11.4's per-benchmark failure charge `X`, in atoms.
+#
+# **Not a proposed value.** `pre_build_checklist.md` §5.2 still lists `X` as
+# unchosen — the checklist item is open — so this is a local development
+# placeholder in exactly the sense the two values above are. It exists because
+# criterion D2c records the reserve's inputs with every intent, and an input
+# the binary supplied itself would be a policy value invented in code.
+precommit_failure_charge_atoms = "0"
+# Which version of the reserve policy the charge came from. D2c records it so
+# the amount can be re-derived once `X` is chosen; naming the open state is the
+# honest answer while it is open.
+reserve_policy_version = "unchosen-pre-build-5.2"

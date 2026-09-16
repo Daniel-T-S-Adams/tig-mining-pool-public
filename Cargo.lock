@@ -1489,6 +1489,7 @@ dependencies = [
  "axum",
  "clap",
  "fake-tig",
+ "getrandom 0.3.4",
  "http-body-util",
  "pool-config",
  "pool-controller",

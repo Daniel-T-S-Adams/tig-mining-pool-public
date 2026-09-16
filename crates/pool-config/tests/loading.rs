@@ -192,8 +192,7 @@ fn each_binary_accepts_only_its_own_role() {
 /// `mining_system.md` §11 makes `internal_pool_unverified_limit` versioned
 /// policy with no settled value, so this is a test fixture and never a
 /// production constant.
-const ORCHESTRATION: &str =
-    "\n[orchestration]\ninternal_pool_unverified_limit = 8\nactive_cache_fetches_per_poll = 20\n";
+const ORCHESTRATION: &str = "\n[orchestration]\ninternal_pool_unverified_limit = 8\nactive_cache_fetches_per_poll = 20\nprecommit_failure_charge_atoms = \"1000\"\nreserve_policy_version = \"unset-slice-1\"\n";
 
 /// Gateway-only: the section carries the API key path, so no other binary may
 /// present it (`architecture.md` §2.2). `served_compute` is explicitly empty
@@ -235,7 +234,7 @@ fn a_zero_unverified_limit_is_rejected() {
     toml.push_str(TIG);
     toml.push_str(GATEWAY);
     toml.push_str(
-        "\n[orchestration]\ninternal_pool_unverified_limit = 0\nactive_cache_fetches_per_poll = 20\n",
+        "\n[orchestration]\ninternal_pool_unverified_limit = 0\nactive_cache_fetches_per_poll = 20\nprecommit_failure_charge_atoms = \"1000\"\nreserve_policy_version = \"unset-slice-1\"\n",
     );
     let path = scratch.write(&toml);
     let err = Config::load(&path, Binary::PoolController).expect_err("0 admits nothing");
@@ -253,7 +252,7 @@ fn a_zero_cache_fetch_budget_is_rejected() {
     toml.push_str(TIG);
     toml.push_str(GATEWAY);
     toml.push_str(
-        "\n[orchestration]\ninternal_pool_unverified_limit = 8\nactive_cache_fetches_per_poll = 0\n",
+        "\n[orchestration]\ninternal_pool_unverified_limit = 8\nactive_cache_fetches_per_poll = 0\nprecommit_failure_charge_atoms = \"1000\"\nreserve_policy_version = \"unset-slice-1\"\n",
     );
     let path = scratch.write(&toml);
     let err = Config::load(&path, Binary::PoolController).expect_err("0 never warms");

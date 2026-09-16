@@ -11,6 +11,7 @@
 
 pub mod bind;
 pub mod commit;
+pub mod decide;
 pub mod ingest;
 pub mod propose;
 pub mod reconciler;

@@ -1061,15 +1061,7 @@ mod tests {
         let mut draw_ranks = serde_json::Map::new();
         for c in ["c001", "c002", "c003"] {
             let rank = draw_rank(&seed, c);
-            draw_ranks.insert(
-                c.to_string(),
-                json!(
-                    rank.as_bytes()
-                        .iter()
-                        .map(|b| format!("{b:02x}"))
-                        .collect::<String>()
-                ),
-            );
+            draw_ranks.insert(c.to_string(), json!(rank.to_hex()));
         }
         // The fake's fixture: c001 with tracks t001 and t002.
         let track_settings = json!({

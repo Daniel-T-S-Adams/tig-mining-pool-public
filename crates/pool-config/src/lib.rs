@@ -305,6 +305,17 @@ pub struct GatewayConfig {
     pub served_compute: Vec<String>,
 }
 
+/// `accounting.md` §3's canonical unsigned base-10 atom string.
+///
+/// Digits only, no sign, no exponent, no decimal point, and no redundant
+/// leading zero — so one amount has exactly one spelling and two records of it
+/// compare equal as text.
+fn is_canonical_atoms(value: &str) -> bool {
+    !value.is_empty()
+        && value.bytes().all(|b| b.is_ascii_digit())
+        && (value == "0" || !value.starts_with('0'))
+}
+
 /// The controller's orchestration policy.
 ///
 /// `mining_system.md` §11 lists `internal_pool_unverified_limit` among the
@@ -328,6 +339,26 @@ pub struct OrchestrationConfig {
     /// rate decision made in the binary rather than in reviewed
     /// configuration.
     pub active_cache_fetches_per_poll: u32,
+    /// `accounting.md` §11.4's per-benchmark failure charge `X`, in atoms.
+    ///
+    /// `pre_build_checklist.md` §5.2 still lists `X` as **unchosen** — the
+    /// checklist item is open — so this is not the settled value and no
+    /// deployment should read it as one. It exists because criterion D2c
+    /// requires slice 1 to *record the reserve's inputs* per intent, and an
+    /// input the binary supplied itself would be a policy value invented in
+    /// code. No default, for the same reason as the two above.
+    ///
+    /// A canonical unsigned base-10 atom string, which `accounting.md` §3 is
+    /// what amounts cross this boundary as.
+    pub precommit_failure_charge_atoms: String,
+    /// Which version of the reserve policy the value above came from.
+    ///
+    /// D2c names "the `X` policy version" among the inputs to record, because
+    /// a recorded amount with no version cannot be re-derived once `X` is
+    /// chosen and changed. Free-form: the versioning scheme is the accounting
+    /// slice's to fix, and inventing one here would be the same mistake as
+    /// inventing the number.
+    pub reserve_policy_version: String,
 }
 
 /// The configuration shared by every pool binary.
@@ -664,6 +695,28 @@ impl Config {
                             .into(),
                     ));
                 }
+                // `accounting.md` §3's atom form, checked here rather than at
+                // the admission that records it: a value PostgreSQL would
+                // silently reshape — `1.5` rounding, `1e3` expanding, a
+                // negative passing a `>= 0` column check after the cast — is a
+                // reserve input the record could not be re-derived from.
+                if !is_canonical_atoms(&orchestration.precommit_failure_charge_atoms) {
+                    return Err(invalid(format!(
+                        "orchestration.precommit_failure_charge_atoms must be a \
+                         canonical unsigned base-10 atom string (accounting.md §3), \
+                         found {:?}",
+                        orchestration.precommit_failure_charge_atoms
+                    )));
+                }
+                if orchestration.reserve_policy_version.trim().is_empty() {
+                    return Err(invalid(
+                        "orchestration.reserve_policy_version must name the policy \
+                         version the failure charge came from: criterion D2c records \
+                         it with every intent, and a recorded amount with no version \
+                         cannot be re-derived once X is chosen and changed"
+                            .into(),
+                    ));
+                }
             }
             (other, Some(_)) => {
                 return Err(invalid(format!(
@@ -746,6 +799,15 @@ impl Config {
     /// that introduce decision-affecting configuration land; the domain
     /// string is versioned so a change of coverage is never mistaken for a
     /// change of value, and `v2` is the version that added `player_id`.
+    ///
+    /// `[orchestration]`'s reserve fields are deliberately **not** here, and
+    /// the test is not "are they decision-affecting" — they are. It is whether
+    /// the decision record already shows them: criterion D2c writes
+    /// `precommit_failure_charge_atoms` and `reserve_policy_version` into
+    /// every intent's `reserve_inputs`, so a decision made under a different
+    /// charge is already distinguishable from one made under another. Digesting
+    /// them as well would add a second, weaker record of the same fact and a
+    /// digest version bump each time an open policy value moved.
     ///
     /// `base_url` is deliberately not included. Which server the pool talks
     /// to does not change what it would decide, and a digest that varied

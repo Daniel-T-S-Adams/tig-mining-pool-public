@@ -20,6 +20,8 @@ stub-acceptance = []
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
+# A workflow id drawn from the OS; see `decide::workflow_id`.
+getrandom = "0.3"
 pool-config = { path = "../pool-config" }
 # `mining_system.md` §6's rules, as the pure functions `propose` runs in order.
 # Slice 1 consumes them and does not extend them (slice-1 plan §2).

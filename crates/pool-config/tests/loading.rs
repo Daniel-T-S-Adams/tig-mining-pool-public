@@ -192,8 +192,7 @@ fn each_binary_accepts_only_its_own_role() {
 /// `mining_system.md` §11 makes `internal_pool_unverified_limit` versioned
 /// policy with no settled value, so this is a test fixture and never a
 /// production constant.
-const ORCHESTRATION: &str =
-    "\n[orchestration]\ninternal_pool_unverified_limit = 8\nactive_cache_fetches_per_poll = 20\n";
+const ORCHESTRATION: &str = "\n[orchestration]\ninternal_pool_unverified_limit = 8\nactive_cache_fetches_per_poll = 20\nprecommit_failure_charge_atoms = \"1000\"\nreserve_policy_version = \"unset-slice-1\"\n";
 
 /// Gateway-only: the section carries the API key path, so no other binary may
 /// present it (`architecture.md` §2.2). `served_compute` is explicitly empty
@@ -211,6 +210,57 @@ const GATEWAY: &str = "\n[gateway]\napi_key_file = \"/dev/null\"\nlease_secs = 1
 /// The endpoint the controller and gateway both require. A local `fake-tig`
 /// here, which is also what F4d's guard reads.
 const TIG: &str = "\n[tig]\nbase_url = \"http://127.0.0.1:8080\"\nplayer_id = \"0x2935a721068da756b28cba896efdb64e8909dfae\"\nacquired_upstream_commit = \"ad08d1ea001a73ff5aab3b556d7f59246fece14e\"\n";
+
+#[test]
+fn the_reserve_policy_values_are_checked_rather_than_carried() {
+    // Criterion D2c records `X` and its policy version with every intent, so
+    // a value PostgreSQL would silently reshape — `1.5` rounding, `1e3`
+    // expanding, a negative passing a `>= 0` column check after the cast — is
+    // a reserve input the record could not be re-derived from
+    // (`accounting.md` §3).
+    let scratch = Scratch::new("reserve-policy");
+    let load = |orchestration: &str| {
+        let mut toml = valid_toml(&scratch.password_file())
+            .replace("user = \"pool_migration\"", "user = \"pool_controller\"");
+        toml.push_str(TIG);
+        toml.push_str(orchestration);
+        Config::load(scratch.write(&toml), Binary::PoolController)
+    };
+    let with = |charge: &str, version: &str| {
+        format!(
+            "\n[orchestration]\ninternal_pool_unverified_limit = 8\n\
+             active_cache_fetches_per_poll = 20\n\
+             precommit_failure_charge_atoms = \"{charge}\"\n\
+             reserve_policy_version = \"{version}\"\n"
+        )
+    };
+
+    // The two that are allowed: a real amount, and zero.
+    assert!(load(&with("1000", "v1")).is_ok());
+    assert!(
+        load(&with("0", "unchosen-pre-build-5.2")).is_ok(),
+        "zero is a value; `X` being unchosen is what the version names"
+    );
+
+    for (charge, why) in [
+        ("", "empty"),
+        ("1.5", "a decimal point"),
+        ("1e3", "an exponent"),
+        ("-1", "a sign"),
+        ("0100", "a redundant leading zero"),
+        ("1 000", "a separator"),
+        ("NaN", "not a number at all"),
+    ] {
+        let err = load(&with(charge, "v1")).expect_err(why);
+        assert_invalid(err, "canonical unsigned base-10 atom string");
+    }
+
+    // A version is what makes the amount re-derivable once `X` moves.
+    for version in ["", "   "] {
+        let err = load(&with("1000", version)).expect_err("a version is required");
+        assert_invalid(err, "reserve_policy_version must name the policy version");
+    }
+}
 
 #[test]
 fn a_controller_without_an_unverified_limit_does_not_load() {
@@ -235,7 +285,7 @@ fn a_zero_unverified_limit_is_rejected() {
     toml.push_str(TIG);
     toml.push_str(GATEWAY);
     toml.push_str(
-        "\n[orchestration]\ninternal_pool_unverified_limit = 0\nactive_cache_fetches_per_poll = 20\n",
+        "\n[orchestration]\ninternal_pool_unverified_limit = 0\nactive_cache_fetches_per_poll = 20\nprecommit_failure_charge_atoms = \"1000\"\nreserve_policy_version = \"unset-slice-1\"\n",
     );
     let path = scratch.write(&toml);
     let err = Config::load(&path, Binary::PoolController).expect_err("0 admits nothing");
@@ -253,7 +303,7 @@ fn a_zero_cache_fetch_budget_is_rejected() {
     toml.push_str(TIG);
     toml.push_str(GATEWAY);
     toml.push_str(
-        "\n[orchestration]\ninternal_pool_unverified_limit = 8\nactive_cache_fetches_per_poll = 0\n",
+        "\n[orchestration]\ninternal_pool_unverified_limit = 8\nactive_cache_fetches_per_poll = 0\nprecommit_failure_charge_atoms = \"1000\"\nreserve_policy_version = \"unset-slice-1\"\n",
     );
     let path = scratch.write(&toml);
     let err = Config::load(&path, Binary::PoolController).expect_err("0 never warms");

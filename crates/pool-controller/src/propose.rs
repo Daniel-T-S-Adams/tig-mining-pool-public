@@ -63,6 +63,9 @@ struct ChallengeConfig {
     min_num_bundles: u64,
     /// `num_nonces_per_bundle` per active track.
     nonces_per_bundle: BTreeMap<String, u64>,
+    /// §6.8's two fee inputs, as TIG publishes them: decimal atom strings.
+    base_fee: u128,
+    per_nonce_fee: u128,
 }
 
 /// A proposal, ready for the admission transaction to record.
@@ -94,6 +97,17 @@ pub struct Proposal {
     pub challenge_selection: ChallengeSelection,
     pub algorithm_selection: AlgorithmSelection,
     pub bundle_sizing: BundleSizing,
+    /// §6.8's fee for each proposed track, in atoms.
+    ///
+    /// `base_fee + per_nonce_fee * num_bundles` — with **bundles**, despite
+    /// the name. Settled during the protocol spike against the pinned upstream
+    /// commit; `mining_system.md` §6.8 records that the per-nonce derivation
+    /// in `fixtures/tig/v1/expected.json` is the refuted side.
+    ///
+    /// Per track because TIG selects the track during precommit processing and
+    /// the counts differ (§6.7), so the pool must hold balance for the largest
+    /// of them rather than for an average.
+    pub fee_by_track: BTreeMap<String, u128>,
 }
 
 /// Why no proposal was made.
@@ -122,6 +136,11 @@ pub enum ProposeError {
     Ratio(#[from] pool_decision::ratio::RatioError),
     #[error("{0}")]
     Bundles(#[from] pool_decision::bundles::BundleSizingError),
+    #[error("the §6.8 fee for {challenge_id} track {track_id} overflows an atom count")]
+    FeeOverflow {
+        challenge_id: String,
+        track_id: String,
+    },
 }
 
 /// The outcome of one deciding pass.
@@ -292,12 +311,32 @@ fn candidate_challenges(
             }
         }
 
+        // §6.8's inputs. Read rather than defaulted: the fee is what the
+        // pool must hold balance for, and a missing component silently read as
+        // zero would under-state it on exactly the challenge whose
+        // configuration the pool could not read.
+        let fee = |field: &'static str| -> Result<u128, ProposeError> {
+            config
+                .get(field)
+                .and_then(Value::as_str)
+                .and_then(|v| v.parse::<u128>().ok())
+                .ok_or_else(|| {
+                    shape(
+                        E,
+                        format!("/challenges[{id}].config.{field}"),
+                        "a decimal atom string",
+                    )
+                })
+        };
+
         configs.insert(
             id.to_string(),
             ChallengeConfig {
                 compute_type,
                 min_num_bundles,
                 nonces_per_bundle,
+                base_fee: fee("base_fee")?,
+                per_nonce_fee: fee("per_nonce_fee")?,
             },
         );
         candidates.push(Challenge {
@@ -899,6 +938,19 @@ pub fn propose(
             .collect(),
     })?;
 
+    let mut fee_by_track = BTreeMap::new();
+    for (track, num_bundles) in &sizing.num_bundles {
+        let fee = config
+            .per_nonce_fee
+            .checked_mul(u128::from(*num_bundles))
+            .and_then(|scaled| scaled.checked_add(config.base_fee))
+            .ok_or_else(|| ProposeError::FeeOverflow {
+                challenge_id: selected_challenge.clone(),
+                track_id: track.clone(),
+            })?;
+        fee_by_track.insert(track.clone(), fee);
+    }
+
     let mut track_settings = serde_json::Map::new();
     for (track, num_bundles) in &sizing.num_bundles {
         let source = decided.sources.get(track);
@@ -948,6 +1000,7 @@ pub fn propose(
         challenge_selection: selection,
         algorithm_selection: decided.algorithm.clone(),
         bundle_sizing: sizing,
+        fee_by_track,
     })))
 }
 
@@ -1103,6 +1156,12 @@ mod tests {
                 "type": compute,
                 "active_tracks": active_tracks,
                 "min_num_bundles": 1,
+                // §6.8's inputs, as TIG publishes them: decimal atom strings.
+                // Small arbitrary values — the real 10^16/10^15 scale is an
+                // observed constant §12 forbids compiling in, and every
+                // assertion here is exact integer arithmetic.
+                "base_fee": "100",
+                "per_nonce_fee": "7",
             },
             "state": {"round_active": round_active},
             "block_data": {"num_qualifiers_by_track": by_track},
@@ -1398,6 +1457,57 @@ mod tests {
                 expected: "a boolean",
             }),
             "an unreadable ban must stop the pass, not default to unbanned"
+        );
+    }
+
+    #[test]
+    fn the_fee_scales_with_bundles_and_is_computed_per_track() {
+        // §6.8: `base_fee + per_nonce_fee * num_bundles`, with **bundles**,
+        // despite the name — settled during the spike against the pinned
+        // upstream commit, where `fixtures/tig/v1/expected.json`'s per-nonce
+        // rule is the refuted side. `fake-tig` had it backwards until PR #35,
+        // which is why this is asserted from the pool's side too.
+        //
+        // Two tracks with different nonce counts, so a fee that multiplied by
+        // nonces would differ between them and be caught, and so the
+        // per-track requirement (§6.7 sizes each separately, TIG picks one)
+        // is exercised rather than assumed.
+        let mut f = Fixture::workable();
+        f.challenges = vec![challenge(
+            "c001",
+            "cpu",
+            25,
+            &[("t1", 10), ("t2", 40)],
+            &[("t1", 30), ("t2", 30)],
+        )];
+        let p = precommit(
+            run(
+                &f,
+                &[
+                    active("b1", "c001_a001", "t1", Some(4)),
+                    active("b2", "c001_a001", "t2", Some(4)),
+                ],
+            )
+            .unwrap(),
+        );
+
+        // base 100, per-nonce 7. A CPU offer of 8 cores over 10 nonces per
+        // bundle aligns to 4 bundles (§6.7), and over 40 nonces to 1.
+        let bundles = &p.bundle_sizing.num_bundles;
+        assert_eq!(bundles["t1"], 4, "8 cores, 10 nonces: aligned to 4 bundles");
+        assert_eq!(
+            bundles["t2"], 1,
+            "8 cores, 40 nonces: the minimum already aligns"
+        );
+
+        // Written as `base + per * bundles` so the §6.8 rule is visible in the
+        // assertion and not only in the total it comes to.
+        let fee = |bundles: u128| 100 + 7 * bundles;
+        assert_eq!(p.fee_by_track["t1"], fee(4), "4 bundles, not 10 nonces");
+        assert_eq!(p.fee_by_track["t2"], fee(1), "1 bundle, not 40 nonces");
+        assert_ne!(
+            p.fee_by_track["t1"], p.fee_by_track["t2"],
+            "the two tracks differ, so a single fee for the challenge would be wrong"
         );
     }
 

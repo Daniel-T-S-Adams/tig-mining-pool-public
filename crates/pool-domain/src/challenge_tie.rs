@@ -32,6 +32,21 @@ impl DrawRank {
         Self(bytes)
     }
 
+    /// The 64-character lowercase hex form, as the decision record stores it.
+    ///
+    /// One rendering, because there were three: the recorder, the audit
+    /// comparison and the tests each wrote the same `{b:02x}` fold, and a
+    /// rank spelled two ways is a rank that does not compare equal to itself.
+    /// Two digits per byte always — `{:x}` would drop the leading zero of a
+    /// byte below 0x10 and shorten the value.
+    pub fn to_hex(&self) -> String {
+        let mut out = String::with_capacity(64);
+        for b in self.0 {
+            out.push_str(&format!("{b:02x}"));
+        }
+        out
+    }
+
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }

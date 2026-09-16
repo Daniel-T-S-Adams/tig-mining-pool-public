@@ -30,7 +30,7 @@ Paths are relative to `crates/` unless they begin with `scripts/`,
 | # | Where it is satisfied |
 |---|---|
 | B1 | `tig-gateway/tests/write_ready.rs` — `all_nine_passing_is_the_only_route_to_write_ready`, `every_failure_is_reported_not_just_the_first` |
-| B2 | `write_ready.rs` — one or more `check_N_*` tests per check, nine checks, 23 tests; the evidence-gathering half in `tig-gateway/tests/evidence.rs` (11 tests), including `check_4_a_mutated_openapi_checksum` |
+| B2 | `write_ready.rs` — one or more `check_N_*` tests per check, nine checks, 23 tests, including `check_4_a_mutated_openapi_checksum`; the evidence-gathering half in `tig-gateway/tests/evidence.rs` (11 tests), including `check_4_hashes_what_was_served_and_fails_when_it_cannot_look` |
 | B3 | `tig-gateway/tests/write_gate.rs` — `losing_write_ready_blocks_new_writes`, `an_in_flight_write_survives_revocation`, `recovery_requires_passing_all_nine_checks_again`; the alert in `write_gate_alerts.rs::losing_write_ready_alerts_once_and_recovery_is_recorded` |
 
 ## C. Block snapshot
@@ -53,11 +53,11 @@ Paths are relative to `crates/` unless they begin with `scripts/`,
 | D2a | `admission.rs::the_next_precommit_at_the_limit_is_refused`, `decide.rs::the_unverified_limit_refuses_the_pass_that_would_exceed_it`, `loading.rs::{a_controller_without_an_unverified_limit_does_not_load, a_zero_unverified_limit_is_rejected}` |
 | D2b | Deferred half, by construction: the criterion fixes the transaction's *shape* so the member half slots in without reshaping it. The shape is what D2, D2a and D2c's tests hold, and F6's owner and interval rows are what the deferred half will read. Nothing is waived — there is no member to test against until checklist §10 steps 6–8 |
 | D2c | `decide.rs::an_unreadable_penalty_or_charge_stops_the_pass_rather_than_reserving_less`; `loading.rs::the_reserve_policy_values_are_checked_rather_than_carried`; `admission.rs::a_non_canonical_reserve_never_reaches_the_numeric_cast` |
-| D2d | `pool-domain/tests/challenge_tie_vector.rs` — `two_way_tie_resolved_by_supplied_draw_ranks`, `projected_tie_resolved_by_supplied_draw_ranks`, `all_zero_counts_tie_at_factor_zero`; persisted by `admission.rs::a_tie_records_its_candidates_and_winner` |
+| D2d | `pool-decision/tests/challenge_selection.rs` — `two_way_tie_resolved_by_supplied_draw_ranks`, `projected_tie_resolved_by_supplied_draw_ranks`, `all_zero_counts_tie_at_factor_zero`, `a_tie_without_a_supplied_rank_is_refused`; the derivation itself in `pool-domain/tests/challenge_tie_vector.rs::section_6_3_worked_example_vector` and `the_seed_enters_the_rank_as_bytes_not_as_text`; persisted by `admission.rs::a_tie_records_its_candidates_and_winner` |
 | D2e | `admission.rs` — `an_incomplete_snapshot_is_not_an_anchor`, `a_decision_cannot_name_a_snapshot_that_was_never_persisted`, `a_pool_with_no_usable_snapshot_cannot_decide` |
 | D3 | `intents.rs::a_new_generation_is_how_a_payload_changes`; `admission.rs::a_workflow_whose_precommit_reached_tig_cannot_take_another_generation`; `tig-gateway/tests/claim.rs::a_generation_whose_sibling_was_sent_stops_for_an_operator` |
 | D4 | `intents.rs::the_gateway_records_outcomes_but_never_invents_a_write`; `workflow_state.rs::the_gateway_can_read_a_workflow_and_cannot_change_one`; `admission.rs::the_gateway_can_read_a_decision_and_cannot_write_one` — all run under the real gateway role |
-| D5 | `scripts/credential-boundary.sh` in `make check`: the key-loading path is crate-private to `tig-gateway`, and no other crate or script names it |
+| D5 | `scripts/credential-boundary.sh` in `make check`: the key-loading path is crate-private to `tig-gateway`, and no crate or script outside it names the key — **outside the spike**. `crates/spike` is excluded deliberately (it predates the boundary and reads the testnet key), as are `crates/fake-tig`, which checks an inbound key rather than holding one, and the key-scanners themselves. The spike's read is a known gap tracked by `plans/slice-1-gateway.md` §7, which slice 1 does not clear |
 
 ## E. Attempts, the lane, and reconciliation
 
@@ -77,7 +77,7 @@ Paths are relative to `crates/` unless they begin with `scripts/`,
 | F1 | `pool-workflow/tests/workflow_state.rs::a_workflow_advances_only_through_confirmed_evidence`, `a_submission_is_recorded_and_is_not_a_confirmation`; `claim.rs::being_in_the_read_is_not_being_confirmed` |
 | F2 | `workflow_state.rs::confirmed_settings_replace_the_proposed_ones` |
 | F3 | `workflow_state.rs` — `a_transition_from_a_stale_revision_is_refused`, `the_revision_can_never_go_backwards` |
-| F4 | `pool-controller/tests/lifecycle.rs`, driving six of `fixtures/queue-lifecycle/v1/lifecycle.json`'s nine cases (three waived, below); `workflow_state.rs::a_stopped_benchmark_never_reaches_a_proof`, `fraud_is_terminal_from_wherever_it_is_found` |
+| F4 | `pool-controller/tests/lifecycle.rs`, driving **six workflow ladders across five** of `fixtures/queue-lifecycle/v1/lifecycle.json`'s nine cases — both counts pinned in the test, so a case that stopped being driven fails it. The other four are waived below. The ladders run from the fixture against a constructed `ConfirmedWindow`, not against fake-tig; that the window is what a real server's reads produce is `pool-controller/tests/window_against_fake_tig.rs`. Also `workflow_state.rs::a_stopped_benchmark_never_reaches_a_proof`, `fraud_is_terminal_from_wherever_it_is_found` |
 | F4a | `pool-workflow/tests/acceptance.rs` (9 tests) — `a_benchmark_write_cannot_exist_before_durable_acceptance`, `a_proof_write_cannot_exist_before_a_canonical_payload_for_the_sample` |
 | F4b | `workflow_state.rs` — `no_slice_1_workflow_is_attributable_to_a_member`, `a_terminal_reason_may_not_attribute_member_fault` |
 | F4c | `scripts/feature-gate.sh` in `make check`: the stub acceptance record is absent from a default `pool-controller` build |
@@ -102,7 +102,7 @@ Paths are relative to `crates/` unless they begin with `scripts/`,
 |---|---|
 | H1 | `write_ready.rs::check_8_the_api_key_missing_or_readable_by_members`; `evidence.rs::check_8_reads_who_can_open_the_key_file_from_its_mode` |
 | H2 | `scripts/credential-boundary.sh` in `make check`, which also scans `scripts/` |
-| H3 | `scripts/secret-scan.sh` (A4's scan), plus `config_debug_output_carries_no_password` and `no_log_line_contains_the_configured_password` |
+| H3 | `scripts/secret-scan.sh` (A4's scan), plus `pool-config/tests/loading.rs::config_debug_output_carries_no_password` and `pool-admin/tests/cli.rs::no_log_line_contains_the_configured_password` |
 
 ## I. Observability
 
@@ -127,7 +127,7 @@ Paths are relative to `crates/` unless they begin with `scripts/`,
 | # | Where it is satisfied |
 |---|---|
 | K1 | `make check` — fmt, clippy `-D warnings`, 75 test suites, and the feature-gate, credential-boundary, secret-scan, image-pin, no-observed-constants and live-run-evidence selftests. Run on every PR by `.github/workflows/pr-checks.yml` |
-| K2 | `pool-controller/tests/lifecycle.rs` against fake-tig, six of nine fixture cases (three waived, below) |
+| K2 | `pool-controller/tests/lifecycle.rs`, six ladders across five of the nine fixture cases, deterministic and run in CI (four waived, below). **One divergence from the criterion as written:** it says "against fake-tig", and the ladders are driven from a constructed `ConfirmedWindow` instead. What fake-tig covers is the step before — `window_against_fake_tig.rs::each_confirmed_state_a_real_server_serves_reaches_the_window` and `a_fraud_ruling_a_real_server_serves_reaches_the_window` assert that a real server's responses produce exactly that window, and `tick.rs` drives the controller against fake-tig end to end |
 | K3 | [`slice-1-live-run.md`](slice-1-live-run.md) — the run's block heights, intent and attempt rows |
 | K4 | [`slice-1-live-run.md`](slice-1-live-run.md), produced by `scripts/live-crash-test.sh` |
 | K5 | The spike-test disposition table in `plans/slice-1-gateway.md` §7 |
@@ -144,9 +144,22 @@ recorded.
 | I2 | The metrics exporter | Checklist §10 step 5 | Plan §4, merged in #43 — nothing consumes metrics today, so an exporter built here would be written against nothing |
 | I4 | The alert tests | Checklist §10 step 5, with I2 | Plan §4, merged in #43 — with no alerting system the test can only assert that a log line was written |
 | K2 | Three of `lifecycle.json`'s nine cases: `duplicate_capacity_offer_request`, `duplicate_durable_acceptance_receipt`, `member_package_timeout_failed` | Checklist §10 step 2 | Plan §4, merged in #43 — all three exercise the member API and artifact upload, which §2 defers to that step |
+| K2 | A fourth case, `fraud_confirmed_after_proof` | Checklist §10 step 2 | Found while writing this record; see below |
 | J4 | The transaction-duration **test**, not §7.2's invariant | Checklist §10 step 5 | Issue #50, where the repository owner's decision is recorded verbatim |
 
-J4 is the only one of the four that waives a test which could be written today,
+`fraud_confirmed_after_proof` was not in the three the plan already recorded,
+and it is listed here because the record is the place a gap has to appear
+rather than be absorbed. It is deferred for the same reason as the other three
+and by the same rule, not by a new judgement: its ladder begins in `VERIFYING`,
+which slice 1 cannot reach without artifacts to build a proof from, so
+`lifecycle.rs`'s computed scope filter drops the case whole. Its rule — §7's
+"fraud confirmed" and §4.5's terminal branch — is covered from the other side
+by `workflow_state.rs::fraud_is_terminal_from_wherever_it_is_found` and
+`window_against_fake_tig.rs::a_fraud_ruling_a_real_server_serves_reaches_the_window`;
+what waits for step 2 is the fixture case's own ladder, and the fault
+attribution and charge that F4b forbids this slice from evaluating at all.
+
+J4 is the only one of the five that waives a test which could be written today,
 which is why it carries its own record. The property it tests holds by
 construction — `PostgresAttemptLedger::begin_fenced` commits before it returns
 and `drive::handle` calls the transmitter only afterwards, so no transaction is

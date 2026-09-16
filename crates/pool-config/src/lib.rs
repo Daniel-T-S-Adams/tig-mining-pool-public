@@ -359,6 +359,56 @@ pub struct OrchestrationConfig {
     /// slice's to fix, and inventing one here would be the same mistake as
     /// inventing the number.
     pub reserve_policy_version: String,
+    /// The compute the pool decides *for* while it has no members.
+    ///
+    /// In production an offer comes from a member's compute-availability
+    /// offer. Slice 1 has no members (slice-1 plan §2), so a deployment that
+    /// is to decide anything has to say what it is deciding for — the same
+    /// bootstrap shape as criterion F6's pool-owned workflow owner.
+    ///
+    /// **Optional, and absent means the pool decides nothing.** That is the
+    /// slice's ordinary posture and the honest default: it matches
+    /// `gateway.served_compute = []` and `tig_integration.md` §13.5's "a
+    /// deployment serving nothing has nothing to judge". A default offer here
+    /// would make every controller start proposing work, which is a decision
+    /// no operator made.
+    ///
+    /// This is **not** `gateway.served_compute`. That field scopes §13 check 6
+    /// — which compute types the gateway must have pinned runtimes for — and
+    /// the compute a decision is made for is a different question.
+    ///
+    /// **`pool-config` cannot check that the two agree** — it sees one
+    /// binary's configuration at a time, and with `served_compute = []` check
+    /// 6 has nothing to judge and passes vacuously while this field could
+    /// independently have the controller deciding for CPU.
+    ///
+    /// The comparison is made where the two facts meet: `claim::decide`
+    /// refuses any intent whose decision names a compute type outside the
+    /// gateway's served set, as a stop for an operator. §13.5 records the
+    /// arrangement. That binds what is actually sent to what the gateway has
+    /// pinned runtimes for, which is stronger than comparing two files.
+    #[serde(default)]
+    pub bootstrap_offer: Option<BootstrapOffer>,
+}
+
+/// What the pool offers itself, before members exist.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BootstrapOffer {
+    /// `mining_system.md` §6.2's CPU/GPU class, which selects challenges.
+    pub compute_class: String,
+    /// §6.7's alignment rule needs the core count, and only for CPU.
+    #[serde(default)]
+    pub cpu_cores: Option<u64>,
+    /// `tig_integration.md` §3's protocol compute type — `aws_t4g`, `aws_c7i`
+    /// — which is what the §6.1 body carries. A different vocabulary from the
+    /// class above, kept separate for the reason `config/tig_integration.json`
+    /// keeps them separate.
+    ///
+    /// Checked for shape here and against the pinned compatibility table by
+    /// the controller, where the pin is read. §3 says a compute type outside
+    /// that table is "ineligible rather than coerced".
+    pub tig_compute_type: String,
 }
 
 /// The configuration shared by every pool binary.
@@ -708,6 +758,50 @@ impl Config {
                         orchestration.precommit_failure_charge_atoms
                     )));
                 }
+                if let Some(offer) = &orchestration.bootstrap_offer {
+                    match (offer.compute_class.as_str(), offer.cpu_cores) {
+                        // §6.7's CPU alignment divides by the core count, so a
+                        // CPU offer without one cannot be sized and a count of
+                        // zero cannot be divided by.
+                        ("cpu", None) => {
+                            return Err(invalid(
+                                "orchestration.bootstrap_offer.cpu_cores is required for a \
+                                 cpu offer: mining_system.md §6.7 aligns bundle counts to \
+                                 the core count"
+                                    .into(),
+                            ));
+                        }
+                        ("cpu", Some(0)) => {
+                            return Err(invalid(
+                                "orchestration.bootstrap_offer.cpu_cores must be at least 1".into(),
+                            ));
+                        }
+                        // Carried for a GPU offer it would be read as a CPU
+                        // one's, and §6.7 gives GPU the minimum regardless.
+                        ("gpu", Some(_)) => {
+                            return Err(invalid(
+                                "orchestration.bootstrap_offer.cpu_cores belongs to a cpu \
+                                 offer; §6.7 gives a gpu offer the minimum bundle count"
+                                    .into(),
+                            ));
+                        }
+                        ("cpu" | "gpu", _) => {}
+                        (other, _) => {
+                            return Err(invalid(format!(
+                                "orchestration.bootstrap_offer.compute_class must be \
+                                 \"cpu\" or \"gpu\" (mining_system.md §6.2), found {other:?}"
+                            )));
+                        }
+                    }
+                    if offer.tig_compute_type.trim().is_empty() {
+                        return Err(invalid(
+                            "orchestration.bootstrap_offer.tig_compute_type must name \
+                             tig_integration.md §3's protocol type, such as \"aws_t4g\"; \
+                             it is what the §6.1 body carries and is not the compute class"
+                                .into(),
+                        ));
+                    }
+                }
                 if orchestration.reserve_policy_version.trim().is_empty() {
                     return Err(invalid(
                         "orchestration.reserve_policy_version must name the policy \
@@ -798,7 +892,14 @@ impl Config {
     /// must not carry the same config digest. Fields join it as the slices
     /// that introduce decision-affecting configuration land; the domain
     /// string is versioned so a change of coverage is never mistaken for a
-    /// change of value, and `v2` is the version that added `player_id`.
+    /// change of value: `v2` added `player_id` and `v3` the bootstrap offer.
+    ///
+    /// The offer joins it because it decides and is **not otherwise
+    /// recoverable**. `compute_class` selects §6.2's eligible set, and
+    /// `cpu_cores` drives §6.7's alignment — and while the resulting
+    /// `num_bundles` is on the decision record, the core count that produced
+    /// it is not, so two decisions taken under different offered cores would
+    /// otherwise be indistinguishable.
     ///
     /// `[orchestration]`'s reserve fields are deliberately **not** here, and
     /// the test is not "are they decision-affecting" — they are. It is whether
@@ -815,7 +916,32 @@ impl Config {
     /// decision record look unlike a live one for no protocol reason.
     pub fn decision_digest(&self) -> [u8; 32] {
         let player = self.tig.as_ref().map_or("", |t| t.player_id.as_str());
-        let preimage = format!("tig-pool-config-digest-v2\n{}\n{player}", self.network);
+        // `v3` adds the bootstrap offer. Rendered as three fields rather than
+        // one, so a record can be read back against the configuration that
+        // produced it, and absent as a distinct string rather than as empty
+        // ones — a deployment that offers nothing is not one that offers a
+        // nameless class with no cores.
+        let offer = self
+            .orchestration
+            .as_ref()
+            .and_then(|o| o.bootstrap_offer.as_ref())
+            .map_or_else(
+                || "none".to_string(),
+                |offer| {
+                    format!(
+                        "{}\n{}\n{}",
+                        offer.compute_class,
+                        offer
+                            .cpu_cores
+                            .map_or_else(|| "-".to_string(), |c| c.to_string()),
+                        offer.tig_compute_type,
+                    )
+                },
+            );
+        let preimage = format!(
+            "tig-pool-config-digest-v3\n{}\n{player}\n{offer}",
+            self.network
+        );
         *blake3::hash(preimage.as_bytes()).as_bytes()
     }
 

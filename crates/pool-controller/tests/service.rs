@@ -13,8 +13,11 @@ use axum::body::Body;
 use axum::http::Request;
 use fake_tig::{Config, SharedWorld, build_world, router};
 use http_body_util::BodyExt;
+use pool_controller::decide::Decided;
+use pool_controller::propose::Offer;
 use pool_controller::reconciler::Outcome;
-use pool_controller::service::{self, Service, ServiceError, Tick};
+use pool_controller::service::{self, Deciding, Policy, Service, ServiceError, Tick};
+use pool_decision::challenge::OfferedCompute;
 use pool_domain::Network;
 use pool_snapshot::active_cache::BenchmarkDataSource;
 use pool_snapshot::{AnchoredRead, SnapshotError, SnapshotSource, TigSnapshotSource};
@@ -204,13 +207,15 @@ async fn a_new_block_is_taken_in_once_and_a_seen_one_is_left_alone() {
         poll,
         Network::Testnet,
         PLAYER,
-        Guardrails {
-            max_assignment_age_blocks: 60,
-            package_due_age_blocks: 110,
-            workflow_expiry_age_blocks: 120,
-            proof_reserve_blocks: 10,
-        },
-        10,
+        Policy::reconciling_only(
+            Guardrails {
+                max_assignment_age_blocks: 60,
+                package_due_age_blocks: 110,
+                workflow_expiry_age_blocks: 120,
+                proof_reserve_blocks: 10,
+            },
+            10,
+        ),
     );
 
     let Tick::Ingested(first) = service.tick().await.unwrap() else {
@@ -325,13 +330,15 @@ async fn a_block_read_incompletely_is_tried_again_on_the_next_poll() {
         poll,
         Network::Testnet,
         PLAYER,
-        Guardrails {
-            max_assignment_age_blocks: 60,
-            package_due_age_blocks: 110,
-            workflow_expiry_age_blocks: 120,
-            proof_reserve_blocks: 10,
-        },
-        10,
+        Policy::reconciling_only(
+            Guardrails {
+                max_assignment_age_blocks: 60,
+                package_due_age_blocks: 110,
+                workflow_expiry_age_blocks: 120,
+                proof_reserve_blocks: 10,
+            },
+            10,
+        ),
     );
 
     let Tick::Ingested(blind) = service.tick().await.unwrap() else {
@@ -392,13 +399,15 @@ async fn a_block_a_previous_run_finished_is_not_assembled_again() {
             poll,
             Network::Testnet,
             PLAYER,
-            Guardrails {
-                max_assignment_age_blocks: 60,
-                package_due_age_blocks: 110,
-                workflow_expiry_age_blocks: 120,
-                proof_reserve_blocks: 10,
-            },
-            10,
+            Policy::reconciling_only(
+                Guardrails {
+                    max_assignment_age_blocks: 60,
+                    package_due_age_blocks: 110,
+                    workflow_expiry_age_blocks: 120,
+                    proof_reserve_blocks: 10,
+                },
+                10,
+            ),
         )
     };
 
@@ -451,13 +460,15 @@ async fn once_fails_on_a_failed_poll_and_the_loop_does_not() {
         poll,
         Network::Testnet,
         PLAYER,
-        Guardrails {
-            max_assignment_age_blocks: 60,
-            package_due_age_blocks: 110,
-            workflow_expiry_age_blocks: 120,
-            proof_reserve_blocks: 10,
-        },
-        10,
+        Policy::reconciling_only(
+            Guardrails {
+                max_assignment_age_blocks: 60,
+                package_due_age_blocks: 110,
+                workflow_expiry_age_blocks: 120,
+                proof_reserve_blocks: 10,
+            },
+            10,
+        ),
     );
 
     let err = service::run(&mut service, Duration::from_millis(10), true, |_| {})
@@ -502,13 +513,15 @@ async fn a_warm_up_that_did_not_finish_continues_on_the_next_poll() {
         poll,
         Network::Testnet,
         PLAYER,
-        Guardrails {
-            max_assignment_age_blocks: 60,
-            package_due_age_blocks: 110,
-            workflow_expiry_age_blocks: 120,
-            proof_reserve_blocks: 10,
-        },
-        10,
+        Policy::reconciling_only(
+            Guardrails {
+                max_assignment_age_blocks: 60,
+                package_due_age_blocks: 110,
+                workflow_expiry_age_blocks: 120,
+                proof_reserve_blocks: 10,
+            },
+            10,
+        ),
     );
 
     let Tick::Ingested(first) = service.tick().await.unwrap() else {
@@ -545,6 +558,7 @@ async fn a_warm_up_that_did_not_finish_continues_on_the_next_poll() {
         block_id,
         cache,
         now_usable,
+        ..
     } = service.tick().await.unwrap()
     else {
         panic!("the same block continues its warm-up");
@@ -607,4 +621,263 @@ deployment = "cli-test"
         "the refusal names what is wrong: {stderr}"
     );
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The guardrails every test above uses. Extracted so the deciding tests below
+/// differ from them in exactly one respect: whether an offer is configured.
+fn guardrails() -> Guardrails {
+    Guardrails {
+        max_assignment_age_blocks: 60,
+        package_due_age_blocks: 110,
+        workflow_expiry_age_blocks: 120,
+        proof_reserve_blocks: 10,
+    }
+}
+
+#[tokio::test]
+async fn a_deployment_that_offers_nothing_takes_blocks_in_and_decides_nothing() {
+    // `tig_integration.md` §13.5: "a deployment serving nothing has nothing to
+    // judge", and slice 1 is that until an operator configures an offer. The
+    // poll must still run — reconciliation is not conditional on deciding —
+    // and `decided` must be `None` rather than a pass that ran and found
+    // nothing, which is a different fact.
+    let Some(db) = TempDb::migrated("service_no_offer").await else {
+        return;
+    };
+    let controller = db.pool_as("pool_controller").await;
+    let tig = fake_tig().await;
+    let (source, poll) = clients(&tig.base);
+    let mut service = Service::new(
+        controller.clone(),
+        source,
+        poll,
+        Network::Testnet,
+        PLAYER,
+        Policy::reconciling_only(guardrails(), 10),
+    );
+
+    let Tick::Ingested(tick) = service.tick().await.unwrap() else {
+        panic!("the block is still taken in");
+    };
+    assert!(
+        matches!(tick.outcome, Outcome::Reconciled(_)),
+        "reconciliation does not depend on deciding: {:?}",
+        tick.outcome
+    );
+    assert!(
+        tick.decided.is_none(),
+        "no offer is not a pass that decided nothing: {:?}",
+        tick.decided
+    );
+
+    let intents: i64 = sqlx::query_scalar("SELECT count(*) FROM pool.tig_write_intent")
+        .fetch_one(&controller)
+        .await
+        .unwrap();
+    assert_eq!(intents, 0, "and nothing was proposed");
+}
+
+#[tokio::test]
+async fn a_blind_pass_decides_nothing_even_with_an_offer_configured() {
+    // The wiring half of the claiming gate. `claiming_refused`'s own rule is
+    // unit-tested in `service.rs`; this asserts the poll actually consults it,
+    // which a test of the rule alone cannot — removing the call from
+    // `Service::decide` leaves those unit tests passing.
+    //
+    // A blind pass is the reachable case: its reads were incomplete, so the
+    // reconciliation that would have revealed a blocking workflow never ran,
+    // and deciding on "nothing blocked" from a pass that looked at nothing is
+    // the §10 mistake the gate exists to prevent.
+    let Some(db) = TempDb::migrated("service_blind_no_decision").await else {
+        return;
+    };
+    let controller = db.pool_as("pool_controller").await;
+    let tig = fake_tig().await;
+    let (source, poll) = clients(&tig.base);
+    let flaky = Flaky::over(source);
+    flaky.benchmarks_down.store(true, Ordering::SeqCst);
+    let mut service = Service::new(
+        controller.clone(),
+        flaky,
+        poll,
+        Network::Testnet,
+        PLAYER,
+        Policy {
+            guardrails: guardrails(),
+            cache_budget: 10,
+            deciding: Deciding {
+                offer: Some(Offer {
+                    compute: OfferedCompute::Cpu { cores: 8 },
+                    tig_compute_type: "aws_t4g".to_string(),
+                }),
+                unverified_limit: 4,
+                failure_charge_atoms: "0".to_string(),
+                reserve_policy_version: "unchosen-pre-build-5.2".to_string(),
+                config_digest: [0xef; 32],
+            },
+        },
+    );
+
+    let Tick::Ingested(tick) = service.tick().await.unwrap() else {
+        panic!("the block is taken in even when a read fails");
+    };
+    // The premise: without a blind pass this proves nothing.
+    assert!(
+        matches!(tick.outcome, Outcome::Blind { .. }),
+        "{:?}",
+        tick.outcome
+    );
+    // `NotReconciled`, not `SnapshotNotUsable`: the two coincide for a blind
+    // pass — incomplete reads fail both gates — so naming them apart is what
+    // shows *which* refused. Asserting the weaker one would pass with the
+    // claiming gate deleted, since C5 would catch it anyway.
+    assert!(
+        matches!(tick.decided, Some(Ok(Decided::NotReconciled(_)))),
+        "the claiming gate refused, and an offer is configured so this is not \
+         `None` — which would say the deployment decides nothing: {:?}",
+        tick.decided
+    );
+
+    let intents: i64 = sqlx::query_scalar("SELECT count(*) FROM pool.tig_write_intent")
+        .fetch_one(&controller)
+        .await
+        .unwrap();
+    assert_eq!(intents, 0);
+}
+
+#[tokio::test]
+async fn a_deployment_with_an_offer_decides_from_the_block_it_just_took_in() {
+    // §5.1 step 4, wired: the poll takes a block in, reconciles from it, and
+    // then decides from the same snapshot. Without this the gateway drives a
+    // queue nothing fills, which is what slice 1 was until now.
+    //
+    // The offer's compute type is checked against the pinned §3 table by
+    // `Offer::from_config`; here it is built directly, because what this test
+    // measures is the wiring and not that check.
+    let Some(db) = TempDb::migrated("service_decides").await else {
+        return;
+    };
+    let controller = db.pool_as("pool_controller").await;
+    let tig = fake_tig().await;
+    let (source, poll) = clients(&tig.base);
+    let mut service = Service::new(
+        controller.clone(),
+        source,
+        poll,
+        Network::Testnet,
+        PLAYER,
+        Policy {
+            guardrails: guardrails(),
+            cache_budget: 10,
+            deciding: Deciding {
+                offer: Some(Offer {
+                    compute: OfferedCompute::Cpu { cores: 8 },
+                    tig_compute_type: "aws_t4g".to_string(),
+                }),
+                unverified_limit: 4,
+                failure_charge_atoms: "0".to_string(),
+                reserve_policy_version: "unchosen-pre-build-5.2".to_string(),
+                config_digest: [0xef; 32],
+            },
+        },
+    );
+
+    let Tick::Ingested(tick) = service.tick().await.unwrap() else {
+        panic!("the block is taken in");
+    };
+    let decided = tick.decided.expect("an offer means the pass runs");
+
+    // And against `fake-tig` it reports a shape error, which is the correct
+    // answer and worth pinning: the fake serves `fixtures/tig/v1`, whose
+    // `get-algorithms` carries a single `algorithms` collection where live TIG
+    // returns `codes`, `binarys` and `advances`. That is the disagreement
+    // `tig_integration.md` §14.4 records and issue #28 owns.
+    //
+    // So this asserts two things. The pass *ran* — an outcome, not a silence,
+    // which is what distinguishes wiring that works from wiring that does not.
+    // And the controller cannot decide against the fake until #28 is fixed,
+    // which criterion K2's whole-lifecycle scenario will need.
+    //
+    // When the fixture is corrected this test fails, and that is the signal:
+    // the expectation changes to a decision, not a shape error.
+    let err = decided.expect_err("the v1 fixture's get-algorithms envelope is wrong (#28)");
+    assert!(
+        err.contains("get-algorithms"),
+        "and it names the read it could not use: {err}"
+    );
+}
+
+#[tokio::test]
+async fn the_block_that_completes_the_warm_up_is_decided_from() {
+    // §5.2's warm-up "may span several blocks", and the deciding pass used to
+    // run only at the poll that first *ingests* a block. So the block that
+    // finally became usable was skipped and the pool waited for the next one —
+    // on every restart with a non-empty active set.
+    //
+    // A live run showed it: block 1331560 became usable through
+    // `continue_warm_up` and the first decision was anchored to 1331561. Not
+    // unsafe, but a wasted block and an operator watching a pool that had
+    // warmed and still decided nothing.
+    //
+    // Staged the same way `a_warm_up_that_did_not_finish_continues_on_the_next_poll`
+    // does: one active benchmark whose first fetch fails, so the first poll
+    // takes the block in unusable and the second completes it.
+    let Some(db) = TempDb::migrated("service_warm_up_decides").await else {
+        return;
+    };
+    let controller = db.pool_as("pool_controller").await;
+    let tig = fake_tig().await;
+    activate_one(&tig.app).await;
+    let (source, poll) = clients(&tig.base);
+    let flaky = Flaky::over(source);
+    flaky
+        .benchmark_data_failures_left
+        .store(1, Ordering::SeqCst);
+    let mut service = Service::new(
+        controller.clone(),
+        flaky,
+        poll,
+        Network::Testnet,
+        PLAYER,
+        Policy {
+            guardrails: guardrails(),
+            cache_budget: 10,
+            deciding: Deciding {
+                offer: Some(Offer {
+                    compute: OfferedCompute::Cpu { cores: 8 },
+                    tig_compute_type: "aws_t4g".to_string(),
+                }),
+                unverified_limit: 4,
+                failure_charge_atoms: "0".to_string(),
+                reserve_policy_version: "unchosen-pre-build-5.2".to_string(),
+                config_digest: [0xef; 32],
+            },
+        },
+    );
+
+    // First poll: taken in, cache incomplete, so C5 refuses.
+    let Tick::Ingested(first) = service.tick().await.unwrap() else {
+        panic!("the block is taken in");
+    };
+    assert!(!first.cache.covers_active_set(), "{:?}", first.cache);
+    assert!(
+        matches!(first.decided, Some(Ok(Decided::SnapshotNotUsable(_)))),
+        "the premise: the first poll could not decide: {:?}",
+        first.decided
+    );
+
+    // Second poll: same block, warm-up completes — and the pass runs.
+    let Tick::CacheAdvanced {
+        now_usable,
+        decided,
+        ..
+    } = service.tick().await.unwrap()
+    else {
+        panic!("the same block continues its warm-up");
+    };
+    assert!(now_usable, "the premise: this poll completed the warm-up");
+    assert!(
+        decided.is_some(),
+        "the block that became usable must be decided from, not skipped"
+    );
 }

@@ -135,6 +135,7 @@ pub async fn run(config: &Config, check_only: bool) -> Result<(), String> {
             player_id: &tig.player_id,
             lease_owner: &lease_owner,
             lease_secs: gateway.lease_secs,
+            served_compute: &gateway.served_compute,
             transmitter: &transmitter,
             lane: &lane,
             // Slice 1 constructs no commitments: §3 keeps that out of the

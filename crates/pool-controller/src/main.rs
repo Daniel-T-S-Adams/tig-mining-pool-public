@@ -4,9 +4,13 @@
 //!
 //! What runs is [`pool_controller::service::Service::tick`] on §11's poll
 //! interval: see the latest block, take in any new one, reconcile every
-//! workflow from it. Slice 1 stops there; the decision path lands with the
-//! active-benchmark cache it depends on (`tig_integration.md` §5.2, §9
-//! step 4).
+//! workflow from it, then decide from the same snapshot (`architecture.md`
+//! §5.1 step 4).
+//!
+//! A deployment decides only if it is configured with an
+//! `[orchestration.bootstrap_offer]` — slice 1 has no members to offer
+//! compute, and absent means it takes blocks in and proposes nothing, which is
+//! `tig_integration.md` §13.5's posture.
 //!
 //! Every failure before the loop exits non-zero. A failure inside one poll
 //! is logged and the next poll runs: a controller that stops on a transient
@@ -18,8 +22,10 @@ use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 use pool_config::{Binary, Config};
+use pool_controller::decide::Decided;
+use pool_controller::propose::Offer;
 use pool_controller::reconciler::Outcome;
-use pool_controller::service::{self, Service, Tick};
+use pool_controller::service::{self, Deciding, Policy, Service, Tick};
 use pool_snapshot::TigSnapshotSource;
 use pool_workflow::Guardrails;
 use tig_client::{ReadPolicy, TigReadClient, TigReader};
@@ -142,14 +148,55 @@ async fn run(config: &Config, once: bool) -> Result<(), String> {
         .orchestration
         .as_ref()
         .ok_or("configuration has no [orchestration] section")?;
+    // §5.1 step 4's inputs. The offer is checked against the pinned §3
+    // compatibility table here rather than in `pool-config`, because the pin
+    // lives with this binary: a compute type outside the table is "ineligible
+    // rather than coerced", and refusing at startup beats discovering it on a
+    // write whose fee is already paid.
+    let offer = match &orchestration.bootstrap_offer {
+        Some(configured) => Some(
+            Offer::from_config(
+                &configured.compute_class,
+                configured.cpu_cores,
+                &configured.tig_compute_type,
+                &serde_json::from_str::<serde_json::Value>(PINNED)
+                    .map_err(|e| format!("the pinned configuration does not parse: {e}"))?,
+            )
+            .map_err(|e| format!("orchestration.bootstrap_offer: {e}"))?,
+        ),
+        // No offer: this deployment decides nothing, which is what slice 1 is
+        // until an operator says otherwise (`tig_integration.md` §13.5).
+        None => None,
+    };
+    let deciding = Deciding {
+        offer,
+        unverified_limit: orchestration.internal_pool_unverified_limit,
+        failure_charge_atoms: orchestration.precommit_failure_charge_atoms.clone(),
+        reserve_policy_version: orchestration.reserve_policy_version.clone(),
+        config_digest: config.decision_digest(),
+    };
+    tracing::info!(
+        event = "controller.deciding",
+        offers = deciding.offer.is_some(),
+        compute_type = deciding
+            .offer
+            .as_ref()
+            .map_or("-", |o| o.tig_compute_type.as_str()),
+        unverified_limit = deciding.unverified_limit,
+        "whether this deployment proposes work"
+    );
+
     let mut service = Service::new(
         pool,
         source,
         poll,
         network,
         &tig.player_id,
-        guardrails,
-        orchestration.active_cache_fetches_per_poll as usize,
+        Policy {
+            guardrails,
+            cache_budget: orchestration.active_cache_fetches_per_poll as usize,
+            deciding,
+        },
     );
 
     let interval = policy.block_poll_interval();
@@ -168,6 +215,70 @@ async fn run(config: &Config, once: bool) -> Result<(), String> {
 
 /// One poll's outcome, as log lines. Correlation ids and counts only — the
 /// report carries workflow ids, which §10.1 allows, and nothing bulkier.
+/// What §5.1 step 4 did with this block (`architecture.md` §10.1).
+///
+/// A committed decision is the pool's only money-costing effect and criterion
+/// K3 records it as the live run's evidence, so it carries the ids §10.1
+/// correlates by: the workflow, the intent, and the trace the intent was
+/// admitted under. Without this the outcome the service deliberately carried
+/// out on the `Tick` was discarded by its only caller, including under
+/// `--once`, which is the mode K3 uses.
+fn report_decision(block_id: &str, decided: &Option<Result<Decided, String>>) {
+    let Some(decided) = decided else {
+        // No offer. Logged nowhere on purpose: a deployment that decides
+        // nothing would otherwise emit a line every block saying so, and
+        // §10.3's rule is that a bucket filling on every pass is one nobody
+        // reads. `controller.deciding` says it once, at startup.
+        return;
+    };
+    match decided {
+        Ok(Decided::Admitted(admitted)) => tracing::info!(
+            event = "controller.decision.admitted",
+            block_id = %block_id,
+            workflow_id = %admitted.intent.workflow_id,
+            intent_id = %admitted.intent.intent_id,
+            trace_id = admitted
+                .intent
+                .trace_id
+                .map_or_else(|| "-".to_string(), |t| t.to_hex()),
+            decision_id = %admitted.decision_id,
+            pool_unverified = admitted.pool_unverified,
+            unverified_limit = admitted.unverified_limit,
+            "a precommit intent was created"
+        ),
+        Ok(Decided::NoAction) => tracing::debug!(
+            event = "controller.decision.no_action",
+            block_id = %block_id,
+            "nothing compute-compatible and eligible"
+        ),
+        Ok(Decided::SnapshotNotUsable(why)) => tracing::debug!(
+            event = "controller.decision.snapshot_not_usable",
+            block_id = %block_id,
+            reason = %why,
+        ),
+        Ok(Decided::NotReconciled(why)) => tracing::debug!(
+            event = "controller.decision.not_reconciled",
+            block_id = %block_id,
+            reason = %why,
+            "the block was not reconciled from, so nothing was claimed from it"
+        ),
+        // §10.3: this is an operator condition, and it is the one the §10 stop
+        // exists to surface. Warned rather than logged at info, and the
+        // reconciliation line beside it names which workflows.
+        Ok(Decided::BlockedForOperator) => tracing::warn!(
+            event = "controller.decision.blocked",
+            block_id = %block_id,
+            "reconciliation stopped the claiming path; no decision was made"
+        ),
+        Err(error) => tracing::warn!(
+            event = "controller.decision.failed",
+            block_id = %block_id,
+            error = %error,
+            "the block was taken in; the deciding pass did not complete"
+        ),
+    }
+}
+
 fn report(tick: &Tick) {
     match tick {
         Tick::Unchanged { block_id } => {
@@ -184,6 +295,7 @@ fn report(tick: &Tick) {
             block_id,
             cache,
             now_usable,
+            decided,
         } => {
             tracing::info!(
                 event = "controller.cache.advanced",
@@ -200,6 +312,10 @@ fn report(tick: &Tick) {
                     error = %error,
                 );
             }
+            // The block that completed the warm-up is decided from, so its
+            // outcome is reported here too — otherwise the first decision
+            // after any restart would appear nowhere.
+            report_decision(block_id, decided);
         }
         Tick::Ingested(ingested) => {
             tracing::info!(
@@ -226,6 +342,7 @@ fn report(tick: &Tick) {
                     observed_block_id = %ingested.block_id,
                 );
             }
+            report_decision(&ingested.block_id, &ingested.decided);
             match &ingested.outcome {
                 Outcome::Blind { reason, .. } => {
                     tracing::warn!(

@@ -122,10 +122,35 @@ while IFS= read -r file; do
     fi
 done < <(find "$root/crates" -path '*/src/*' -name '*.rs' -print | sort)
 
+# The scripts too, which this scan used to skip.
+#
+# It cost something: `scripts/live-run-evidence.sh` read the testnet key and
+# passed it to curl on the command line — a second non-gateway reader of the
+# credential, and argv is world-readable in /proc for the life of the process,
+# which §9 forbids in the same sentence as TOML and logs. The reads did not
+# need a key at all. A boundary that only watches one kind of file is a
+# boundary with a door in it.
+#
+# `secret-scan.sh`, `a4-scan.sh` and `dev-db.sh` are the exceptions and each
+# earns it: the first two exist to *find* the key and read it only at runtime
+# from the untracked file, and `dev-db.sh` provisions local database passwords
+# that are not the TIG credential at all.
+while IFS= read -r file; do
+    case "$(basename "$file")" in
+        secret-scan.sh|a4-scan.sh|dev-db.sh|credential-boundary.sh) continue ;;
+    esac
+    body="$(grep -vE '^[[:space:]]*#' "$file" || true)"
+    if printf '%s\n' "$body" | grep -qiE 'tig[-_]testnet[-_]api[-_]key|x-api-key'; then
+        echo "LEAK: $file names the TIG API key path or header"
+        scan_hits=$((scan_hits + 1))
+    fi
+done < <(find "$root/scripts" -type f \( -name '*.sh' -o -name '*.py' \) -print | sort)
+
 if [[ $scan_hits -gt 0 ]]; then
     echo "FAIL: the TIG API key is loaded only by tig-gateway (architecture.md §2.2)" >&2
     exit 1
 fi
 
 echo "credential boundary holds: the key-loading path is crate-private to tig-gateway,"
-echo "and no crate outside it (spike and fake-tig excepted, see the script) names the key"
+echo "and no crate or script outside it (spike, fake-tig and the key-scanners"
+echo "excepted, see the script) names the key"

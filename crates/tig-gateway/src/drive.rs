@@ -51,6 +51,15 @@ pub struct Driver<'a> {
     /// claimant find the attempt unresolved, take it for a crash, and write
     /// an outcome the live sender is about to contradict.
     pub lease_secs: i64,
+    /// The compute types this deployment serves (`gateway.served_compute`).
+    ///
+    /// Carried here so `claim::decide` can refuse an intent outside it. The
+    /// controller decides for its own configured offer and the two are
+    /// separate configurations; `tig_integration.md` §13.5 scopes §13 check 6
+    /// to this set, so an intent for a compute type outside it names work
+    /// whose pinned runtimes were never judged — and with an empty set the
+    /// check has nothing to judge at all.
+    pub served_compute: &'a [String],
     pub transmitter: &'a PrecommitTransmitter,
     /// §11's POST-lane pacing, shared across runs. See [`PostLane`].
     pub lane: &'a PostLane,
@@ -703,6 +712,7 @@ async fn handle_held(
         },
         &submission,
         confirmed_precommits,
+        driver.served_compute,
     );
 
     let acted = match &decision {
@@ -1173,6 +1183,14 @@ mod tests {
         key: TigApiKey,
         lane: PostLane,
         commitment: Option<BenchmarkSubmission>,
+        /// What the harness's gateway serves, in `served_compute`'s own
+        /// vocabulary: §13.5's CPU/GPU **class**, not §3's `aws_*` type.
+        ///
+        /// This said `["aws_t4g"]` and hid a real defect — the claim check was
+        /// comparing a protocol type against a class list, so no real
+        /// configuration could ever have worked. A harness that invents a
+        /// vocabulary tests the invention.
+        served_compute: Vec<String>,
         _key_path: PathBuf,
     }
 
@@ -1199,12 +1217,14 @@ mod tests {
                 key,
                 lane: PostLane::new(policy),
                 commitment: None,
+                served_compute: vec!["cpu".to_string()],
                 _key_path: key_path,
             })
         }
 
         fn driver(&self) -> Driver<'_> {
             Driver {
+                served_compute: &self.served_compute,
                 pool: &self.gateway,
                 network: Network::Testnet,
                 player_id: PLAYER,

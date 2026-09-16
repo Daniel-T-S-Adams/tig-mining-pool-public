@@ -23,9 +23,10 @@
 
 use std::time::{Duration, Instant};
 
-use pool_domain::Network;
-use pool_snapshot::active_cache::{Advance, BenchmarkDataSource};
-use pool_snapshot::store::BlockSnapshotStore;
+use pool_domain::{Network, TraceId};
+use pool_snapshot::AnchoredRead;
+use pool_snapshot::active_cache::{ActiveBenchmarkStore, Advance, BenchmarkDataSource};
+use pool_snapshot::store::{BlockSnapshotStore, NotUsable, PersistedSnapshot};
 use pool_snapshot::{
     PostgresActiveBenchmarkStore, PostgresSnapshotStore, Snapshot, SnapshotSource,
 };
@@ -33,13 +34,133 @@ use pool_workflow::Guardrails;
 use sqlx::PgPool;
 use tig_client::{ReadError, TigReadClient};
 
+use crate::decide::{Decided, decide_once};
 use crate::ingest::{IngestError, Ingestor};
+use crate::propose::Offer;
 use crate::reconciler::{Outcome, ReconcileError, reconcile_block};
+use crate::window::confirmed_window;
 
 /// How many times one ingestion may restart at a new block before giving
 /// up on this poll. §9 discards a snapshot the chain moved under; the next
 /// poll tries again, so this bounds one poll's patience, not the pool's.
 const ASSEMBLY_ATTEMPTS: u32 = 3;
+
+/// Whether this block's reconciliation forbids claiming new work.
+///
+/// `Some` is a refusal and the reason; `None` means the pass may decide.
+///
+/// Extracted from [`Service::decide`] so it can be handed a report rather than
+/// reached through a poll: staging a `Contradicted` workflow end to end takes a
+/// fake serving a specific benchmark, and a rule tested only that way is a rule
+/// whose other branches are never exercised.
+///
+/// `BlockReport::blocks_claiming`'s own contract is "whether the controller
+/// must not claim new work after this pass" (§10's stop-for-operator, criterion
+/// G1), and the deciding pass is its first caller — so the first that has to
+/// honour it. A pass that found a duplicate confirmed precommit, or a workflow
+/// it could not evaluate, names one whose true state the pool does not have;
+/// deciding on top of that compounds the fee and the mapping break an operator
+/// has yet to untangle.
+///
+/// A `Blind` outcome refuses too. Its reads were incomplete, so the
+/// reconciliation that would have revealed such a workflow never ran, and
+/// "nothing blocked" from a pass that looked at nothing is not the same answer
+/// as "nothing blocks".
+fn claiming_refused(reconciliation: Reconciliation) -> Option<Decided> {
+    match reconciliation {
+        Reconciliation::Ran {
+            blocks_claiming: true,
+        } => Some(Decided::BlockedForOperator),
+        Reconciliation::Ran {
+            blocks_claiming: false,
+        } => None,
+        Reconciliation::DidNotRun { reason } => Some(Decided::NotReconciled(reason.to_string())),
+    }
+}
+
+/// What reconciling this block concluded, as the claiming gate reads it.
+///
+/// Not an `Outcome`: the warm-up path decides from a block reconciled several
+/// polls earlier and has only the answer, not the report. Taking the answer
+/// makes both callers supply the same thing and neither able to supply a
+/// report the gate would re-derive differently.
+#[derive(Debug, Clone, Copy)]
+enum Reconciliation {
+    Ran { blocks_claiming: bool },
+    DidNotRun { reason: NotUsable },
+}
+
+impl Reconciliation {
+    fn of(outcome: &Outcome) -> Self {
+        match outcome {
+            Outcome::Reconciled(report) => Self::Ran {
+                blocks_claiming: report.blocks_claiming(),
+            },
+            Outcome::Blind { reason, .. } => Self::DidNotRun { reason: *reason },
+        }
+    }
+}
+
+/// What this controller's configuration tells the poll to do.
+///
+/// One struct rather than nine positional parameters. `Service::new` took
+/// seven before the deciding pass needed five more, and an `Option<Offer>`
+/// buried among positional arguments is exactly the kind of thing that gets
+/// passed `None` by accident and then never decides anything.
+#[derive(Debug, Clone)]
+pub struct Policy {
+    /// `tig_integration.md` §8's ages, from the pinned configuration.
+    pub guardrails: Guardrails,
+    /// How many `get-benchmark-data` reads one poll may spend warming the
+    /// active-benchmark cache (§5.2, §9 step 4).
+    pub cache_budget: usize,
+    pub deciding: Deciding,
+}
+
+impl Policy {
+    /// A controller that takes blocks in and decides nothing.
+    pub fn reconciling_only(guardrails: Guardrails, cache_budget: usize) -> Self {
+        Self {
+            guardrails,
+            cache_budget,
+            deciding: Deciding::none(),
+        }
+    }
+}
+
+/// Everything the deciding pass needs that is not the snapshot.
+#[derive(Debug, Clone)]
+pub struct Deciding {
+    /// What the pool decides for. `None` means it decides nothing, which is
+    /// slice 1's ordinary posture: no members, nothing offered, nothing mined
+    /// (`tig_integration.md` §13.5).
+    pub offer: Option<Offer>,
+    /// §6.1's capacity gate.
+    pub unverified_limit: i64,
+    /// §11.4's `X`, recorded per intent (criterion D2c).
+    pub failure_charge_atoms: String,
+    pub reserve_policy_version: String,
+    /// §9's decision-affecting configuration digest (criterion A3).
+    pub config_digest: [u8; 32],
+}
+
+impl Deciding {
+    /// A controller that decides nothing.
+    ///
+    /// The configuration that produces it is a deployment with no
+    /// `bootstrap_offer`; this is the same state, for a caller that has no
+    /// configuration — the reconciliation tests, above all, which drive blocks
+    /// through the poll and must not start proposing work as a side effect.
+    pub fn none() -> Self {
+        Self {
+            offer: None,
+            unverified_limit: 1,
+            failure_charge_atoms: "0".to_string(),
+            reserve_policy_version: "none".to_string(),
+            config_digest: [0; 32],
+        }
+    }
+}
 
 pub struct Service<S> {
     pool: PgPool,
@@ -51,6 +172,7 @@ pub struct Service<S> {
     player_id: String,
     guardrails: Guardrails,
     cache_budget: usize,
+    deciding: Deciding,
     /// The block most recently taken in *and reconciled from*, so a poll
     /// that sees it again does nothing more than continue its warm-up.
     ///
@@ -67,6 +189,13 @@ struct Seen {
     /// Whether a snapshot of this block has been persisted usable for a
     /// decision. Once true there is nothing left to warm.
     usable: bool,
+    /// Whether reconciling from this block forbade claiming new work.
+    ///
+    /// The answer, not the report: it is all the deciding pass reads, and the
+    /// warm-up may complete several polls later. §10's claiming gate is a fact
+    /// about the pass that read the block, not about the poll that happens to
+    /// finish the cache.
+    blocks_claiming: bool,
 }
 
 /// What one poll came to.
@@ -94,6 +223,9 @@ pub enum Tick {
         /// Whether this pass completed the warm-up and persisted the block
         /// as usable for a decision.
         now_usable: bool,
+        /// What §5.1 step 4 did once the block became usable, or `None` when
+        /// it did not or the deployment decides nothing.
+        decided: Option<Result<Decided, String>>,
     },
     /// A new block was taken in and reconciled from.
     Ingested(Box<Ingested>),
@@ -107,6 +239,14 @@ pub struct Ingested {
     pub gaps_recorded: Vec<i64>,
     pub cache: Advance,
     pub outcome: Outcome,
+    /// What §5.1 step 4 did with this block, or `None` when the deployment
+    /// offers no compute and so decides nothing.
+    ///
+    /// A failed pass is carried as `Some(Err)` rather than propagated: §10
+    /// makes a missed block unrecoverable, so a controller that stopped taking
+    /// blocks in because a decision failed would trade a recoverable fault for
+    /// an unrecoverable one.
+    pub decided: Option<Result<Decided, String>>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -128,8 +268,7 @@ impl<S: SnapshotSource + BenchmarkDataSource> Service<S> {
         poll: TigReadClient,
         network: Network,
         player_id: impl Into<String>,
-        guardrails: Guardrails,
-        cache_budget: usize,
+        policy: Policy,
     ) -> Self {
         Self {
             store: PostgresSnapshotStore::new(pool.clone()),
@@ -139,8 +278,9 @@ impl<S: SnapshotSource + BenchmarkDataSource> Service<S> {
             poll,
             network,
             player_id: player_id.into(),
-            guardrails,
-            cache_budget,
+            guardrails: policy.guardrails,
+            cache_budget: policy.cache_budget,
+            deciding: policy.deciding,
             last: None,
         }
     }
@@ -217,21 +357,124 @@ impl<S: SnapshotSource + BenchmarkDataSource> Service<S> {
         )
         .await?;
 
-        if let Outcome::Reconciled(_) = &outcome
+        if let Outcome::Reconciled(report) = &outcome
             && let Ok(snapshot) = ingested.snapshot.for_reconciliation()
         {
             self.last = Some(Seen {
                 snapshot: snapshot.clone(),
                 usable: ingested.snapshot.for_decision().is_ok(),
+                blocks_claiming: report.blocks_claiming(),
             });
         }
+        // §5.1 step 4, after reconciliation and from the same snapshot. The
+        // order is the document's: §10's reconciliation is what makes local
+        // state safe to decide from, and a decision taken before it could be
+        // made against a workflow this very block settled.
+        let decided = self
+            .decide(&ingested.snapshot, Reconciliation::of(&outcome))
+            .await;
+
         Ok(Tick::Ingested(Box::new(Ingested {
             block_id,
             height,
             gaps_recorded: ingested.gaps_recorded,
             cache: ingested.cache,
             outcome,
+            decided,
         })))
+    }
+
+    /// One deciding pass over the snapshot just taken in.
+    ///
+    /// Reported rather than propagated. A pass that cannot decide must not
+    /// stop the poll: §10 makes a missed block unrecoverable, so a controller
+    /// that stopped taking blocks in because a decision failed would trade a
+    /// recoverable fault for an unrecoverable one. The outcome rides out on
+    /// the `Tick` and the caller decides what to say about it.
+    async fn decide(
+        &self,
+        persisted: &PersistedSnapshot,
+        reconciliation: Reconciliation,
+    ) -> Option<Result<Decided, String>> {
+        // No offer is not a failure to decide; it is a deployment that decides
+        // nothing, which is slice 1's ordinary posture. `None` says that,
+        // where `Some(Ok(NoAction))` would say the rules were run and found
+        // nothing — a different fact.
+        let offer = self.deciding.offer.as_ref()?;
+
+        // §10's stop-for-operator, and criterion G1. `blocks_claiming`'s own
+        // contract is "whether the controller must not claim new work after
+        // this pass", and this is the first caller of the claiming path — so
+        // the first that has to honour it. A pass that found a duplicate
+        // confirmed precommit, or a workflow it could not evaluate, names one
+        // whose true state the pool does not have; deciding on top of that
+        // compounds the fee and the mapping break an operator has yet to
+        // untangle.
+        //
+        // A `Blind` outcome blocks too. Its reads were incomplete, so the
+        // reconciliation that would have revealed such a workflow never ran,
+        // and "nothing blocked" from a pass that looked at nothing is not the
+        // same answer as "nothing blocks".
+        if let Some(refusal) = claiming_refused(reconciliation) {
+            return Some(Ok(refusal));
+        }
+
+        let snapshot = match persisted.for_decision() {
+            Ok(snapshot) => snapshot,
+            // C5's gate, reported rather than swallowed. Returning `None` here
+            // collapsed it into "this deployment decides nothing", which is a
+            // different fact — an operator would read it as an unconfigured
+            // offer.
+            //
+            // `decide_once` applies the same gate and returns the same answer;
+            // this is not belt-and-braces but a consequence of needing the
+            // snapshot's reads to gather the arguments below. The rule itself
+            // is tested where a failing snapshot can be handed to it directly,
+            // in `tests/decide.rs` — reaching it through the poll needs a block
+            // whose active set is non-empty while the cache is cold, which the
+            // fake's fixture has no way to produce.
+            Err(why) => return Some(Ok(Decided::SnapshotNotUsable(why.to_string()))),
+        };
+
+        let active_ids = match snapshot.active_benchmark_ids() {
+            Ok(ids) => ids,
+            Err(e) => return Some(Err(format!("the block names no active set: {e}"))),
+        };
+        let active = match self.cache.load(self.network, &active_ids).await {
+            Ok(active) => active,
+            Err(e) => return Some(Err(format!("the active-benchmark cache: {e}"))),
+        };
+
+        let benchmarks = match snapshot.read(AnchoredRead::Benchmarks) {
+            Some(body) => body.clone(),
+            None => return Some(Err("the snapshot carries no get-benchmarks".to_string())),
+        };
+        let window = match confirmed_window(&benchmarks, &snapshot.block) {
+            Ok(window) => window,
+            Err(e) => return Some(Err(format!("the confirmed window: {e}"))),
+        };
+
+        Some(
+            decide_once(
+                &self.pool,
+                self.network,
+                &self.player_id,
+                offer,
+                persisted,
+                &window,
+                &active,
+                self.deciding.unverified_limit,
+                &self.deciding.failure_charge_atoms,
+                &self.deciding.reserve_policy_version,
+                self.deciding.config_digest,
+                // §10.1's originating trace, drawn per pass: one deciding pass
+                // is one unit of work, and `intent_id` distinguishes the
+                // intents within it.
+                TraceId::draw().ok(),
+            )
+            .await
+            .map_err(|e| e.to_string()),
+        )
     }
 
     /// Another budget on the last block's active set; if that completes the
@@ -251,6 +494,10 @@ impl<S: SnapshotSource + BenchmarkDataSource> Service<S> {
         };
         let cache = ingestor.warm_cache(&seen.snapshot).await?;
         let now_usable = cache.covers_active_set();
+        // Taken before the borrow of `self` below, which `decide` needs.
+        let block_id = seen.snapshot.block_id.clone();
+        let blocks_claiming = seen.blocks_claiming;
+        let mut decided = None;
         if now_usable {
             seen.snapshot.active_cache_ready = true;
             let persisted = self
@@ -259,11 +506,31 @@ impl<S: SnapshotSource + BenchmarkDataSource> Service<S> {
                 .await
                 .map_err(IngestError::from)?;
             seen.usable = persisted.for_decision().is_ok();
+
+            // The block that *completes* the warm-up is decided from here.
+            //
+            // The deciding pass otherwise runs only at the poll that first
+            // ingests a block, and §5.2 says the warm-up "may span several
+            // blocks" — so after any restart with a non-empty active set, the
+            // block that finally became usable was silently skipped and the
+            // pool waited for the next one. A live run showed exactly that:
+            // block 1331560 became usable through this path and the first
+            // decision was anchored to 1331561.
+            //
+            // Nothing else changes. `decide` applies C5 and the claiming gate
+            // as it does on the ingest path, and the reconciliation this block
+            // already had is what `blocks_claiming` is read from — recorded on
+            // `Seen` when the block was taken in, since a block only reaches
+            // here after `Outcome::Reconciled`.
+            decided = self
+                .decide(&persisted, Reconciliation::Ran { blocks_claiming })
+                .await;
         }
         Ok(Tick::CacheAdvanced {
-            block_id: seen.snapshot.block_id.clone(),
+            block_id,
             cache,
             now_usable,
+            decided,
         })
     }
 }
@@ -308,5 +575,88 @@ where
             }
         }
         tokio::time::sleep(interval.saturating_sub(started.elapsed())).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use pool_snapshot::store::NotUsable;
+    use pool_workflow::restart::{NeedsAttention, RestartReport};
+
+    use super::*;
+    use crate::bind::BindReport;
+    use crate::reconciler::BlockReport;
+
+    fn report(needs_attention: Vec<NeedsAttention>) -> BlockReport {
+        BlockReport {
+            block_id: "b1".to_string(),
+            height: 100_080,
+            bind: BindReport { outcomes: vec![] },
+            restart: RestartReport {
+                advanced: vec![],
+                unchanged: vec![],
+                needs_attention,
+            },
+            expired: vec![],
+            expiry_withheld: vec![],
+            expiry_failed: vec![],
+        }
+    }
+
+    #[test]
+    fn a_clean_pass_may_claim_and_a_stopped_one_may_not() {
+        // §10's stop-for-operator and criterion G1. Both directions, because a
+        // gate that refused everything would pass a one-sided test while
+        // stopping the pool.
+        assert!(
+            claiming_refused(Reconciliation::of(&Outcome::Reconciled(report(vec![])))).is_none()
+        );
+
+        // `Contradicted`: TIG's confirmed evidence disagrees with a state the
+        // pool recorded as terminal. §10 answers that with an operator, not
+        // with more work.
+        let refused = claiming_refused(Reconciliation::of(&Outcome::Reconciled(report(vec![
+            NeedsAttention::Contradicted {
+                workflow_id: "w1".to_string(),
+                benchmark_id: "b1".to_string(),
+                recorded_state: "STOPPED",
+            },
+        ]))));
+        assert!(
+            matches!(refused, Some(Decided::BlockedForOperator)),
+            "{refused:?}"
+        );
+
+        // A bucket that does *not* block still does not, so the gate stays
+        // usable: §7 calls an aged benchmark ordinary, and stopping the pool
+        // every time a workflow got old would make the gate the outage.
+        assert!(
+            claiming_refused(Reconciliation::of(&Outcome::Reconciled(report(vec![
+                NeedsAttention::OutsideWindow {
+                    workflow_id: "w1".to_string(),
+                    benchmark_id: "b1".to_string(),
+                },
+            ]))))
+            .is_none(),
+            "an aged benchmark is ordinary; the gate must not become the outage"
+        );
+    }
+
+    #[test]
+    fn a_blind_pass_may_not_claim_either() {
+        // Its reads were incomplete, so the reconciliation that would have
+        // revealed a blocking workflow never ran. "Nothing blocked" from a
+        // pass that looked at nothing is not "nothing blocks".
+        let refused = claiming_refused(Reconciliation::of(&Outcome::Blind {
+            block_id: "b1".to_string(),
+            height: 100_080,
+            reason: NotUsable::ReadsIncomplete,
+        }));
+        assert!(
+            matches!(refused, Some(Decided::NotReconciled(_))),
+            "and says it was reconciliation that refused, not the snapshot read: {refused:?}"
+        );
     }
 }

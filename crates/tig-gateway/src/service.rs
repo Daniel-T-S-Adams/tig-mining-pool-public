@@ -183,6 +183,13 @@ fn report_outcome(outcome: &drive::IntentOutcome) {
     let generation = outcome.generation;
     let attempt_id = outcome.attempt_id().unwrap_or("-");
     let benchmark_id = outcome.benchmark_id().unwrap_or("-");
+    // §10.1's cross-restart correlation (criterion I3). The controller that
+    // admitted this intent is a different process, and on the far side of a
+    // crash it may no longer be running at all; this is what joins its
+    // decision to this transmission.
+    let trace_id = outcome
+        .trace_id
+        .map_or_else(|| "-".to_string(), |t| t.to_hex());
     // `decision` and `acted` carry their own payloads — a stop's reason, a
     // failure's error — so they are recorded whole rather than flattened to a
     // name that would drop exactly the part an operator needs.
@@ -194,6 +201,7 @@ fn report_outcome(outcome: &drive::IntentOutcome) {
             generation,
             attempt_id,
             benchmark_id,
+            trace_id,
             decision = ?outcome.decision,
             acted = ?outcome.acted,
             "an intent needs an operator"
@@ -205,6 +213,7 @@ fn report_outcome(outcome: &drive::IntentOutcome) {
             generation,
             attempt_id,
             benchmark_id,
+            trace_id,
             decision = ?outcome.decision,
             acted = ?outcome.acted,
             "an intent reached TIG"
@@ -216,6 +225,7 @@ fn report_outcome(outcome: &drive::IntentOutcome) {
             generation,
             attempt_id,
             benchmark_id,
+            trace_id,
             decision = ?outcome.decision,
             acted = ?outcome.acted,
             "an intent made no change"

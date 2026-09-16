@@ -17,7 +17,7 @@
 //! the real TIG is not a fact the database has.
 
 use pool_config::TigConfig;
-use pool_domain::Network;
+use pool_domain::{Network, TraceId};
 use pool_workflow::{
     AcceptanceError, BenchmarkSubmission, IntentError, NewIntent, PayloadError,
     PostgresIntentRepository, TigWriteIntentRepository, WriteIntent, WriteKind, benchmark_digest,
@@ -100,6 +100,12 @@ pub async fn create_commitment_intent(
     workflow_id: &str,
     artifact_id: &str,
     submission: &BenchmarkSubmission,
+    // The trace the calling pass runs under (`architecture.md` §10.1). Taken
+    // as an argument rather than drawn here because the *originating* trace is
+    // the caller's unit of work, and because this function is idempotent: a
+    // second call for an intent that exists keeps the first call's trace,
+    // which is the one that originated it.
+    trace_id: Option<TraceId>,
 ) -> Result<WriteIntent, CommitError> {
     let current = workflow::find(pool, network, workflow_id)
         .await?
@@ -177,6 +183,7 @@ pub async fn create_commitment_intent(
             benchmark_id: Some(benchmark_id),
             payload_digest: benchmark_digest(submission),
             payload_artifact_id: Some(artifact_id.to_string()),
+            trace_id,
         })
         .await?)
 }

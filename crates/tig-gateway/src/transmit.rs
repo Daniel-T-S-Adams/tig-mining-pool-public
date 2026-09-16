@@ -531,6 +531,7 @@ mod tests {
             benchmark_id: None,
             payload_digest: precommit_digest(submitted),
             payload_artifact_id: None,
+            trace_id: None,
             state: pool_workflow::IntentState::Prepared,
         }
     }

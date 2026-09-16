@@ -32,7 +32,8 @@ pub use decision::{
 };
 pub use intent::{
     IntentError, IntentState, NewIntent, PostgresIntentRepository, PrecommitSiblings,
-    SettledOutcome, TigWriteIntentRepository, WriteIntent, WriteKind, precommit_siblings,
+    SettledOutcome, TigWriteIntentRepository, WriteIntent, WriteKind, intent_columns_read,
+    precommit_siblings,
 };
 pub use lease::{Lease, LeaseError, LeaseKind};
 pub use payload::{

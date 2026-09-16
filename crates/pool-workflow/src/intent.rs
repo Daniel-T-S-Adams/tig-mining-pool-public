@@ -11,7 +11,7 @@
 
 use std::future::Future;
 
-use pool_domain::Network;
+use pool_domain::{Network, TraceId};
 use sqlx::{PgPool, Row};
 
 /// The TIG writes slice 1 records intents for.
@@ -99,6 +99,14 @@ pub struct NewIntent {
     pub benchmark_id: Option<String>,
     pub payload_digest: [u8; 32],
     pub payload_artifact_id: Option<String>,
+    /// The trace this intent was admitted under (`architecture.md` §10.1,
+    /// criterion I3).
+    ///
+    /// `None` is a recorded absence, not a defect: §10.1 asks that the id be
+    /// stored, not that admission be refused without one, and a controller
+    /// that could not draw an id should lose correlation rather than stop
+    /// creating precommits.
+    pub trace_id: Option<TraceId>,
 }
 
 /// A recorded intent.
@@ -112,6 +120,10 @@ pub struct WriteIntent {
     pub benchmark_id: Option<String>,
     pub payload_digest: [u8; 32],
     pub payload_artifact_id: Option<String>,
+    /// The trace the intent was admitted under. Carried onto every line the
+    /// gateway logs about it, which is what keeps a write transmitted after a
+    /// restart correlated with the decision that ordered it.
+    pub trace_id: Option<TraceId>,
     pub state: IntentState,
 }
 
@@ -284,7 +296,55 @@ fn unavailable(e: sqlx::Error) -> IntentError {
     IntentError::Unavailable(e.to_string())
 }
 
-fn row_to_intent(row: &sqlx::postgres::PgRow) -> Result<WriteIntent, IntentError> {
+/// Every column [`row_to_intent`] reads, as one SQL fragment.
+///
+/// Written once because it was written five times. Adding `trace_id` to the
+/// table left four of the five `SELECT`s behind, and the claim path then read
+/// intents that parsed fine and carried no trace — a column stored faithfully
+/// and delivered nowhere, which is worse than not having it. A reader that
+/// projects a subset of these columns cannot be passed to `row_to_intent`, so
+/// the list and the function it feeds change together.
+///
+/// A macro rather than a `const`: sqlx 0.9 wants a `'static` query string, and
+/// `concat!` composes literals at compile time where `format!` would not.
+macro_rules! intent_columns {
+    () => {
+        "intent_id::text AS intent_id, network, workflow_id, write_kind,
+         generation, benchmark_id, payload_digest, payload_artifact_id,
+         trace_id, state"
+    };
+}
+pub(crate) use intent_columns;
+
+/// The column names [`intent_columns`] selects.
+///
+/// Exists so a test can compare the list against the table's own catalogue: a
+/// migration that adds a column the typed intent never reads is otherwise
+/// invisible until a caller notices the value is always absent. Derived from
+/// the macro rather than written out again, so the two cannot disagree.
+pub fn intent_columns_read() -> Vec<&'static str> {
+    intent_columns!()
+        .split(',')
+        .map(|part| {
+            // "intent_id::text AS intent_id" -> "intent_id"; everything else
+            // is a bare name with surrounding whitespace.
+            let part = part.trim();
+            match part.rsplit_once(" AS ") {
+                Some((_, alias)) => alias.trim(),
+                None => part,
+            }
+        })
+        .collect()
+}
+
+/// One row, read the same way by every caller.
+///
+/// `pub(crate)` so `decision::admit_precommit` reads its `RETURNING` through
+/// this rather than assembling a `WriteIntent` from the values it bound. Two
+/// ways to build one intent is two places for a new column to be forgotten,
+/// and echoing bound values back would make the returned intent agree with the
+/// caller regardless of what the row holds.
+pub(crate) fn row_to_intent(row: &sqlx::postgres::PgRow) -> Result<WriteIntent, IntentError> {
     let intent_id: String = row.try_get("intent_id").map_err(unavailable)?;
     let corrupt = |reason: String| IntentError::Corrupt {
         intent_id: intent_id.clone(),
@@ -304,6 +364,17 @@ fn row_to_intent(row: &sqlx::postgres::PgRow) -> Result<WriteIntent, IntentError
     let state = IntentState::parse(&state_text)
         .ok_or_else(|| corrupt(format!("unknown state {state_text}")))?;
 
+    // A stored id that no longer parses is corruption, not an absence: the
+    // CHECK constraint makes it unreachable without direct SQL, and reading it
+    // as `None` would quietly drop the correlation §10.1 asks for.
+    let trace_text: Option<String> = row.try_get("trace_id").map_err(unavailable)?;
+    let trace_id = trace_text
+        .map(|t| {
+            t.parse::<TraceId>()
+                .map_err(|e| corrupt(format!("stored trace_id {t:?} does not parse: {e}")))
+        })
+        .transpose()?;
+
     let digest: Vec<u8> = row.try_get("payload_digest").map_err(unavailable)?;
     let payload_digest: [u8; 32] = digest
         .try_into()
@@ -318,6 +389,7 @@ fn row_to_intent(row: &sqlx::postgres::PgRow) -> Result<WriteIntent, IntentError
         benchmark_id: row.try_get("benchmark_id").map_err(unavailable)?,
         payload_digest,
         payload_artifact_id: row.try_get("payload_artifact_id").map_err(unavailable)?,
+        trace_id,
         state,
     })
 }
@@ -346,19 +418,20 @@ impl TigWriteIntentRepository for PostgresIntentRepository {
 
         // ON CONFLICT DO NOTHING on the §7.3 key: a concurrent duplicate
         // loses here rather than raising, and exactly one row survives.
-        // Written out rather than built with `format!`: sqlx 0.9 requires a
-        // `'static` query string, and interpolating a column list would mean
-        // reaching for AssertSqlSafe on a statement that has no need to be
-        // dynamic at all.
-        let inserted = sqlx::query(
+        //
+        // `concat!` rather than `format!`: sqlx 0.9 wants a `'static` query
+        // string, and this stays a compile-time literal while still sharing
+        // one column list with every other statement that feeds
+        // `row_to_intent`.
+        let inserted = sqlx::query(concat!(
             "INSERT INTO pool.tig_write_intent
-                 (network, workflow_id, write_kind, generation, benchmark_id,
-                  payload_digest, payload_artifact_id)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)
-             ON CONFLICT (network, workflow_id, write_kind, generation) DO NOTHING
-             RETURNING intent_id::text AS intent_id, network, workflow_id, write_kind,
-                       generation, benchmark_id, payload_digest, payload_artifact_id, state",
-        )
+                     (network, workflow_id, write_kind, generation, benchmark_id,
+                      payload_digest, payload_artifact_id, trace_id)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                 ON CONFLICT (network, workflow_id, write_kind, generation) DO NOTHING
+                 RETURNING ",
+            intent_columns!(),
+        ))
         .bind(new.network.as_str())
         .bind(&new.workflow_id)
         .bind(new.write_kind.as_str())
@@ -366,6 +439,7 @@ impl TigWriteIntentRepository for PostgresIntentRepository {
         .bind(&new.benchmark_id)
         .bind(new.payload_digest.as_slice())
         .bind(&new.payload_artifact_id)
+        .bind(new.trace_id.map(|t| t.to_hex()))
         .fetch_optional(&self.pool)
         .await
         .map_err(unavailable)?;
@@ -423,12 +497,13 @@ impl TigWriteIntentRepository for PostgresIntentRepository {
         write_kind: WriteKind,
         generation: i32,
     ) -> Result<Option<WriteIntent>, IntentError> {
-        let row = sqlx::query(
-            "SELECT intent_id::text AS intent_id, network, workflow_id, write_kind,
-                    generation, benchmark_id, payload_digest, payload_artifact_id, state
-             FROM pool.tig_write_intent
-             WHERE network = $1 AND workflow_id = $2 AND write_kind = $3 AND generation = $4",
-        )
+        let row = sqlx::query(concat!(
+            "SELECT ",
+            intent_columns!(),
+            " FROM pool.tig_write_intent
+                  WHERE network = $1 AND workflow_id = $2
+                    AND write_kind = $3 AND generation = $4",
+        ))
         .bind(network.as_str())
         .bind(workflow_id)
         .bind(write_kind.as_str())
@@ -445,14 +520,14 @@ impl TigWriteIntentRepository for PostgresIntentRepository {
         network: Network,
         write_kind: WriteKind,
     ) -> Result<Vec<WriteIntent>, IntentError> {
-        let rows = sqlx::query(
-            "SELECT intent_id::text AS intent_id, network, workflow_id, write_kind,
-                    generation, benchmark_id, payload_digest, payload_artifact_id, state
-             FROM pool.tig_write_intent
-             WHERE network = $1 AND write_kind = $2
-               AND state IN ('PREPARED', 'OUTCOME_UNKNOWN')
-             ORDER BY created_at, intent_id",
-        )
+        let rows = sqlx::query(concat!(
+            "SELECT ",
+            intent_columns!(),
+            " FROM pool.tig_write_intent
+                  WHERE network = $1 AND write_kind = $2
+                    AND state IN ('PREPARED', 'OUTCOME_UNKNOWN')
+                  ORDER BY created_at, intent_id",
+        ))
         .bind(network.as_str())
         .bind(write_kind.as_str())
         .fetch_all(&self.pool)
@@ -472,14 +547,14 @@ impl TigWriteIntentRepository for PostgresIntentRepository {
         // silently applied. The trigger in `migrations/0003` refuses the
         // retraction too; this is what turns its exception into an answer the
         // caller can act on.
-        let row = sqlx::query(
+        let row = sqlx::query(concat!(
             "UPDATE pool.tig_write_intent
-                SET state = $2, updated_at = now()
-              WHERE intent_id = $1::uuid
-                AND state IN ('PREPARED', 'OUTCOME_UNKNOWN')
-          RETURNING intent_id::text AS intent_id, network, workflow_id, write_kind,
-                    generation, benchmark_id, payload_digest, payload_artifact_id, state",
-        )
+                    SET state = $2, updated_at = now()
+                  WHERE intent_id = $1::uuid
+                    AND state IN ('PREPARED', 'OUTCOME_UNKNOWN')
+              RETURNING ",
+            intent_columns!(),
+        ))
         .bind(intent_id)
         .bind(outcome.as_state().as_str())
         .fetch_optional(&self.pool)
@@ -532,11 +607,11 @@ impl TigWriteIntentRepository for PostgresIntentRepository {
 
 impl PostgresIntentRepository {
     async fn find_by_id(&self, intent_id: &str) -> Result<Option<WriteIntent>, IntentError> {
-        let row = sqlx::query(
-            "SELECT intent_id::text AS intent_id, network, workflow_id, write_kind,
-                    generation, benchmark_id, payload_digest, payload_artifact_id, state
-             FROM pool.tig_write_intent WHERE intent_id = $1::uuid",
-        )
+        let row = sqlx::query(concat!(
+            "SELECT ",
+            intent_columns!(),
+            " FROM pool.tig_write_intent WHERE intent_id = $1::uuid",
+        ))
         .bind(intent_id)
         .fetch_optional(&self.pool)
         .await

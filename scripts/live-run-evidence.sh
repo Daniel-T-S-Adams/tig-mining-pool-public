@@ -77,11 +77,20 @@ cases = {
     "hyper-as-string": [dict(precommit("bench-1"),
                              details=dict(precommit("bench-1")["details"],
                                           hyperparameters={"exploration_level": "2"}))],
-    # `candidate_of` calls a `details` without the numbers a shape error
-    # rather than a miss. A miss would read as "the write is not at TIG",
-    # which is the direction that licenses a resend.
+    # `candidate_of` calls a record it cannot read a shape error rather than
+    # a miss — "a record that cannot be parsed might be the pool's own". A
+    # miss would read as "the write is not at TIG", which is the direction
+    # that licenses a resend. One case per half of the rule: a missing number
+    # and a missing string.
     "no-bundles": [dict(precommit("bench-1"),
                         details={"compute_type": "aws_t4g", "fuel_budget": FUEL})],
+    "no-track": [dict(precommit("bench-1"),
+                      settings={"player_id": player, "block_id": "b1",
+                                "challenge_id": "c001", "algorithm_id": "c001_a001"})],
+    "no-compute": [dict(precommit("bench-1"),
+                        details={"num_bundles": 4, "fuel_budget": FUEL,
+                                 "hyperparameters": {}})],
+    "no-id": [{k: v for k, v in precommit("bench-1").items() if k != "benchmark_id"}],
 }
 for name, precommits in cases.items():
     with open(f"{scratch}/{name}.json", "w") as f:
@@ -112,26 +121,32 @@ MAKE
     ! python3 "$scan" "$p" "$scratch/duplicate.json" >/dev/null \
         || fail "a duplicate tuple must fail K4"
 
-    # The single-tuple mode. The count is the verdict `live-crash-test.sh`
-    # branches on, so each case names the count it must produce.
+    # The single-tuple mode. The two counts are the verdict
+    # `live-crash-test.sh` branches on — confirmed matches, then unconfirmed
+    # ones, which §7 and §10 keep distinct from absence — so each case names
+    # the pair it must produce.
     counted() {
         python3 "$scan" --target "$p" "$scratch/$1.json" "$scratch/decision.json" \
-            | cut -d' ' -f1
+            | cut -d' ' -f1,2
     }
-    for case in one:1 duplicate:2 hyper-as-string:1 unconfirmed:0 other-player:0 \
-                wrong-track:0 wrong-compute:0 wrong-bundles:0 wrong-hyper:0; do
+    for case in one:"1 0" duplicate:"2 0" hyper-as-string:"1 0" unconfirmed:"0 1" \
+                other-player:"0 0" wrong-track:"0 0" wrong-compute:"0 0" \
+                wrong-bundles:"0 0" wrong-hyper:"0 0"; do
         got="$(counted "${case%%:*}")" || fail "${case%%:*} could not be scanned"
         [[ "$got" == "${case##*:}" ]] \
-            || fail "${case%%:*} counted $got for the target tuple, expected ${case##*:}"
+            || fail "${case%%:*} counted [$got] for the target tuple, expected [${case##*:}]"
     done
-    status=0
-    python3 "$scan" --target "$p" "$scratch/no-bundles.json" "$scratch/decision.json" \
-        >/dev/null 2>&1 || status=$?
-    [[ "$status" == "2" ]] \
-        || fail "a details without num_bundles must be a shape error (exit 2), got $status"
+    for case in no-bundles no-track no-compute no-id; do
+        status=0
+        python3 "$scan" --target "$p" "$scratch/$case.json" "$scratch/decision.json" \
+            >/dev/null 2>&1 || status=$?
+        [[ "$status" == "2" ]] \
+            || fail "$case must be a shape error (exit 2), got $status"
+    done
 
     echo "live-run-evidence selftest: detects a duplicate §10 tuple, passes four that" \
-         "are not, and counts one decision's tuple across nine cases"
+         "are not, counts one decision's tuple across nine cases, and refuses four" \
+         "windows it cannot read"
     exit 0
 fi
 

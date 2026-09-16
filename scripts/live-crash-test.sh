@@ -33,7 +33,14 @@ root="$(cd "$(dirname "$0")/.." && pwd)"
 : "${POOL_PG_CONTAINER:=pool-pg}"
 : "${GATEWAY_BIN:=$root/target/debug/tig-gateway}"
 
-db_name="$(grep -E '^name *=' "$config" | head -1 | sed -E 's/^[^=]*= *"?([^"]*)"?.*/\1/')"
+# One extractor for every config value this script reads, the same
+# expression `live-run-evidence.sh` pins. Two hand-written copies of it lost
+# the `\1` and read as empty, which sent every live read to a URL with no host
+# and ended every run in "INCOMPLETE: could not read the window" — a script
+# that could never reach a verdict.
+value() { grep -E "^${2} *=" "$1" | head -1 | sed -E 's/^[^=]*= *"?([^"]*)"?.*/\1/'; }
+
+db_name="$(value "$config" name)"
 psql() { docker exec -i "$POOL_PG_CONTAINER" psql -U postgres -d "$db_name" -tAc "$1"; }
 
 attempts_now() { psql "SELECT count(*) FROM pool.tig_write_attempt" | tr -d '[:space:]'; }
@@ -239,10 +246,28 @@ fi
 # credit the pool for reasoning it never did.
 #
 # The observable is its own log, and the test is a *decision*, not the id
-# appearing somewhere. `Acted::Failed` is "the intent could not be evaluated"
-# (`drive.rs`), and it is `Notability::Operator`, so it is logged at warn with
-# this intent's id like a genuine stop — which is precisely the case this gate
-# exists to exclude.
+# appearing somewhere. Three `Acted` values carry this intent's id without the
+# search having reached a conclusion about it:
+#
+# - `Failed` — "the intent could not be evaluated", and `Notability::Operator`,
+#   so it is logged at warn exactly like a genuine stop;
+# - `LeaseHeldElsewhere` — returned before `decide()` runs. This matters here
+#   more than anywhere: the SIGKILLed gateway left its `PrecommitTransmit`
+#   lease held, so the restarted one logs this for our intent on every pass
+#   until the lease expires;
+# - `WriteBlocked` — the decision was `Transmit` and only the write gate
+#   stopped it, which is the opposite of refusing to guess.
+#
+# So this takes the four that do mean a conclusion, and treats anything else as
+# INCOMPLETE. A variant added later fails closed — no evidence — rather than
+# quietly counting as one.
+#
+# The two conclusions this test can end on are visible at the dev config's
+# `info`: a `StopForOperator` decision is `Notability::Operator` (warn) and
+# `AttemptSettled` is `Effect` (info). `AwaitingSender` is `Routine` (debug),
+# so a run whose only outcome was "the sender may still be waiting" reads
+# INCOMPLETE below debug — again the fail-closed direction, and the answer is
+# to re-run or to raise `telemetry.level`.
 decided_this_intent() {
     python3 - "$restart_log" "$crashed_intent" <<'SCAN'
 import json, sys
@@ -267,7 +292,12 @@ for line in lines:
         continue
     if fields.get("intent_id") != intent:
         continue
-    if str(fields.get("acted", "")).startswith("Failed"):
+    # `decision` is `Option<ClaimDecision>` rendered by `Debug`, so an
+    # outcome from before the decision renders "None".
+    if str(fields.get("decision", "None")) == "None":
+        continue
+    acted = str(fields.get("acted", ""))
+    if not acted.startswith(("Nothing", "AttemptSettled", "AwaitingSender", "Transmitted")):
         continue
     sys.exit(0)
 sys.exit(1)
@@ -357,8 +387,17 @@ print("  tuple: block=%s challenge=%s algorithm=%s compute=%s tracks=%d offered"
     d["anchor_block_id"], d["selected_challenge"], d["selected_algorithm"],
     d["compute_type"], len(d["track_settings"])))' "$decision_file"
 
-base_url="$(grep -E '^base_url *=' "$config" | head -1 | sed -E 's/^[^=]*= *"?([^"]*)"?.*//')"
-player="$(grep -E '^player_id *=' "$config" | head -1 | sed -E 's/^[^=]*= *"?([^"]*)"?.*//')"
+base_url="$(value "$config" base_url)"
+player="$(value "$config" player_id)"
+# Named explicitly, because an empty one reads as a failed window fetch — the
+# same INCOMPLETE for "the endpoint is unreachable" and "this script cannot
+# find the endpoint in the config", which are not the same problem.
+if [[ -z "$base_url" || -z "$player" ]]; then
+    echo "INCOMPLETE: could not read base_url and player_id from $config." >&2
+    echo "Both are read from the top level; a nested or quoted-differently key" >&2
+    echo "would come back empty and every TIG read would then fail." >&2
+    exit 2
+fi
 window_file="$(mktemp)"
 got_window=no
 for _ in 1 2 3 4 5; do
@@ -388,8 +427,12 @@ if [[ "$scan_status" != "0" ]]; then
     echo "INCOMPLETE: the tuple scan could not read the window (exit $scan_status)." >&2
     exit 2
 fi
-count="${found%% *}"
-echo "  TIG holds $count confirmed precommit(s) for it"
+read -r confirmed unconfirmed _ids <<<"$found"
+echo "  TIG holds $confirmed confirmed and $unconfirmed unconfirmed precommit(s) for it"
+# `reconcile_precommit` counts matches "across confirmed AND unconfirmed"
+# before classifying, because two records matching what the pool submitted
+# means it cannot tell which is its own.
+matched=$((confirmed + unconfirmed))
 
 logs="gateway logs: $log (crashed run), $restart_log (restart)"
 
@@ -408,11 +451,11 @@ if [[ -n "$reconciled_outcome" ]]; then
             exit 2
             ;;
     esac
-    if [[ "$count" == "$expected" ]]; then
+    if [[ "$matched" == "$expected" && "$confirmed" == "$expected" ]]; then
         echo
         echo "recovered by finding the write: §10's search settled the attempt"
         echo "$reconciled_outcome from a confirmed read, and TIG holds exactly"
-        echo "$count precommit(s) for the tuple."
+        echo "$expected precommit(s) for the tuple."
         if [[ "$reconciled_outcome" == "ACCEPTED" ]]; then
             echo "That is G2's 'exactly one where a write reached TIG', and it is K4's"
             echo "scan: one confirmed entry for the reconciliation tuple, no duplicate."
@@ -425,10 +468,12 @@ if [[ -n "$reconciled_outcome" ]]; then
         exit 0
     fi
     echo >&2
-    echo "FAIL: the attempt settled $reconciled_outcome but TIG holds $count" >&2
-    echo "precommit(s) for the tuple, not $expected. More than one is the duplicate" >&2
-    echo "§10 and invariant 14 exist to prevent; fewer means the search settled" >&2
-    echo "against nothing. $logs" >&2
+    echo "FAIL: the attempt settled $reconciled_outcome but TIG holds $confirmed" >&2
+    echo "confirmed and $unconfirmed unconfirmed precommit(s) for the tuple, not" >&2
+    echo "$expected confirmed and nothing else. More than one match is the" >&2
+    echo "duplicate §10 and invariant 14 exist to prevent; fewer, or one that has" >&2
+    echo "not confirmed, means the search settled against something the window" >&2
+    echo "does not hold. $logs" >&2
     exit 1
 fi
 
@@ -454,7 +499,21 @@ if [[ "$intent_state" == "CONFIRMED" ]]; then
     exit 1
 fi
 
-if [[ "$count" == "0" ]]; then
+# An unconfirmed match is `Reconciliation::PendingConfirmation`, which
+# `reconcile.rs` keeps deliberately distinct from `NoCandidate` — a precommit
+# that reached TIG and has not confirmed yet is not evidence that nothing was
+# sent. Printing "the write never reached TIG" over one would be an unverified
+# claim about what TIG holds, and the collapse §7 and §10 forbid acting on.
+if [[ "$unconfirmed" != "0" ]]; then
+    echo >&2
+    echo "INCOMPLETE: $unconfirmed precommit(s) match the tuple but have not" >&2
+    echo "confirmed. That is PendingConfirmation, not absence, so this run is not" >&2
+    echo "evidence either way. Re-run the scan once they confirm — a precommit" >&2
+    echo "confirms a block or two after it lands. $logs" >&2
+    exit 2
+fi
+
+if [[ "$confirmed" == "0" ]]; then
     echo
     echo "recovered by refusing to guess: the write never reached TIG, the pool"
     echo "stopped for an operator rather than resending, and no duplicate exists."
@@ -472,7 +531,7 @@ if [[ "$count" == "0" ]]; then
 fi
 
 echo >&2
-echo "FAIL: the write is at TIG and the pool did not find it." >&2
+echo "FAIL: the write is at TIG ($confirmed confirmed) and the pool did not find it." >&2
 echo "§10's search is what settles an ambiguous attempt from confirmed reads;" >&2
 echo "leaving it unresolved holds the serialized lane shut behind a write that" >&2
 echo "is plainly there. $logs" >&2

@@ -7,10 +7,16 @@ Two modes, one detector:
       and fails if any tuple holds more than one.
 
   tuple-scan.py --target <player> <window.json> <decision.json>
-      Counts the confirmed precommits that are **one particular decision's**
-      write, for G2's live crash test. Prints "<count> <benchmark_id>..." and
-      leaves the verdict to the caller, because both counts are meaningful
-      there: one where the write reached TIG, zero where it did not.
+      Counts the precommits that are **one particular decision's** write, for
+      G2's live crash test. Prints "<confirmed> <unconfirmed> <benchmark_id>..."
+      and leaves the verdict to the caller, because both counts are meaningful
+      there: one confirmed where the write reached TIG, none at all where it did
+      not, and an unconfirmed match is neither — it is a write that arrived and
+      has not confirmed yet, which §7 and §10 keep distinct from absence.
+
+      Either mode exits 2 on a record it cannot read, which is what
+      `candidate_of` does with one: a record that cannot be parsed might be the
+      pool's own.
 
 Slice-1 criterion K4: after a crash and reconciliation, a `get-benchmarks` scan
 of the pool's precommits must show **exactly one** confirmed entry per tuple. A
@@ -27,19 +33,68 @@ import json
 import sys
 
 
-def confirmed_for_player(body, player):
-    """§7's confirmation test, and whose precommit it is.
+REQUIRED_SETTINGS = ("player_id", "block_id", "challenge_id", "algorithm_id", "track_id")
 
-    `state.block_confirmed` is the sole lifecycle authority: an entry can be
-    present in the window and unconfirmed, and counting one as a hit would
-    call an unconfirmed write "at TIG" — the reading §10 forbids acting on.
+
+def candidate_of(index, p):
+    """`candidate_of` (crates/pool-workflow/src/reconcile.rs), in Python.
+
+    Every record in the window is read, and one that cannot be read is a shape
+    error rather than a miss — `reconcile_precommit` calls `candidate_of` on
+    all of them before matching any, "precisely because a record that cannot be
+    parsed might be the pool's own". A miss would read as "the write is not at
+    TIG", the direction that licenses a resend.
     """
-    for p in body.get("precommits", []):
-        if p.get("state", {}).get("block_confirmed") is None:
-            continue
-        if p.get("settings", {}).get("player_id", "").lower() != player.lower():
-            continue
-        yield p
+    def shape(reason):
+        return ValueError(f"precommit {index}: {reason}")
+
+    if not isinstance(p.get("benchmark_id"), str):
+        raise shape("missing precommit.benchmark_id")
+    settings, details = p.get("settings"), p.get("details")
+    if not isinstance(settings, dict):
+        raise shape("missing settings")
+    if not isinstance(details, dict):
+        raise shape("missing details")
+    for key in REQUIRED_SETTINGS:
+        if not isinstance(settings.get(key), str):
+            raise shape(f"missing settings.{key}")
+    if not isinstance(details.get("compute_type"), str):
+        raise shape("missing details.compute_type")
+    for key in ("num_bundles", "fuel_budget"):
+        value = details.get(key)
+        if not isinstance(value, int) or isinstance(value, bool):
+            raise shape(f"missing or non-numeric details.{key}")
+
+    return {
+        "benchmark_id": p["benchmark_id"],
+        "player_id": settings["player_id"],
+        "block_id": settings["block_id"],
+        "challenge_id": settings["challenge_id"],
+        "algorithm_id": settings["algorithm_id"],
+        "track_id": settings["track_id"],
+        "compute_type": details["compute_type"],
+        "num_bundles": details["num_bundles"],
+        "fuel_budget": details["fuel_budget"],
+        "hyperparameters": details.get("hyperparameters") or {},
+        # §7's confirmation test: `state.block_confirmed` is the sole
+        # lifecycle authority. An entry can be present in the window and
+        # unconfirmed, which is a different fact from being absent.
+        "confirmed": p.get("state", {}).get("block_confirmed") is not None,
+    }
+
+
+def for_player(body, player):
+    """Every readable record in the window that is this player's.
+
+    Case-insensitive, unlike `Candidate::matches`, because the pool's
+    configured id and TIG's rendering of it are both hex and need not agree on
+    case; they do on testnet today, and a scan that silently matched nothing
+    because of case would read as "no write at TIG".
+    """
+    for index, p in enumerate(body.get("precommits", [])):
+        candidate = candidate_of(index, p)
+        if candidate["player_id"].lower() == player.lower():
+            yield candidate
 
 
 def rendered(hyperparameters):
@@ -55,7 +110,7 @@ def rendered(hyperparameters):
     }
 
 
-def matches(p, decision):
+def matches(c, decision):
     """`Candidate::matches` (crates/pool-workflow/src/reconcile.rs), in Python.
 
     The whole §10 tuple — block, challenge, algorithm, compute type and the
@@ -68,35 +123,39 @@ def matches(p, decision):
     tracks the pool offered AND that what it confirmed for that track is what
     the pool submitted for it.
     """
-    s, d = p.get("settings", {}), p.get("details", {})
-    if (s.get("block_id"), s.get("challenge_id"), s.get("algorithm_id")) != (
+    if (c["block_id"], c["challenge_id"], c["algorithm_id"], c["compute_type"]) != (
         decision["anchor_block_id"],
         decision["selected_challenge"],
         decision["selected_algorithm"],
+        decision["compute_type"],
     ):
         return False
-    if d.get("compute_type") != decision["compute_type"]:
-        return False
-    offered = decision["track_settings"].get(s.get("track_id"))
+    offered = decision["track_settings"].get(c["track_id"])
     if offered is None:
         return False
-    for key in ("num_bundles", "fuel_budget"):
-        if not isinstance(d.get(key), int) or isinstance(d.get(key), bool):
-            # `candidate_of` calls a non-numeric `details.<key>` a shape error
-            # rather than a miss, and so does this: a miss would read as "the
-            # write is not at TIG", which is the direction that licenses a
-            # resend.
-            raise ValueError(
-                f"{p.get('benchmark_id')}: details.{key} is missing or not a number"
-            )
-        if offered.get(key) != d[key]:
-            return False
-    return rendered(offered.get("hyperparameters")) == rendered(d.get("hyperparameters"))
+    if (offered.get("num_bundles"), offered.get("fuel_budget")) != (
+        c["num_bundles"],
+        c["fuel_budget"],
+    ):
+        return False
+    return rendered(offered.get("hyperparameters")) == rendered(c["hyperparameters"])
 
 
 def scan_target(player, body, decision):
-    hits = [p["benchmark_id"] for p in confirmed_for_player(body, player) if matches(p, decision)]
-    print(len(hits), *hits)
+    """Count this decision's write, confirmed and unconfirmed separately.
+
+    Both counts, because `reconcile_precommit` keeps `NoCandidate` and
+    `PendingConfirmation` deliberately distinct: a precommit that reached TIG
+    and has not confirmed yet is not evidence that nothing was sent, and
+    collapsing the two is the reading §7 and §10 forbid acting on. The caller
+    reads "0 0" as "nothing is there" and "0 1" as "something is, but it has
+    not confirmed".
+    """
+    confirmed, unconfirmed = [], []
+    for c in for_player(body, player):
+        if matches(c, decision):
+            (confirmed if c["confirmed"] else unconfirmed).append(c["benchmark_id"])
+    print(len(confirmed), len(unconfirmed), *(confirmed + unconfirmed))
     return 0
 
 
@@ -106,15 +165,16 @@ def scan_duplicates(player, body):
     # construction on those, and matching on them would turn a real duplicate
     # into two misses.
     by_tuple = collections.defaultdict(list)
-    for p in confirmed_for_player(body, player):
-        s = p.get("settings", {})
+    for c in for_player(body, player):
+        if not c["confirmed"]:
+            continue
         by_tuple[(
-            s.get("block_id"),
-            s.get("challenge_id"),
-            s.get("algorithm_id"),
-            s.get("track_id"),
-            p.get("details", {}).get("compute_type"),
-        )].append(p["benchmark_id"])
+            c["block_id"],
+            c["challenge_id"],
+            c["algorithm_id"],
+            c["track_id"],
+            c["compute_type"],
+        )].append(c["benchmark_id"])
 
     if not by_tuple:
         print("no confirmed precommit for this player in the window")

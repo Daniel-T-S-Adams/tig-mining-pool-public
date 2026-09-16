@@ -31,6 +31,67 @@ fn stored_count(meta: &ActiveBenchmarkMeta, field: &str, value: u64) -> Result<i
     })
 }
 
+/// One row, as the facts §5.2 retained.
+///
+/// A row that cannot be read is [`StoreError::Corrupt`], never a default: the
+/// values here are denominators and source settings, and a zero substituted
+/// for an unreadable count would change a decision rather than fail one.
+///
+/// Those paths are unreachable through the schema — `migrations/0014`
+/// constrains the counts, the heights and the quality list, and the controller
+/// cannot write the table at all. They are kept because an `i64` column has to
+/// become a `u64` field somehow and reporting is the right answer if it ever
+/// cannot; the schema's half of the guarantee is asserted by
+/// `the_schema_refuses_every_shape_load_would_have_to_call_corrupt`, so a
+/// later migration cannot drop it silently.
+fn row_to_meta(row: &sqlx::postgres::PgRow) -> Result<ActiveBenchmarkMeta, StoreError> {
+    use sqlx::Row;
+
+    let benchmark_id: String = row.try_get("benchmark_id").map_err(unavailable)?;
+    let corrupt = |reason: String| StoreError::Corrupt {
+        benchmark_id: benchmark_id.clone(),
+        reason,
+    };
+    let count = |field: &'static str, v: i64| {
+        u64::try_from(v).map_err(|_| corrupt(format!("{field} {v} is negative")))
+    };
+
+    let num_bundles: i64 = row.try_get("num_bundles").map_err(unavailable)?;
+    let fuel_budget: Option<i64> = row.try_get("fuel_budget").map_err(unavailable)?;
+    let precommit_block_confirmed: i64 = row
+        .try_get("precommit_block_confirmed")
+        .map_err(unavailable)?;
+    let num_active_bundles: Option<i64> = row.try_get("num_active_bundles").map_err(unavailable)?;
+    let benchmark_block_confirmed: i64 = row
+        .try_get("benchmark_block_confirmed")
+        .map_err(unavailable)?;
+    let qualities: serde_json::Value = row
+        .try_get("average_quality_by_bundle")
+        .map_err(unavailable)?;
+
+    Ok(ActiveBenchmarkMeta {
+        player_id: row.try_get("player_id").map_err(unavailable)?,
+        challenge_id: row.try_get("challenge_id").map_err(unavailable)?,
+        algorithm_id: row.try_get("algorithm_id").map_err(unavailable)?,
+        track_id: row.try_get("track_id").map_err(unavailable)?,
+        compute_type: row.try_get("compute_type").map_err(unavailable)?,
+        num_bundles: count("num_bundles", num_bundles)?,
+        fuel_budget: fuel_budget.map(|v| count("fuel_budget", v)).transpose()?,
+        hyperparameters: row.try_get("hyperparameters").map_err(unavailable)?,
+        precommit_block_confirmed: count("precommit_block_confirmed", precommit_block_confirmed)?,
+        num_active_bundles: num_active_bundles
+            .map(|v| count("num_active_bundles", v))
+            .transpose()?,
+        average_quality_by_bundle: qualities
+            .as_array()
+            .cloned()
+            .ok_or_else(|| corrupt("average_quality_by_bundle is not a list".to_string()))?,
+        stopped: row.try_get("stopped").map_err(unavailable)?,
+        benchmark_block_confirmed: count("benchmark_block_confirmed", benchmark_block_confirmed)?,
+        benchmark_id,
+    })
+}
+
 impl ActiveBenchmarkStore for PostgresActiveBenchmarkStore {
     async fn retained(
         &self,
@@ -47,6 +108,28 @@ impl ActiveBenchmarkStore for PostgresActiveBenchmarkStore {
         .await
         .map_err(unavailable)?;
         Ok(found.into_iter().collect())
+    }
+
+    async fn load(
+        &self,
+        network: Network,
+        ids: &[String],
+    ) -> Result<Vec<ActiveBenchmarkMeta>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT benchmark_id, player_id, challenge_id, algorithm_id, track_id,
+                    compute_type, num_bundles, fuel_budget, hyperparameters,
+                    precommit_block_confirmed, num_active_bundles,
+                    average_quality_by_bundle, stopped, benchmark_block_confirmed
+               FROM pool.active_benchmark_meta
+              WHERE network = $1 AND benchmark_id = ANY($2)
+              ORDER BY benchmark_id",
+        )
+        .bind(network.as_str())
+        .bind(ids)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(unavailable)?;
+        rows.iter().map(row_to_meta).collect()
     }
 
     async fn retain(

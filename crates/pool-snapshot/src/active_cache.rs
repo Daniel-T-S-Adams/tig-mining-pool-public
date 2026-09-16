@@ -188,6 +188,20 @@ pub trait ActiveBenchmarkStore {
         ids: &[String],
     ) -> impl Future<Output = Result<BTreeSet<String>, StoreError>> + Send;
 
+    /// The retained facts for `ids`, for the rules that read them.
+    ///
+    /// Separate from [`Self::retained`] because the two answer different
+    /// questions: coverage decides whether a snapshot may reach a decision at
+    /// all, and this is what the decision then divides by (`mining_system.md`
+    /// §6.3, §6.5 and §6.6). An id in `ids` with no retained row is simply
+    /// absent from the result — a caller that has checked coverage will not
+    /// see one, and a caller that has not must not be handed a placeholder.
+    fn load(
+        &self,
+        network: Network,
+        ids: &[String],
+    ) -> impl Future<Output = Result<Vec<ActiveBenchmarkMeta>, StoreError>> + Send;
+
     /// Retain one benchmark's facts, recording the height they were read
     /// at. Idempotent: a second insert of the same id is a no-op, since the
     /// facts are immutable.

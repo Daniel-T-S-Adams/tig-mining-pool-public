@@ -149,6 +149,15 @@ impl ActiveBenchmarkStore for Memory {
             .collect())
     }
 
+    async fn load(
+        &self,
+        _: Network,
+        ids: &[String],
+    ) -> Result<Vec<ActiveBenchmarkMeta>, StoreError> {
+        let rows = self.rows.lock().unwrap();
+        Ok(ids.iter().filter_map(|id| rows.get(id).cloned()).collect())
+    }
+
     async fn retain(
         &self,
         _: Network,
@@ -515,4 +524,125 @@ async fn an_active_benchmark_on_the_stand_in_is_retained_and_the_snapshot_become
     snapshot.active_cache_ready = fed.covers_active_set();
     let usable = snapshots.persist(NET, snapshot).await.unwrap();
     assert!(usable.for_decision().is_ok());
+}
+
+#[tokio::test]
+async fn a_retained_fact_reads_back_whole() {
+    // §6.3's denominators, §6.5's rates and §6.6's source settings are all
+    // read through `load`, so a field that did not survive the round trip
+    // would change a decision rather than fail one. The `jsonb` columns and
+    // the nullable counts are named explicitly because those are the ones a
+    // column-to-field mapping gets wrong quietly.
+    let Some(db) = TempDb::migrated("active_cache_load").await else {
+        return;
+    };
+    let controller = db.pool_as("pool_controller").await;
+    let store = PostgresActiveBenchmarkStore::new(controller.clone());
+    let meta = retain("bench_net_0001", &fixture_body()).unwrap();
+    store.retain(NET, &meta, 100_080).await.unwrap();
+
+    let loaded = store
+        .load(NET, &ids(&["bench_net_0001", "never_retained"]))
+        .await
+        .unwrap();
+    assert_eq!(
+        loaded.len(),
+        1,
+        "an id with no row is absent, not defaulted"
+    );
+    assert_eq!(
+        loaded[0], meta,
+        "every field, not only the ones a test names"
+    );
+
+    // Named individually too: `assert_eq!` on the struct passes if a future
+    // field is added and dropped by both sides of the mapping at once.
+    assert_eq!(loaded[0].hyperparameters, meta.hyperparameters);
+    assert_eq!(
+        loaded[0].average_quality_by_bundle,
+        meta.average_quality_by_bundle
+    );
+    assert_eq!(loaded[0].fuel_budget, meta.fuel_budget);
+    assert_eq!(loaded[0].num_active_bundles, meta.num_active_bundles);
+    assert_eq!(loaded[0].compute_type, meta.compute_type);
+
+    assert!(
+        store.load(NET, &[]).await.unwrap().is_empty(),
+        "no ids is no rows, not every row"
+    );
+    assert!(
+        store
+            .load(Network::Mainnet, &ids(&["bench_net_0001"]))
+            .await
+            .unwrap()
+            .is_empty(),
+        "per network, like `retained`"
+    );
+}
+
+#[tokio::test]
+async fn the_schema_refuses_every_shape_load_would_have_to_call_corrupt() {
+    // `load`'s `StoreError::Corrupt` paths — a negative count, a quality list
+    // that is not a list — turned out to be unreachable, and this is why: the
+    // table constrains each of them, so the value never reaches the mapping.
+    //
+    // Asserted rather than assumed. The mapping reports instead of panicking
+    // or defaulting because the alternative to an error there is a decision
+    // made from a value the pool does not have — a zero count lowers §6.5's
+    // divisor, an empty quality list makes §6.6 find no source — but the
+    // guarantee that it cannot happen belongs to the schema, and a schema
+    // guarantee no test names is one a later migration can drop.
+    //
+    // Planted as superuser: the controller cannot write these columns at all,
+    // which the immutability test above asserts.
+    let Some(db) = TempDb::migrated("active_cache_corrupt").await else {
+        return;
+    };
+    let controller = db.pool_as("pool_controller").await;
+    let store = PostgresActiveBenchmarkStore::new(controller.clone());
+    let meta = retain("bench_net_0001", &fixture_body()).unwrap();
+    store.retain(NET, &meta, 100_080).await.unwrap();
+
+    let superuser = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with(db.as_superuser())
+        .await
+        .expect("the superuser connects");
+
+    for (sql, constraint) in [
+        (
+            "UPDATE pool.active_benchmark_meta SET num_active_bundles = -1",
+            "active_benchmark_meta_counts_non_negative",
+        ),
+        (
+            "UPDATE pool.active_benchmark_meta SET num_bundles = -1",
+            "active_benchmark_meta_counts_non_negative",
+        ),
+        (
+            "UPDATE pool.active_benchmark_meta SET benchmark_block_confirmed = -1",
+            "active_benchmark_meta_heights_non_negative",
+        ),
+        (
+            "UPDATE pool.active_benchmark_meta SET average_quality_by_bundle = '{}'::jsonb",
+            "active_benchmark_meta_qualities_are_a_list",
+        ),
+    ] {
+        let err = sqlx::query(sqlx::AssertSqlSafe(sql.to_string()))
+            .execute(&superuser)
+            .await
+            .expect_err("the schema refuses it");
+        let db_err = match &err {
+            sqlx::Error::Database(e) => e,
+            other => panic!("expected a constraint violation, got {other}"),
+        };
+        assert_eq!(
+            db_err.constraint(),
+            Some(constraint),
+            "{sql} must be refused by {constraint}, got {err}"
+        );
+    }
+
+    // And the row is still readable, because none of that landed.
+    let loaded = store.load(NET, &ids(&["bench_net_0001"])).await.unwrap();
+    assert_eq!(loaded, vec![meta]);
 }

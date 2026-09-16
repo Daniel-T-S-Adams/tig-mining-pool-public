@@ -207,6 +207,7 @@ async fn bind_one(
         // assigns, so it is not in `settings` and has to be carried across
         // explicitly — the same split `block_started` sits on.
         num_nonces: entry["details"]["num_nonces"].as_i64(),
+        num_bundles: None,
         track_id: entry["settings"]["track_id"]
             .as_str()
             .unwrap_or_default()

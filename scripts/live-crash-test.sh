@@ -277,6 +277,7 @@ try:
     lines = open(path, encoding="utf-8", errors="replace")
 except OSError:
     sys.exit(1)
+conclusion = None
 for line in lines:
     line = line.strip()
     if not line.startswith("{"):
@@ -296,15 +297,29 @@ for line in lines:
     # outcome from before the decision renders "None".
     if str(fields.get("decision", "None")) == "None":
         continue
+    # And the decision itself must be one of the search's conclusions.
+    # `Skip` is "nothing owed" — reached without searching — and it pairs with
+    # `Acted::Nothing` exactly as a stop does.
+    decision = str(fields.get("decision", "None"))
+    if not decision.startswith((
+        "Some(Transmit",
+        "Some(AlreadyConfirmed",
+        "Some(AwaitConfirmation",
+        "Some(StopForOperator",
+    )):
+        continue
     acted = str(fields.get("acted", ""))
     if not acted.startswith(("Nothing", "AttemptSettled", "AwaitingSender", "Transmitted")):
         continue
-    sys.exit(0)
-sys.exit(1)
+    conclusion = acted
+if conclusion is None:
+    sys.exit(1)
+print(conclusion)
 SCAN
 }
 
-if [[ -z "$reconciled_outcome" ]] && ! decided_this_intent; then
+conclusion=""
+if ! conclusion="$(decided_this_intent)" && [[ -z "$reconciled_outcome" ]]; then
     echo "INCOMPLETE: no pass of the restarted gateway decided intent $crashed_intent." >&2
     echo "§10's search did not run — or ran and failed — so the state below is the" >&2
     echo "crash's, not a recovery's. Gateway log: $restart_log" >&2
@@ -324,11 +339,18 @@ fi
 # as a whole is the wrong scope in the other direction: once the crashed
 # attempt settles, §10's lane reopens and a write for some *other* workflow is
 # ordinary progress.
+# Bounded to this run. A workflow can carry earlier attempts that have nothing
+# to do with the restart — `send_or_release` records a REJECTED one before the
+# lane ever opened — and counting those would attribute a §10 resend to a
+# restart that made none.
 resends="$(psql "SELECT count(*) FROM pool.tig_write_attempt a
                    JOIN pool.tig_write_intent i ON i.intent_id = a.intent_id
                   WHERE i.network = '$crashed_network'
                     AND i.workflow_id = '$crashed_workflow'
-                    AND a.attempt_id <> '$crashed_attempt'::uuid" | tr -d '[:space:]')"
+                    AND a.attempt_id <> '$crashed_attempt'::uuid
+                    AND a.started_at >= (SELECT started_at FROM pool.tig_write_attempt
+                                          WHERE attempt_id = '$crashed_attempt'::uuid)" \
+             | tr -d '[:space:]')"
 if [[ "$resends" != "0" ]]; then
     echo >&2
     echo "FAIL: the restarted gateway wrote $resends more attempt(s) for workflow" >&2
@@ -400,13 +422,29 @@ if [[ -z "$base_url" || -z "$player" ]]; then
 fi
 window_file="$(mktemp)"
 got_window=no
+# `-f`, so a non-2xx response is a failed read and not a body. Production's
+# `tig-client` gates on `status().is_success()` before treating a body as a
+# read, and without it an error page that happens to parse as JSON reads as an
+# empty window — "could not read" collapsing into "absent", which is the one
+# reading §7 and §10 forbid acting on, and it would print "the write never
+# reached TIG" over a window nobody read.
+#
+# The parsed body must also carry a `precommits` array, for the same reason: a
+# JSON document without it is a document this script cannot read, not a window
+# with nothing in it.
 for _ in 1 2 3 4 5; do
-    block_id="$(curl -sS "$base_url/get-block" \
+    block_id="$(curl -fsS "$base_url/get-block" \
                 | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d.get("block",d)["id"])' \
                 2>/dev/null)" || true
     [[ -z "$block_id" ]] && { sleep 3; continue; }
-    curl -sS "$base_url/get-benchmarks?block_id=$block_id&player_id=$player" > "$window_file" || true
-    if python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$window_file" 2>/dev/null; then
+    curl -fsS "$base_url/get-benchmarks?block_id=$block_id&player_id=$player" > "$window_file" || true
+    if python3 -c '
+import json, sys
+try:
+    body = json.load(open(sys.argv[1]))
+except (OSError, ValueError):
+    sys.exit(1)
+sys.exit(0 if isinstance(body.get("precommits"), list) else 1)' "$window_file" 2>/dev/null; then
         got_window=yes
         break
     fi
@@ -528,6 +566,16 @@ if [[ "$confirmed" == "0" ]]; then
     echo
     echo "$logs"
     exit 0
+fi
+
+if [[ "$conclusion" == AwaitingSender* ]]; then
+    echo >&2
+    echo "INCOMPLETE: §10's search found the write, and deferred settling it —" >&2
+    echo "the attempt is younger than a write's call timeout, so the sender may" >&2
+    echo "still be about to record the response itself. That is a deferral, not a" >&2
+    echo "failure to find. Re-run once the attempt has aged past the timeout." >&2
+    echo "$logs" >&2
+    exit 2
 fi
 
 echo >&2

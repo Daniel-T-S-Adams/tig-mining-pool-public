@@ -91,6 +91,10 @@ cases = {
                         details={"num_bundles": 4, "fuel_budget": FUEL,
                                  "hyperparameters": {}})],
     "no-id": [{k: v for k, v in precommit("bench-1").items() if k != "benchmark_id"}],
+    "bad-hyper": [dict(precommit("bench-1"),
+                       details=dict(precommit("bench-1")["details"],
+                                    hyperparameters="exploration_level=2"))],
+    "negative-bundles": [precommit("bench-1", num_bundles=-1)],
 }
 for name, precommits in cases.items():
     with open(f"{scratch}/{name}.json", "w") as f:
@@ -136,7 +140,7 @@ MAKE
         [[ "$got" == "${case##*:}" ]] \
             || fail "${case%%:*} counted [$got] for the target tuple, expected [${case##*:}]"
     done
-    for case in no-bundles no-track no-compute no-id; do
+    for case in no-bundles no-track no-compute no-id bad-hyper negative-bundles; do
         status=0
         python3 "$scan" --target "$p" "$scratch/$case.json" "$scratch/decision.json" \
             >/dev/null 2>&1 || status=$?
@@ -145,7 +149,7 @@ MAKE
     done
 
     echo "live-run-evidence selftest: detects a duplicate §10 tuple, passes four that" \
-         "are not, counts one decision's tuple across nine cases, and refuses four" \
+         "are not, counts one decision's tuple across nine cases, and refuses six" \
          "windows it cannot read"
     exit 0
 fi

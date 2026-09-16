@@ -62,8 +62,18 @@ def candidate_of(index, p):
         raise shape("missing details.compute_type")
     for key in ("num_bundles", "fuel_budget"):
         value = details.get(key)
-        if not isinstance(value, int) or isinstance(value, bool):
+        # `as_u64`, so a negative is as unreadable as a string. TIG never
+        # returns one; the point is that this file claims to be a
+        # transcription, and a claim that is true of the easy cases only is
+        # the kind a reader inherits as fact.
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
             raise shape(f"missing or non-numeric details.{key}")
+    # `candidate_of` takes null or an object and calls anything else a shape
+    # error. Coercing here would send a string into `rendered`, which raises
+    # `AttributeError` — exit 1, the duplicate's code, with a traceback.
+    hyperparameters = details.get("hyperparameters")
+    if hyperparameters is not None and not isinstance(hyperparameters, dict):
+        raise shape("details.hyperparameters is not an object")
 
     return {
         "benchmark_id": p["benchmark_id"],
@@ -75,7 +85,7 @@ def candidate_of(index, p):
         "compute_type": details["compute_type"],
         "num_bundles": details["num_bundles"],
         "fuel_budget": details["fuel_budget"],
-        "hyperparameters": details.get("hyperparameters") or {},
+        "hyperparameters": hyperparameters or {},
         # §7's confirmation test: `state.block_confirmed` is the sole
         # lifecycle authority. An entry can be present in the window and
         # unconfirmed, which is a different fact from being absent.

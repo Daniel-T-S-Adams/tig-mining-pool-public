@@ -23,9 +23,10 @@
 
 use std::time::{Duration, Instant};
 
-use pool_domain::Network;
-use pool_snapshot::active_cache::{Advance, BenchmarkDataSource};
-use pool_snapshot::store::BlockSnapshotStore;
+use pool_domain::{Network, TraceId};
+use pool_snapshot::AnchoredRead;
+use pool_snapshot::active_cache::{ActiveBenchmarkStore, Advance, BenchmarkDataSource};
+use pool_snapshot::store::{BlockSnapshotStore, PersistedSnapshot};
 use pool_snapshot::{
     PostgresActiveBenchmarkStore, PostgresSnapshotStore, Snapshot, SnapshotSource,
 };
@@ -33,13 +34,77 @@ use pool_workflow::Guardrails;
 use sqlx::PgPool;
 use tig_client::{ReadError, TigReadClient};
 
+use crate::decide::{Decided, decide_once};
 use crate::ingest::{IngestError, Ingestor};
+use crate::propose::Offer;
 use crate::reconciler::{Outcome, ReconcileError, reconcile_block};
+use crate::window::confirmed_window;
 
 /// How many times one ingestion may restart at a new block before giving
 /// up on this poll. §9 discards a snapshot the chain moved under; the next
 /// poll tries again, so this bounds one poll's patience, not the pool's.
 const ASSEMBLY_ATTEMPTS: u32 = 3;
+
+/// What this controller's configuration tells the poll to do.
+///
+/// One struct rather than nine positional parameters. `Service::new` took
+/// seven before the deciding pass needed five more, and an `Option<Offer>`
+/// buried among positional arguments is exactly the kind of thing that gets
+/// passed `None` by accident and then never decides anything.
+#[derive(Debug, Clone)]
+pub struct Policy {
+    /// `tig_integration.md` §8's ages, from the pinned configuration.
+    pub guardrails: Guardrails,
+    /// How many `get-benchmark-data` reads one poll may spend warming the
+    /// active-benchmark cache (§5.2, §9 step 4).
+    pub cache_budget: usize,
+    pub deciding: Deciding,
+}
+
+impl Policy {
+    /// A controller that takes blocks in and decides nothing.
+    pub fn reconciling_only(guardrails: Guardrails, cache_budget: usize) -> Self {
+        Self {
+            guardrails,
+            cache_budget,
+            deciding: Deciding::none(),
+        }
+    }
+}
+
+/// Everything the deciding pass needs that is not the snapshot.
+#[derive(Debug, Clone)]
+pub struct Deciding {
+    /// What the pool decides for. `None` means it decides nothing, which is
+    /// slice 1's ordinary posture: no members, nothing offered, nothing mined
+    /// (`tig_integration.md` §13.5).
+    pub offer: Option<Offer>,
+    /// §6.1's capacity gate.
+    pub unverified_limit: i64,
+    /// §11.4's `X`, recorded per intent (criterion D2c).
+    pub failure_charge_atoms: String,
+    pub reserve_policy_version: String,
+    /// §9's decision-affecting configuration digest (criterion A3).
+    pub config_digest: [u8; 32],
+}
+
+impl Deciding {
+    /// A controller that decides nothing.
+    ///
+    /// The configuration that produces it is a deployment with no
+    /// `bootstrap_offer`; this is the same state, for a caller that has no
+    /// configuration — the reconciliation tests, above all, which drive blocks
+    /// through the poll and must not start proposing work as a side effect.
+    pub fn none() -> Self {
+        Self {
+            offer: None,
+            unverified_limit: 1,
+            failure_charge_atoms: "0".to_string(),
+            reserve_policy_version: "none".to_string(),
+            config_digest: [0; 32],
+        }
+    }
+}
 
 pub struct Service<S> {
     pool: PgPool,
@@ -51,6 +116,7 @@ pub struct Service<S> {
     player_id: String,
     guardrails: Guardrails,
     cache_budget: usize,
+    deciding: Deciding,
     /// The block most recently taken in *and reconciled from*, so a poll
     /// that sees it again does nothing more than continue its warm-up.
     ///
@@ -107,6 +173,14 @@ pub struct Ingested {
     pub gaps_recorded: Vec<i64>,
     pub cache: Advance,
     pub outcome: Outcome,
+    /// What §5.1 step 4 did with this block, or `None` when the deployment
+    /// offers no compute and so decides nothing.
+    ///
+    /// A failed pass is carried as `Some(Err)` rather than propagated: §10
+    /// makes a missed block unrecoverable, so a controller that stopped taking
+    /// blocks in because a decision failed would trade a recoverable fault for
+    /// an unrecoverable one.
+    pub decided: Option<Result<Decided, String>>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -128,8 +202,7 @@ impl<S: SnapshotSource + BenchmarkDataSource> Service<S> {
         poll: TigReadClient,
         network: Network,
         player_id: impl Into<String>,
-        guardrails: Guardrails,
-        cache_budget: usize,
+        policy: Policy,
     ) -> Self {
         Self {
             store: PostgresSnapshotStore::new(pool.clone()),
@@ -139,8 +212,9 @@ impl<S: SnapshotSource + BenchmarkDataSource> Service<S> {
             poll,
             network,
             player_id: player_id.into(),
-            guardrails,
-            cache_budget,
+            guardrails: policy.guardrails,
+            cache_budget: policy.cache_budget,
+            deciding: policy.deciding,
             last: None,
         }
     }
@@ -225,13 +299,82 @@ impl<S: SnapshotSource + BenchmarkDataSource> Service<S> {
                 usable: ingested.snapshot.for_decision().is_ok(),
             });
         }
+        // §5.1 step 4, after reconciliation and from the same snapshot. The
+        // order is the document's: §10's reconciliation is what makes local
+        // state safe to decide from, and a decision taken before it could be
+        // made against a workflow this very block settled.
+        let decided = self.decide(&ingested.snapshot).await;
+
         Ok(Tick::Ingested(Box::new(Ingested {
             block_id,
             height,
             gaps_recorded: ingested.gaps_recorded,
             cache: ingested.cache,
             outcome,
+            decided,
         })))
+    }
+
+    /// One deciding pass over the snapshot just taken in.
+    ///
+    /// Reported rather than propagated. A pass that cannot decide must not
+    /// stop the poll: §10 makes a missed block unrecoverable, so a controller
+    /// that stopped taking blocks in because a decision failed would trade a
+    /// recoverable fault for an unrecoverable one. The outcome rides out on
+    /// the `Tick` and the caller decides what to say about it.
+    async fn decide(&self, persisted: &PersistedSnapshot) -> Option<Result<Decided, String>> {
+        // No offer is not a failure to decide; it is a deployment that decides
+        // nothing, which is slice 1's ordinary posture. `None` says that,
+        // where `Some(Ok(NoAction))` would say the rules were run and found
+        // nothing — a different fact.
+        let offer = self.deciding.offer.as_ref()?;
+
+        let snapshot = match persisted.for_decision() {
+            Ok(snapshot) => snapshot,
+            // C5's gate is `decide_once`'s too; short-circuiting here only
+            // avoids the reads below for a snapshot it would refuse anyway.
+            Err(_) => return None,
+        };
+
+        let active_ids = match snapshot.active_benchmark_ids() {
+            Ok(ids) => ids,
+            Err(e) => return Some(Err(format!("the block names no active set: {e}"))),
+        };
+        let active = match self.cache.load(self.network, &active_ids).await {
+            Ok(active) => active,
+            Err(e) => return Some(Err(format!("the active-benchmark cache: {e}"))),
+        };
+
+        let benchmarks = match snapshot.read(AnchoredRead::Benchmarks) {
+            Some(body) => body.clone(),
+            None => return Some(Err("the snapshot carries no get-benchmarks".to_string())),
+        };
+        let window = match confirmed_window(&benchmarks, &snapshot.block) {
+            Ok(window) => window,
+            Err(e) => return Some(Err(format!("the confirmed window: {e}"))),
+        };
+
+        Some(
+            decide_once(
+                &self.pool,
+                self.network,
+                &self.player_id,
+                offer,
+                persisted,
+                &window,
+                &active,
+                self.deciding.unverified_limit,
+                &self.deciding.failure_charge_atoms,
+                &self.deciding.reserve_policy_version,
+                self.deciding.config_digest,
+                // §10.1's originating trace, drawn per pass: one deciding pass
+                // is one unit of work, and `intent_id` distinguishes the
+                // intents within it.
+                TraceId::draw().ok(),
+            )
+            .await
+            .map_err(|e| e.to_string()),
+        )
     }
 
     /// Another budget on the last block's active set; if that completes the

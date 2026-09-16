@@ -18,8 +18,9 @@ use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 use pool_config::{Binary, Config};
+use pool_controller::propose::Offer;
 use pool_controller::reconciler::Outcome;
-use pool_controller::service::{self, Service, Tick};
+use pool_controller::service::{self, Deciding, Policy, Service, Tick};
 use pool_snapshot::TigSnapshotSource;
 use pool_workflow::Guardrails;
 use tig_client::{ReadPolicy, TigReadClient, TigReader};
@@ -142,14 +143,55 @@ async fn run(config: &Config, once: bool) -> Result<(), String> {
         .orchestration
         .as_ref()
         .ok_or("configuration has no [orchestration] section")?;
+    // §5.1 step 4's inputs. The offer is checked against the pinned §3
+    // compatibility table here rather than in `pool-config`, because the pin
+    // lives with this binary: a compute type outside the table is "ineligible
+    // rather than coerced", and refusing at startup beats discovering it on a
+    // write whose fee is already paid.
+    let offer = match &orchestration.bootstrap_offer {
+        Some(configured) => Some(
+            Offer::from_config(
+                &configured.compute_class,
+                configured.cpu_cores,
+                &configured.tig_compute_type,
+                &serde_json::from_str::<serde_json::Value>(PINNED)
+                    .map_err(|e| format!("the pinned configuration does not parse: {e}"))?,
+            )
+            .map_err(|e| format!("orchestration.bootstrap_offer: {e}"))?,
+        ),
+        // No offer: this deployment decides nothing, which is what slice 1 is
+        // until an operator says otherwise (`tig_integration.md` §13.5).
+        None => None,
+    };
+    let deciding = Deciding {
+        offer,
+        unverified_limit: orchestration.internal_pool_unverified_limit,
+        failure_charge_atoms: orchestration.precommit_failure_charge_atoms.clone(),
+        reserve_policy_version: orchestration.reserve_policy_version.clone(),
+        config_digest: config.decision_digest(),
+    };
+    tracing::info!(
+        event = "controller.deciding",
+        offers = deciding.offer.is_some(),
+        compute_type = deciding
+            .offer
+            .as_ref()
+            .map_or("-", |o| o.tig_compute_type.as_str()),
+        unverified_limit = deciding.unverified_limit,
+        "whether this deployment proposes work"
+    );
+
     let mut service = Service::new(
         pool,
         source,
         poll,
         network,
         &tig.player_id,
-        guardrails,
-        orchestration.active_cache_fetches_per_poll as usize,
+        Policy {
+            guardrails,
+            cache_budget: orchestration.active_cache_fetches_per_poll as usize,
+            deciding,
+        },
     );
 
     let interval = policy.block_poll_interval();

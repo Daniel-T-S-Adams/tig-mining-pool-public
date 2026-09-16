@@ -13,8 +13,10 @@ use axum::body::Body;
 use axum::http::Request;
 use fake_tig::{Config, SharedWorld, build_world, router};
 use http_body_util::BodyExt;
+use pool_controller::propose::Offer;
 use pool_controller::reconciler::Outcome;
-use pool_controller::service::{self, Service, ServiceError, Tick};
+use pool_controller::service::{self, Deciding, Policy, Service, ServiceError, Tick};
+use pool_decision::challenge::OfferedCompute;
 use pool_domain::Network;
 use pool_snapshot::active_cache::BenchmarkDataSource;
 use pool_snapshot::{AnchoredRead, SnapshotError, SnapshotSource, TigSnapshotSource};
@@ -204,13 +206,15 @@ async fn a_new_block_is_taken_in_once_and_a_seen_one_is_left_alone() {
         poll,
         Network::Testnet,
         PLAYER,
-        Guardrails {
-            max_assignment_age_blocks: 60,
-            package_due_age_blocks: 110,
-            workflow_expiry_age_blocks: 120,
-            proof_reserve_blocks: 10,
-        },
-        10,
+        Policy::reconciling_only(
+            Guardrails {
+                max_assignment_age_blocks: 60,
+                package_due_age_blocks: 110,
+                workflow_expiry_age_blocks: 120,
+                proof_reserve_blocks: 10,
+            },
+            10,
+        ),
     );
 
     let Tick::Ingested(first) = service.tick().await.unwrap() else {
@@ -325,13 +329,15 @@ async fn a_block_read_incompletely_is_tried_again_on_the_next_poll() {
         poll,
         Network::Testnet,
         PLAYER,
-        Guardrails {
-            max_assignment_age_blocks: 60,
-            package_due_age_blocks: 110,
-            workflow_expiry_age_blocks: 120,
-            proof_reserve_blocks: 10,
-        },
-        10,
+        Policy::reconciling_only(
+            Guardrails {
+                max_assignment_age_blocks: 60,
+                package_due_age_blocks: 110,
+                workflow_expiry_age_blocks: 120,
+                proof_reserve_blocks: 10,
+            },
+            10,
+        ),
     );
 
     let Tick::Ingested(blind) = service.tick().await.unwrap() else {
@@ -392,13 +398,15 @@ async fn a_block_a_previous_run_finished_is_not_assembled_again() {
             poll,
             Network::Testnet,
             PLAYER,
-            Guardrails {
-                max_assignment_age_blocks: 60,
-                package_due_age_blocks: 110,
-                workflow_expiry_age_blocks: 120,
-                proof_reserve_blocks: 10,
-            },
-            10,
+            Policy::reconciling_only(
+                Guardrails {
+                    max_assignment_age_blocks: 60,
+                    package_due_age_blocks: 110,
+                    workflow_expiry_age_blocks: 120,
+                    proof_reserve_blocks: 10,
+                },
+                10,
+            ),
         )
     };
 
@@ -451,13 +459,15 @@ async fn once_fails_on_a_failed_poll_and_the_loop_does_not() {
         poll,
         Network::Testnet,
         PLAYER,
-        Guardrails {
-            max_assignment_age_blocks: 60,
-            package_due_age_blocks: 110,
-            workflow_expiry_age_blocks: 120,
-            proof_reserve_blocks: 10,
-        },
-        10,
+        Policy::reconciling_only(
+            Guardrails {
+                max_assignment_age_blocks: 60,
+                package_due_age_blocks: 110,
+                workflow_expiry_age_blocks: 120,
+                proof_reserve_blocks: 10,
+            },
+            10,
+        ),
     );
 
     let err = service::run(&mut service, Duration::from_millis(10), true, |_| {})
@@ -502,13 +512,15 @@ async fn a_warm_up_that_did_not_finish_continues_on_the_next_poll() {
         poll,
         Network::Testnet,
         PLAYER,
-        Guardrails {
-            max_assignment_age_blocks: 60,
-            package_due_age_blocks: 110,
-            workflow_expiry_age_blocks: 120,
-            proof_reserve_blocks: 10,
-        },
-        10,
+        Policy::reconciling_only(
+            Guardrails {
+                max_assignment_age_blocks: 60,
+                package_due_age_blocks: 110,
+                workflow_expiry_age_blocks: 120,
+                proof_reserve_blocks: 10,
+            },
+            10,
+        ),
     );
 
     let Tick::Ingested(first) = service.tick().await.unwrap() else {
@@ -607,4 +619,120 @@ deployment = "cli-test"
         "the refusal names what is wrong: {stderr}"
     );
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The guardrails every test above uses. Extracted so the deciding tests below
+/// differ from them in exactly one respect: whether an offer is configured.
+fn guardrails() -> Guardrails {
+    Guardrails {
+        max_assignment_age_blocks: 60,
+        package_due_age_blocks: 110,
+        workflow_expiry_age_blocks: 120,
+        proof_reserve_blocks: 10,
+    }
+}
+
+#[tokio::test]
+async fn a_deployment_that_offers_nothing_takes_blocks_in_and_decides_nothing() {
+    // `tig_integration.md` §13.5: "a deployment serving nothing has nothing to
+    // judge", and slice 1 is that until an operator configures an offer. The
+    // poll must still run — reconciliation is not conditional on deciding —
+    // and `decided` must be `None` rather than a pass that ran and found
+    // nothing, which is a different fact.
+    let Some(db) = TempDb::migrated("service_no_offer").await else {
+        return;
+    };
+    let controller = db.pool_as("pool_controller").await;
+    let tig = fake_tig().await;
+    let (source, poll) = clients(&tig.base);
+    let mut service = Service::new(
+        controller.clone(),
+        source,
+        poll,
+        Network::Testnet,
+        PLAYER,
+        Policy::reconciling_only(guardrails(), 10),
+    );
+
+    let Tick::Ingested(tick) = service.tick().await.unwrap() else {
+        panic!("the block is still taken in");
+    };
+    assert!(
+        matches!(tick.outcome, Outcome::Reconciled(_)),
+        "reconciliation does not depend on deciding: {:?}",
+        tick.outcome
+    );
+    assert!(
+        tick.decided.is_none(),
+        "no offer is not a pass that decided nothing: {:?}",
+        tick.decided
+    );
+
+    let intents: i64 = sqlx::query_scalar("SELECT count(*) FROM pool.tig_write_intent")
+        .fetch_one(&controller)
+        .await
+        .unwrap();
+    assert_eq!(intents, 0, "and nothing was proposed");
+}
+
+#[tokio::test]
+async fn a_deployment_with_an_offer_decides_from_the_block_it_just_took_in() {
+    // §5.1 step 4, wired: the poll takes a block in, reconciles from it, and
+    // then decides from the same snapshot. Without this the gateway drives a
+    // queue nothing fills, which is what slice 1 was until now.
+    //
+    // The offer's compute type is checked against the pinned §3 table by
+    // `Offer::from_config`; here it is built directly, because what this test
+    // measures is the wiring and not that check.
+    let Some(db) = TempDb::migrated("service_decides").await else {
+        return;
+    };
+    let controller = db.pool_as("pool_controller").await;
+    let tig = fake_tig().await;
+    let (source, poll) = clients(&tig.base);
+    let mut service = Service::new(
+        controller.clone(),
+        source,
+        poll,
+        Network::Testnet,
+        PLAYER,
+        Policy {
+            guardrails: guardrails(),
+            cache_budget: 10,
+            deciding: Deciding {
+                offer: Some(Offer {
+                    compute: OfferedCompute::Cpu { cores: 8 },
+                    tig_compute_type: "aws_t4g".to_string(),
+                }),
+                unverified_limit: 4,
+                failure_charge_atoms: "0".to_string(),
+                reserve_policy_version: "unchosen-pre-build-5.2".to_string(),
+                config_digest: [0xef; 32],
+            },
+        },
+    );
+
+    let Tick::Ingested(tick) = service.tick().await.unwrap() else {
+        panic!("the block is taken in");
+    };
+    let decided = tick.decided.expect("an offer means the pass runs");
+
+    // And against `fake-tig` it reports a shape error, which is the correct
+    // answer and worth pinning: the fake serves `fixtures/tig/v1`, whose
+    // `get-algorithms` carries a single `algorithms` collection where live TIG
+    // returns `codes`, `binarys` and `advances`. That is the disagreement
+    // `tig_integration.md` §14.4 records and issue #28 owns.
+    //
+    // So this asserts two things. The pass *ran* — an outcome, not a silence,
+    // which is what distinguishes wiring that works from wiring that does not.
+    // And the controller cannot decide against the fake until #28 is fixed,
+    // which criterion K2's whole-lifecycle scenario will need.
+    //
+    // When the fixture is corrected this test fails, and that is the signal:
+    // the expectation changes to a decision, not a shape error.
+    let err = decided.expect_err("the v1 fixture's get-algorithms envelope is wrong (#28)");
+    assert!(
+        err.contains("get-algorithms"),
+        "and it names the read it could not use: {err}"
+    );
 }

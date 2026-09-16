@@ -52,6 +52,74 @@ pub struct Offer {
     pub tig_compute_type: String,
 }
 
+/// Why a configured offer is not one the pool may decide for.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum OfferError {
+    #[error("compute_class {0:?} is not \"cpu\" or \"gpu\" (mining_system.md §6.2)")]
+    UnknownClass(String),
+    #[error("a cpu offer needs cpu_cores (mining_system.md §6.7)")]
+    NoCores,
+    #[error(
+        "compute type {compute_type:?} is not in the pinned compatibility table \
+         (tig_integration.md §3); it knows {known:?}"
+    )]
+    UnknownComputeType {
+        compute_type: String,
+        known: Vec<String>,
+    },
+    #[error("the pinned configuration has no compute_compatibility.compute_types_by_vendor")]
+    PinUnreadable,
+}
+
+impl Offer {
+    /// Build an offer from configuration, against the pinned compatibility
+    /// table.
+    ///
+    /// `tig_integration.md` §3 requires the compute type be detected per
+    /// worker and is explicit that a mismatch is "ineligible rather than
+    /// coerced", so a type the pin does not know is refused here rather than
+    /// sent and rejected — the fee is paid on submission. `pool-config`
+    /// checks the shape; this checks it against the vocabulary, because the
+    /// pin lives with the binary and not with the configuration.
+    pub fn from_config(
+        compute_class: &str,
+        cpu_cores: Option<u64>,
+        tig_compute_type: &str,
+        pinned: &Value,
+    ) -> Result<Self, OfferError> {
+        let compute = match compute_class {
+            "cpu" => OfferedCompute::Cpu {
+                cores: cpu_cores.ok_or(OfferError::NoCores)?,
+            },
+            "gpu" => OfferedCompute::Gpu,
+            other => return Err(OfferError::UnknownClass(other.to_string())),
+        };
+
+        let by_vendor = pinned
+            .pointer("/compute_compatibility/compute_types_by_vendor")
+            .and_then(Value::as_object)
+            .ok_or(OfferError::PinUnreadable)?;
+        let known: Vec<String> = by_vendor
+            .values()
+            .filter_map(Value::as_array)
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect();
+        if !known.iter().any(|t| t == tig_compute_type) {
+            return Err(OfferError::UnknownComputeType {
+                compute_type: tig_compute_type.to_string(),
+                known,
+            });
+        }
+
+        Ok(Self {
+            compute,
+            tig_compute_type: tig_compute_type.to_string(),
+        })
+    }
+}
+
 /// One challenge's configuration, as §6.7 and §6.1's body need it.
 ///
 /// Kept beside the decision engine's reduced [`Challenge`] rather than folded
@@ -1457,6 +1525,52 @@ mod tests {
                 expected: "a boolean",
             }),
             "an unreadable ban must stop the pass, not default to unbanned"
+        );
+    }
+
+    #[test]
+    fn an_offer_is_checked_against_the_pinned_compute_vocabulary() {
+        // `tig_integration.md` §3: a compute type outside the compatibility
+        // table is "ineligible rather than coerced". Refused here rather than
+        // sent and rejected, because the precommit fee is paid on submission.
+        //
+        // Against the shipped pin, not a fabricated table — the point is that
+        // the value an operator writes is checked against what this build
+        // actually knows.
+        let pinned: Value =
+            serde_json::from_str(include_str!("../../../config/tig_integration.json")).unwrap();
+
+        let cpu = Offer::from_config("cpu", Some(8), "aws_t4g", &pinned).unwrap();
+        assert_eq!(cpu.compute, OfferedCompute::Cpu { cores: 8 });
+        assert_eq!(cpu.tig_compute_type, "aws_t4g");
+
+        let gpu = Offer::from_config("gpu", None, "aws_g4dn", &pinned).unwrap();
+        assert_eq!(gpu.compute, OfferedCompute::Gpu);
+
+        // A type the table does not carry, and a type from the *other* class's
+        // vendor list: both are refused, and neither is silently mapped.
+        let err = Offer::from_config("cpu", Some(8), "aws_z9x", &pinned).unwrap_err();
+        assert!(
+            matches!(err, OfferError::UnknownComputeType { ref compute_type, .. }
+                     if compute_type == "aws_z9x"),
+            "{err}"
+        );
+
+        assert_eq!(
+            Offer::from_config("cpu", None, "aws_t4g", &pinned).unwrap_err(),
+            OfferError::NoCores,
+            "§6.7 divides by the core count"
+        );
+        assert!(matches!(
+            Offer::from_config("quantum", Some(8), "aws_t4g", &pinned).unwrap_err(),
+            OfferError::UnknownClass(_)
+        ));
+
+        // A pin with no table refuses everything rather than accepting
+        // anything: an unreadable vocabulary is not an empty one.
+        assert_eq!(
+            Offer::from_config("cpu", Some(8), "aws_t4g", &json!({})).unwrap_err(),
+            OfferError::PinUnreadable
         );
     }
 

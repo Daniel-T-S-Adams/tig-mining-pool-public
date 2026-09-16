@@ -263,6 +263,92 @@ fn the_reserve_policy_values_are_checked_rather_than_carried() {
 }
 
 #[test]
+fn a_bootstrap_offer_is_refused_unless_it_can_actually_be_sized() {
+    // §6.7 aligns CPU bundle counts to the core count, so a cpu offer without
+    // one cannot be sized and a count of zero cannot be divided by. A gpu
+    // offer carrying cores would have them read as a cpu offer's, and §6.7
+    // gives gpu the minimum regardless.
+    //
+    // The offer itself is optional: absent means the deployment decides
+    // nothing, which is slice 1's ordinary posture.
+    let scratch = Scratch::new("bootstrap-offer");
+    let load = |offer: Option<&str>| {
+        let mut toml = valid_toml(&scratch.password_file())
+            .replace("user = \"pool_migration\"", "user = \"pool_controller\"");
+        toml.push_str(TIG);
+        toml.push_str(ORCHESTRATION);
+        if let Some(offer) = offer {
+            toml.push_str(offer);
+        }
+        Config::load(scratch.write(&toml), Binary::PoolController)
+    };
+
+    let config = load(None).expect("no offer is a valid configuration");
+    assert!(
+        config
+            .orchestration
+            .as_ref()
+            .expect("the section is there")
+            .bootstrap_offer
+            .is_none(),
+        "absent means this deployment decides nothing"
+    );
+
+    assert!(
+        load(Some(
+            "\n[orchestration.bootstrap_offer]\ncompute_class = \"cpu\"\n\
+             cpu_cores = 8\ntig_compute_type = \"aws_t4g\"\n"
+        ))
+        .is_ok()
+    );
+    assert!(
+        load(Some(
+            "\n[orchestration.bootstrap_offer]\ncompute_class = \"gpu\"\n\
+             tig_compute_type = \"aws_g4dn\"\n"
+        ))
+        .is_ok(),
+        "a gpu offer needs no core count"
+    );
+
+    let err = load(Some(
+        "\n[orchestration.bootstrap_offer]\ncompute_class = \"cpu\"\n\
+         tig_compute_type = \"aws_t4g\"\n",
+    ))
+    .expect_err("a cpu offer needs cores");
+    assert_invalid(err, "cpu_cores is required for a cpu offer");
+
+    let err = load(Some(
+        "\n[orchestration.bootstrap_offer]\ncompute_class = \"cpu\"\n\
+         cpu_cores = 0\ntig_compute_type = \"aws_t4g\"\n",
+    ))
+    .expect_err("zero cores cannot be divided by");
+    assert_invalid(err, "cpu_cores must be at least 1");
+
+    let err = load(Some(
+        "\n[orchestration.bootstrap_offer]\ncompute_class = \"gpu\"\n\
+         cpu_cores = 8\ntig_compute_type = \"aws_g4dn\"\n",
+    ))
+    .expect_err("a gpu offer has no cores");
+    assert_invalid(err, "cpu_cores belongs to a cpu offer");
+
+    let err = load(Some(
+        "\n[orchestration.bootstrap_offer]\ncompute_class = \"quantum\"\n\
+         tig_compute_type = \"aws_t4g\"\n",
+    ))
+    .expect_err("an unknown class");
+    assert_invalid(err, "compute_class must be");
+
+    // The class and the protocol type are different vocabularies. An empty
+    // type would send nothing where TIG expects `aws_t4g`.
+    let err = load(Some(
+        "\n[orchestration.bootstrap_offer]\ncompute_class = \"cpu\"\n\
+         cpu_cores = 8\ntig_compute_type = \"\"\n",
+    ))
+    .expect_err("an empty compute type");
+    assert_invalid(err, "tig_compute_type must name");
+}
+
+#[test]
 fn a_controller_without_an_unverified_limit_does_not_load() {
     // No default: a compiled fallback would be a policy value reached exactly
     // when the operator forgot to set one.

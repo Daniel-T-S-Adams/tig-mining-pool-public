@@ -1196,3 +1196,64 @@ fn an_unsettled_write_is_still_reconciled_when_the_served_set_no_longer_matches(
          set says; stopping first would hold §10's lane shut network-wide"
     );
 }
+
+#[test]
+fn an_accepted_write_awaits_confirmation_instead_of_stopping_for_an_operator() {
+    // Found on live testnet. A precommit takes a block or two to appear in
+    // `get-benchmarks` after TIG accepts it, and in that interval the §10
+    // search finds nothing. Treating that as `WriteUnaccountedFor` raised a
+    // stop-for-operator on every pass for ninety seconds — six of them in that
+    // run — on a write nothing was wrong with, and `StopForOperator` is what
+    // `needs_operator` counts. §10.3: a bucket that fills on every pass is one
+    // nobody reads, and this one filled on every write the pool ever made.
+    //
+    // The two cases the empty search has to tell apart:
+    let empty_window: &[serde_json::Value] = &[];
+
+    // TIG answered, and the answer was yes. The write landed; §7 makes
+    // confirmation a read, and the read has not caught up.
+    let accepted = decide(
+        &intent(IntentState::OutcomeUnknown),
+        &[attempt(Some(AttemptOutcome::Accepted))],
+        LIVE,
+        ONLY,
+        &submitted(),
+        empty_window,
+        &served(),
+    );
+    assert_eq!(
+        accepted,
+        ClaimDecision::AwaitConfirmation,
+        "an accepted write is waiting to be read, not missing"
+    );
+
+    // TIG did not answer. The record cannot say whether the request left, and
+    // absence from a 120-block window is not absence from TIG — so this stops
+    // rather than resending into a possible second fee.
+    let unresolved = decide(
+        &intent(IntentState::OutcomeUnknown),
+        &[attempt(None)],
+        LIVE,
+        ONLY,
+        &submitted(),
+        empty_window,
+        &served(),
+    );
+    assert_eq!(
+        unresolved,
+        ClaimDecision::StopForOperator {
+            reason: StopReason::WriteUnaccountedFor
+        },
+        "an unanswered write is the real ambiguity and still stops"
+    );
+
+    // And neither answer resends: the distinction is about what to *tell an
+    // operator*, not about licensing a second write.
+    for decision in [accepted, unresolved] {
+        assert_ne!(
+            decision,
+            ClaimDecision::Transmit,
+            "the search finding nothing never licenses a resend"
+        );
+    }
+}

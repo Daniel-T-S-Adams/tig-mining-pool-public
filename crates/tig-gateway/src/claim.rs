@@ -347,11 +347,14 @@ pub fn decide(
     // that has ended is safe. What it settles is the *write*, so the lane
     // reopens; advancing the workflow is the controller's, from confirmed
     // reads, and §10 reports a contradiction rather than acting on one.
-    let unsettled = attempts
+    // Whether TIG *answered*, and whether the answer was yes, are different
+    // facts and the search's empty result means different things under each.
+    let accepted = attempts
         .iter()
-        .any(|a| a.is_unresolved() || a.outcome == Some(AttemptOutcome::Accepted));
-    if unsettled {
-        return reconciled(submitted, confirmed_precommits);
+        .any(|a| a.outcome == Some(AttemptOutcome::Accepted));
+    let unresolved = attempts.iter().any(WriteAttempt::is_unresolved);
+    if accepted || unresolved {
+        return reconciled(submitted, confirmed_precommits, accepted);
     }
 
     // Now that nothing is in flight, whether this deployment may send it at
@@ -435,6 +438,9 @@ pub fn decide(
 fn reconciled(
     submitted: &PrecommitSubmission,
     confirmed_precommits: &[serde_json::Value],
+    // Whether an attempt for this intent recorded `ACCEPTED` — TIG answered,
+    // and the answer was yes.
+    accepted: bool,
 ) -> ClaimDecision {
     match reconcile_precommit(confirmed_precommits, submitted) {
         Ok(Reconciliation::Confirmed { benchmark_id }) => {
@@ -444,6 +450,25 @@ fn reconciled(
         Ok(Reconciliation::StopForOperator { candidates }) => ClaimDecision::StopForOperator {
             reason: StopReason::MultipleCandidates { candidates },
         },
+        // The search found nothing — and what that means depends entirely on
+        // whether TIG answered.
+        //
+        // An **accepted** attempt is a recorded HTTP 200 from TIG: the write
+        // landed. §7 still makes confirmation a read, and a precommit takes a
+        // block or two to appear in the window, so an empty search in that
+        // interval is the ordinary state of a healthy write and not a fault.
+        //
+        // This was `WriteUnaccountedFor` for both, and a live testnet run
+        // showed what that costs: the happy path raised a stop-for-operator on
+        // every pass for the ninety seconds between acceptance and
+        // confirmation — six in that run — on a write nothing was wrong with.
+        // §10.3's rule is that a bucket filling on every pass is one nobody
+        // reads, and this one filled on every write the pool ever made.
+        Ok(Reconciliation::NoCandidate) if accepted => ClaimDecision::AwaitConfirmation,
+        // An **unresolved** attempt is the genuine ambiguity: the record
+        // cannot say whether the request left, and absence from the window is
+        // not proof of absence from TIG. Stopping is right here, and resending
+        // would risk a second fee for a write that may already have landed.
         Ok(Reconciliation::NoCandidate) => ClaimDecision::StopForOperator {
             reason: StopReason::WriteUnaccountedFor,
         },

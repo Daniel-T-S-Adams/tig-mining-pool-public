@@ -30,6 +30,9 @@ db_name="$(grep -E '^name *=' "$config" | head -1 | sed -E 's/^[^=]*= *"?([^"]*)
 psql() { docker exec -i "$POOL_PG_CONTAINER" psql -U postgres -d "$db_name" -tAc "$1"; }
 
 attempts_now() { psql "SELECT count(*) FROM pool.tig_write_attempt" | tr -d '[:space:]'; }
+unresolved_now() {
+    psql "SELECT count(*) FROM pool.tig_write_attempt WHERE outcome IS NULL" | tr -d '[:space:]'
+}
 
 before="$(attempts_now)"
 echo "attempts before: $before"
@@ -39,28 +42,56 @@ log="${CRASH_LOG:-$(mktemp)}"
 gateway=$!
 echo "gateway pid $gateway, log $log"
 
-# Wait for the attempt row, then kill immediately. SIGKILL, not SIGTERM: a
-# graceful shutdown would let the sender record its outcome, which is the
-# state this crash point exists to avoid producing.
+# Wait for the attempt row **inside the database**, not by polling from here.
+#
+# The window is narrow: on the live run that motivated this, TIG answered in
+# 150 ms. A shell loop that spawns `docker exec psql` each pass takes longer
+# than that, so it would routinely wake after the sender had already recorded
+# the response — and then kill a process with nothing in flight, while still
+# reporting "killed at the attempt row". The evidence would be from a run that
+# never exercised the ambiguity path at all.
+#
+# This blocks server-side and returns the moment the row is visible, so the
+# only latency is one 10 ms sleep plus the pipe.
+wait_sql="DO \$\$
+BEGIN
+    WHILE (SELECT count(*) FROM pool.tig_write_attempt) <= $before LOOP
+        PERFORM pg_sleep(0.01);
+    END LOOP;
+END
+\$\$;"
+
 killed=no
-for _ in $(seq 1 600); do
-    if [[ "$(attempts_now)" -gt "$before" ]]; then
-        kill -9 "$gateway" 2>/dev/null || true
-        killed=yes
-        echo "killed at the attempt row"
-        break
-    fi
-    if ! kill -0 "$gateway" 2>/dev/null; then
-        echo "gateway exited before writing an attempt; see $log" >&2
-        exit 2
-    fi
-    sleep 0.2
-done
+if timeout "${CRASH_WAIT_SECONDS:-600}" docker exec -i "$POOL_PG_CONTAINER" \
+        psql -U postgres -d "$db_name" -qAt -c "$wait_sql" >/dev/null 2>&1; then
+    kill -9 "$gateway" 2>/dev/null || true
+    killed=yes
+    echo "killed at the attempt row"
+fi
+# Always, including the timeout path: `run` is a long-lived server, so an
+# unconditional `wait` on a live one blocks for ever — in precisely the case
+# this branch exists to report.
+kill -9 "$gateway" 2>/dev/null || true
 wait "$gateway" 2>/dev/null || true
 
 if [[ "$killed" != yes ]]; then
     echo "INCOMPLETE: no attempt was written within the window." >&2
     echo "Nothing was crashed, so nothing is proved — this is not a pass." >&2
+    exit 2
+fi
+
+# And whether the kill actually landed in the window. G2's crash point is
+# defined by the durable state it leaves: an attempt with a NULL outcome,
+# because the record cannot say whether the request left. An attempt that
+# already carries an outcome means the sender finished first and the run
+# exercised the ordinary path, not the ambiguity — which is the one thing K4's
+# evidence must not be taken from.
+if [[ "$(unresolved_now)" == "0" ]]; then
+    echo >&2
+    echo "INCOMPLETE: the kill landed after the sender recorded its outcome." >&2
+    echo "No attempt is unresolved, so G2's crash point was not reached and this" >&2
+    echo "run proves nothing about ambiguity recovery. Re-run; the window is" >&2
+    echo "roughly the length of one TIG call." >&2
     exit 2
 fi
 
@@ -93,6 +124,94 @@ psql "SELECT a.attempt_no, coalesce(a.outcome, 'STILL UNRESOLVED') AS outcome,
         FROM pool.tig_write_attempt a
         JOIN pool.tig_write_intent i ON i.intent_id = a.intent_id
        ORDER BY a.started_at"
+
+# G2's rule: "exactly one where a write reached TIG, and exactly zero where it
+# did not ... one recovers by finding the write and the other by refusing to
+# guess, and the counts are what tell them apart."
+#
+# So an attempt still unresolved is not, on its own, a failure. The crash point
+# leaves a record that cannot say whether the request left, and when it did not
+# the correct recovery is to stop for an operator rather than resend into a
+# possible second fee. What would be a failure is the pool stopping while the
+# write *is* there — the search missing evidence that exists.
+#
+# The first version of this script called every unresolved attempt a failed
+# recovery, and this run showed why that is wrong: the kill landed before the
+# request left, TIG holds nothing for the tuple, and refusing to guess is
+# exactly what §10 asks for.
+if [[ "$(unresolved_now)" == "0" ]]; then
+    echo
+    echo "recovered by finding the write: the attempt settled from a confirmed read."
+    echo "G2 expects exactly one entry for this tuple; confirm with the §10 scan."
+    echo
+    echo "gateway log: $log"
+    exit 0
+fi
+
+echo
+echo "the attempt is still unresolved. Whether that is correct depends on"
+echo "whether the write is at TIG, which is what the counts tell apart:"
+
+tuple="$(psql "SELECT d.anchor_block_id || ' ' || d.selected_challenge || ' ' ||
+                      d.selected_algorithm
+                 FROM pool.precommit_decision d
+                 JOIN pool.tig_write_intent i USING (workflow_id)
+                 JOIN pool.tig_write_attempt a ON a.intent_id = i.intent_id
+                WHERE a.outcome IS NULL
+                LIMIT 1")"
+read -r anchor challenge algorithm <<<"$tuple"
+echo "  tuple: block=$anchor challenge=$challenge algorithm=$algorithm"
+
+base_url="$(grep -E '^base_url *=' "$config" | head -1 | sed -E 's/^[^=]*= *"?([^"]*)"?.*/\1/')"
+player="$(grep -E '^player_id *=' "$config" | head -1 | sed -E 's/^[^=]*= *"?([^"]*)"?.*/\1/')"
+found=""
+for _ in 1 2 3 4 5; do
+    block_id="$(curl -sS "$base_url/get-block" \
+                | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d.get("block",d)["id"])' \
+                2>/dev/null)" || true
+    [[ -z "$block_id" ]] && { sleep 3; continue; }
+    window="$(curl -sS "$base_url/get-benchmarks?block_id=$block_id&player_id=$player")" || true
+    [[ "$window" == \{* ]] || { sleep 3; continue; }
+    found="$(printf '%s' "$window" | python3 -c '
+import json, sys
+anchor, challenge, algorithm = sys.argv[1], sys.argv[2], sys.argv[3]
+body = json.load(sys.stdin)
+hits = [
+    p["benchmark_id"]
+    for p in body.get("precommits", [])
+    if p.get("settings", {}).get("block_id") == anchor
+    and p.get("settings", {}).get("challenge_id") == challenge
+    and p.get("settings", {}).get("algorithm_id") == algorithm
+]
+print(len(hits), *hits)' "$anchor" "$challenge" "$algorithm")"
+    break
+done
+
+if [[ -z "$found" ]]; then
+    echo "INCOMPLETE: could not read the window, so the counts cannot be compared." >&2
+    exit 2
+fi
+count="${found%% *}"
+echo "  TIG holds $count precommit(s) for it"
+
+if [[ "$count" == "0" ]]; then
+    echo
+    echo "recovered by refusing to guess: the write never reached TIG, the pool"
+    echo "stopped for an operator rather than resending, and no duplicate exists."
+    echo "That is G2's 'exactly zero where it did not' — the correct recovery for"
+    echo "this crash point."
+    echo
+    echo "gateway log: $log"
+    exit 0
+fi
+
+echo >&2
+echo "FAIL: the write is at TIG and the pool did not find it." >&2
+echo "§10's search is what settles an ambiguous attempt from confirmed reads;" >&2
+echo "leaving it unresolved holds the serialized lane shut behind a write that" >&2
+echo "is plainly there. Gateway log: $log" >&2
+exit 1
+
 echo
 echo "gateway log: $log"
 echo "run ./scripts/live-run-evidence.sh <controller-config> for the §10 tuple scan (K4)"

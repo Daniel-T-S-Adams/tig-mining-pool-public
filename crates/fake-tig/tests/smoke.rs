@@ -174,9 +174,22 @@ async fn happy_path_precommit_to_active() {
     let precommit = &benches["precommits"][0];
     assert_eq!(precommit["state"]["block_confirmed"], 100081);
     assert_eq!(precommit["settings"]["track_id"], "t001");
-    assert_eq!(precommit["details"]["num_nonces"], 80);
-    // Fee matches the independently recorded expectation in expected.json.
-    assert_eq!(precommit["details"]["fee_paid"], "90000000000000000");
+    // `mining_system.md` §6.8: `base_fee + per_nonce_fee * num_bundles`, which
+    // for c001 (base 10^16, per-nonce 10^15) over this precommit's 2 bundles
+    // on t001 is 1.2 * 10^16.
+    //
+    // Deliberately *not* `expected.json`'s figure. That fixture records the
+    // rule as "base_fee + per_nonce_fee x num_nonces" and §6.8 names it as the
+    // refuted side, settled against the pinned upstream commit during the
+    // spike. The fixture is immutable and correct as a record of what was
+    // believed; this assertion follows the document that settled it. A test
+    // citing the fixture as authority is how the fake kept charging 9 * 10^16
+    // for a write TIG charges 1.2 * 10^16 for.
+    assert_eq!(
+        precommit["details"]["num_nonces"], 80,
+        "2 bundles x 40 nonces"
+    );
+    assert_eq!(precommit["details"]["fee_paid"], "12000000000000000");
 
     // 7. Submit the benchmark commitment (80 qualities, 64-hex root).
     let quality: Vec<i64> = (0..80).collect();

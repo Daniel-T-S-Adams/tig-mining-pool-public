@@ -570,6 +570,18 @@ Once sections 1-7 are complete, build the product in this order:
 9. Public documentation and website.
 10. Discord community and launch operations.
 
+**Step 1 is complete (2026-09-16).** The TIG gateway and the restart-safe
+protocol state machine shipped as slice 1:
+[`plans/slice-1-gateway.md`](plans/slice-1-gateway.md), status `implemented`.
+Every one of its 61 acceptance criteria has a passing test, recorded evidence,
+or a written waiver — the record is
+[`evidence/slice-1-criteria.md`](evidence/slice-1-criteria.md), and the live
+testnet run behind criteria K3 and K4 is
+[`evidence/slice-1-live-run.md`](evidence/slice-1-live-run.md). Four criteria
+were waived, each re-homed to the step that owns it: the metrics exporter and
+alert tests to step 5, three member-dependent lifecycle cases to step 2, and
+J4's transaction-duration measurement to step 5.
+
 The product must advance in vertical slices. Each slice should include its
 minimum schema, migration, APIs, implementation, tests, observability, and
 documentation rather than creating a speculative full database or all service

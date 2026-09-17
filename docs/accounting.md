@@ -477,8 +477,9 @@ and needs no transfer to precede it — which is the whole benefit of one pot.
 The intent it creates is for the outbound transfer to the member, and §12.5's
 confirmation is what finally debits member custody.
 
-A missing, invalid or held destination leaves the amount in `MEMBER_BALANCE`;
-no intent is created and no other member is affected.
+A held destination leaves the amount in `MEMBER_BALANCE`; no intent is created
+and no other member is affected. It can no longer be missing or invalid: under
+ADR 0011 the destination is the wallet that authenticated the session (§12.2).
 
 ### 8.6 Sweeping pool value out of member custody
 
@@ -729,23 +730,40 @@ B[t]       = proposed num_bundles for track t
 P[s]       = live config.reports.penalty_amount at snapshot s
 F[s,t]     = exact precommit fee implied by live challenge config and B[t]
 X[policy]  = charge reserved for one chargeable failed benchmark
-M[m]       = member m's collateral multiplier, default 1 (ADR 0010)
+M_bps[m]   = member m's collateral multiplier in basis points,
+             integer, 1..=10_000, default 10_000 (ADR 0010)
 
 method_reserve[s,t] = P[s] * B[t]
-assignment_reserve[m,s,t] = M[m] * method_reserve[s,t] + F[s,t] + X[policy]
+
+scaled_method_reserve[m,s,t] =
+    ceil(method_reserve[s,t] * M_bps[m] / 10_000)
+
+assignment_reserve[m,s,t] =
+    scaled_method_reserve[m,s,t] + F[s,t] + X[policy]
 
 precommit_reserve = max(assignment_reserve[m,s,t] for every proposed track t)
 ```
 
-`M[m]` is set by the pool, never by the member, in the range `0 < M[m] <= 1`,
-and is versioned policy in the same append-only form as §5's fee policy. It
-scales the method reserve **only**: `F` is an outlay the pool certainly makes
-and `X` is a charge it has already decided to levy, so neither is a risk that
-trust can discount. The value is read when the assignment reserve is computed
-and fixed into that reservation; a later change to `M[m]` never reaches an
-open reservation, in either direction. ADR 0010 records the decision, what the
-uncovered `(1 - M[m]) * P[s] * B[t]` costs the pool on a slash, and why this
-is the trust-label mechanism §14 and `mining_system.md` §11 held open.
+The multiplier is **integer basis points, not a fraction**, for §3's reason:
+every amount in this document is exact integer attoTIG and §13 item 6 admits
+no other. `10_000` bps is the default and means no discount; `5_000` bps
+halves the method reserve.
+
+**Rounding is up, toward the pool** — the opposite of §5's fee, and
+deliberately so. A fee rounds down because the remainder belongs to the
+members; a reserve rounds up because a remainder left outside it is exposure
+the pool carries uncollateralized. The scaled reserve is therefore never one
+atom short of the policy.
+
+`M_bps[m]` is set by the pool, never by the member, and is versioned policy in
+the same append-only form as §5's fee policy. It scales the method reserve
+**only**: `F` is an outlay the pool certainly makes and `X` is a charge it has
+already decided to levy, so neither is a risk that trust can discount. The
+value is read when the assignment reserve is computed and fixed into that
+reservation; a later change never reaches an open reservation, in either
+direction. ADR 0010 records the decision, what the uncovered
+`method_reserve - scaled_method_reserve` costs the pool on a slash, and why
+this is the trust-label mechanism §14 and `mining_system.md` §11 held open.
 
 The maximum is necessary because TIG selects the track only after the
 precommit. The pool atomically reserves that amount from the member's
@@ -1013,9 +1031,12 @@ A proposed `X` charge freezes only the evidenced amount and notifies the member;
 it does not by itself create a first-failure ban. The reduced eligible
 collateral may still prevent further admission. A proposed method-loss slash
 may additionally impose the separate method/security suspension. Both provide
-a seven-day appeal. An undisputed proposal becomes final after that deadline.
+a seven-day appeal. An undisputed proposal becomes final after that deadline
+**only once the pool has a delivery channel for the notice**. It has none
+today, so as things stand no appeal deadline begins and no proposal becomes
+final by deadline alone; a charge still requires a decision someone made.
 
-**The notice this appeal depends on has no delivery channel (issue #56).**
+**Why that clause is here (issue #56).**
 ADR 0011 makes the member's wallet the account, so the pool has no email,
 phone or address to send it to — and a seven-day forfeiture deadline in front
 of a notice the member cannot receive is not an appeal. This PR records the
@@ -1336,9 +1357,16 @@ the private key. The signer:
   member custody it is required for every transfer **except** a member
   withdrawal within ADR 0009's per-member caps: at or below the
   per-transaction cap, with the member's rolling seven-day withdrawn total
-  also at or below the weekly cap. Both caps are versioned policy read by the
-  signer, not constants in it, and a transfer that exceeds either is signed
-  only with authorization. Thresholds for operating custody are unchanged.
+  also at or below the weekly cap. That total counts every withdrawal for
+  that member **already signed or still pending completion**, not only
+  finalized ones — counting finalized transfers alone would let a member open
+  several within Base's confirmation window and clear the cap with each.
+  The evaluation happens at intent creation, in the accounting projector, and
+  its result is stamped into the immutable intent; the signer checks the stamp
+  rather than computing a balance of its own, which keeps `security.md` §3.4's
+  "only immutable approved intents" intact. Both caps are versioned policy,
+  not constants, and a transfer that exceeds either is signed only with
+  authorization. Thresholds for operating custody are unchanged.
   The hot-wallet limit is a capability the signer must have and a value the
   owner has not set: ADR 0009 declines one for v0 and records what that
   accepts. An unset limit is not an absent control — it must be configurable
@@ -1429,10 +1457,11 @@ Before and after every batch, enforce:
 20. settled earnings count zero toward `eligible_collateral` until their round
     has matured under §11.7; and
 21. aggregate uncovered method exposure — the sum of
-    `(1 - M[m]) * P[s] * B[t]` over every open reservation — is reported, not
-    merely derivable. A multiplier below 1 is the pool choosing to stand
-    behind a member (§11.4, ADR 0010); the amount it stands behind must be
-    visible before a slash lands, not reconstructed after one.
+    `method_reserve - scaled_method_reserve` over every open reservation — is
+    reported, not merely derivable. A multiplier below `10_000` bps is the
+    pool choosing to stand behind a member (§11.4, ADR 0010); the amount it
+    stands behind must be visible before a slash lands, not reconstructed
+    after one.
 
 Daily reconciliation compares:
 
@@ -1474,8 +1503,9 @@ The owner has confirmed:
    `P[s] * B[t]` with `P` read live from the decision snapshot. `10 TIG` is
    what `P` reads today, not a constant, and the fixed-per-benchmark deposit
    this section previously rejected stays rejected (ADR 0010);
-7. a pool-set per-member collateral multiplier `M[m]`, default 1, range
-   `0 < M[m] <= 1`, scaling the method reserve only (§11.4, ADR 0010);
+7. a pool-set per-member collateral multiplier in integer basis points,
+   default `10_000`, range `1..=10_000`, scaling the method reserve only and
+   rounding up toward the pool (§11.4, ADR 0010);
 8. member withdrawals signed without human authorization at or below
    `10_000 TIG` per transaction and `10_000 TIG` per member per rolling seven
    days, both versioned policy, with multi-person authorization kept for
@@ -1505,6 +1535,12 @@ The remaining decision is:
 
 Decisions 6 and 7 lift this section's former prohibition: an implementation
 may accept member collateral under §11.4 and may present it as settled policy.
-The public-funds gates in `pre_build_checklist.md` §9 are untouched and still
-govern real member money, and testnet continues to exercise deposit fixtures
-with explicit fixture policy values.
+**One precondition survives the lifting and is not satisfied**: §11.5,
+[member_attack_model.md](member_attack_model.md) and ADR 0010 all record that
+the penalty *basis* is unverified — whether a benchmark incurs
+`penalty_amount` once or per reported nonce — and a settled formula over an
+unverified basis is not a settled reserve. Public member collateral still
+waits on that verification. The public-funds gates in
+`pre_build_checklist.md` §9 are untouched and still govern real member money,
+and testnet continues to exercise deposit fixtures with explicit fixture
+policy values.

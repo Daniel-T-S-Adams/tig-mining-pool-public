@@ -49,10 +49,22 @@ the penalty and violate `tig_integration.md` §12, which
 **A per-member multiplier scales the method reserve.** For member `m`:
 
 ```text
-assignment_reserve[m,s,t] = M[m] * method_reserve[s,t] + F[s,t] + X[policy]
+scaled_method_reserve[m,s,t] =
+    ceil(method_reserve[s,t] * M_bps[m] / 10_000)
 
-M[m] defaults to 1, and the pool may set 0 < M[m] <= 1
+assignment_reserve[m,s,t] =
+    scaled_method_reserve[m,s,t] + F[s,t] + X[policy]
+
+M_bps[m] is an integer, 1..=10_000, defaulting to 10_000 (no discount)
 ```
+
+**Basis points, not a fraction, and rounded up.** `accounting.md` §3 admits
+only exact integer attoTIG and §13 item 6 requires every posted line to be
+integral, so a real-valued multiplier could not be represented in the ledger
+it governs; §5's fee policy is integer basis points for the same reason. The
+rounding direction is the opposite of the fee's: a fee rounds **down** because
+its remainder belongs to the members, and a reserve rounds **up** because a
+remainder left outside it is exposure the pool carries uncollateralized.
 
 Everything else in §11.4 is unchanged: `precommit_reserve` is still the
 maximum assignment reserve across proposed tracks, still reserved atomically
@@ -70,30 +82,31 @@ Discounting either would leave the pool short of money it definitely spends,
 or short of a charge it has already decided to levy, which is a different
 thing from deciding a trusted member is less likely to be slashed.
 
-**2. A multiplier change never reaches an existing reservation.** `M[m]` is
+**2. A multiplier change never reaches an existing reservation.** `M_bps[m]` is
 read when the assignment reserve is computed and fixed into that reservation,
 exactly as §11.4 already forbids increasing a reservation by later policy. A
 member whose multiplier rises does not retroactively owe more on work already
 admitted, and one whose multiplier falls does not have capacity handed back
 against exposure that is still open.
 
-**3. `M[m]` is versioned policy, not an operator edit.** It is carried in the
-same append-only form as §5's fee policy — the value, when it takes effect,
+**3. `M_bps[m]` is versioned policy, not an operator edit.** It is carried in
+the same append-only form as §5's fee policy — the value, when it takes effect,
 who set it, and why — so a reservation can always be re-derived from the
 policy that was in force. The pool sets it; a member cannot influence it.
 
-Raising `M[m]` above 1 to demand *more* collateral from a member the pool
-distrusts is not part of this decision. The admission formula, the tier rule,
-and `mining_system.md` §8's failure handling are the instruments for that.
+Raising `M_bps[m]` above `10_000` to demand *more* collateral from a member
+the pool distrusts is not part of this decision. The admission formula, the
+tier rule, and `mining_system.md` §8's failure handling are the instruments
+for that.
 
 ## What this costs
 
-At multiplier `M[m]`, the pool holds `M[m] * P * B` against an exposure whose
-maximum is `P * B`. If that benchmark is slashed for the full
+At multiplier `M_bps[m]`, the pool holds `scaled_method_reserve` against an
+exposure whose maximum is `P * B`. If that benchmark is slashed for the full
 method-verification penalty, the pool absorbs
 
 ```text
-(1 - M[m]) * P * B
+method_reserve - scaled_method_reserve
 ```
 
 from its own funds. It cannot be recovered from the member: the whole point of
@@ -102,15 +115,15 @@ the reservation is that it is the only member value the pool may take, and
 
 That shortfall is deliberate credit risk extended to the pool's most trusted
 members, and it scales with two things at once — how many members carry a
-multiplier below 1, and how large their bundle counts are. Bundle count is the
-same quantity that made a fixed per-benchmark deposit unsafe in the first
-place, so the exposure grows fastest exactly where §11.4 was designed to be
-careful.
+multiplier below `10_000` bps, and how large their bundle counts are. Bundle
+count is the same quantity that made a fixed per-benchmark deposit unsafe in
+the first place, so the exposure grows fastest exactly where §11.4 was
+designed to be careful.
 
 Stated as a number the pool can watch: aggregate uncovered exposure is the sum
-of `(1 - M[m]) * P * B` over every open reservation. It belongs in the §13
-reconciliation set as a reported quantity, so a policy of generous multipliers
-is visible before a slash rather than after one.
+of `method_reserve - scaled_method_reserve` over every open reservation. It
+belongs in the §13 reconciliation set as a reported quantity, so a policy of
+generous multipliers is visible before a slash rather than after one.
 
 ## Consequences
 

@@ -118,6 +118,13 @@ pub enum DecideError {
 ///
 /// The maximum, because TIG selects the track only after the precommit.
 ///
+/// **Not yet the whole formula.** ADR 0010 added a per-member collateral
+/// multiplier in basis points scaling the method term, so `accounting.md`
+/// §11.4 now reads `ceil(P[s] * B[t] * M_bps[m] / 10_000) + F + X`. That term
+/// is not wired in here and this code behaves as `M_bps = 10_000`, which is
+/// the default and is correct for every member until a multiplier is set.
+/// The member the multiplier belongs to does not exist until slice 2.
+///
 /// **`P[s]` is a block configuration value**, read from the anchor snapshot's
 /// `config.reports.penalty_amount` — not a count of member reports. An earlier
 /// version of this function read it as the latter, recorded an empty list and

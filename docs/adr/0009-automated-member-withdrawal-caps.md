@@ -122,7 +122,7 @@ discover it.
 - The pool's exposure to a compromised member account rises from zero — under
   the old rule a human saw every transfer — to one weekly cap per compromised
   account. §12.2's destination controls are what bound it, and under the
-  hardwired-destination model in ADR 0010's sibling decision a compromised
+  hardwired-destination model in ADR 0011 a compromised
   session can only ever send to the member's own wallet.
 - This is a weakening of a control that `CLAUDE.md` places under human-only
   actions. It is recorded, dated, and attributed rather than applied quietly,

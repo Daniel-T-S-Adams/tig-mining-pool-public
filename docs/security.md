@@ -65,7 +65,7 @@ isolation guarantee and must be addressed before public funds.
 | Class | Examples | Minimum handling |
 |---|---|---|
 | Secret | TIG API key, account/payout/deposit-custody private keys, enrollment-ticket HMAC key, database passwords, TLS keys | Never in database business rows, artifacts, source, CLI arguments, logs, or traces; provide only to the process that needs it |
-| Sensitive | Enrollment ticket before use, signed authentication headers, member email/account recovery data, security events, wallet-link nonces | Encrypt in transit; restrict by role; never expose cross-member; redact ordinary telemetry |
+| Sensitive | Enrollment ticket before use, signed authentication headers, worker-recovery ticket data, security events, wallet-link nonces | Encrypt in transit; restrict by role; never expose cross-member; redact ordinary telemetry |
 | Untrusted bulky | Package chunks, manifest, outputs, qualities, Merkle data, derived parse errors | Quarantine; stream under hard bounds; never general-purpose extract or execute |
 | Financial/audit | Decisions, TIG attempts, receipts, qualifier attribution, ledger and operator commands | Append-only or immutable history; durable IDs, hashes, actor, evidence, and timestamps |
 | Public/low sensitivity | Protocol discovery, supported versions, confirmed public TIG facts | Integrity and availability controls still apply |

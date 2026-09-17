@@ -531,25 +531,32 @@ reserved liabilities must still pass the financial gate.
 The complete set of member financial, liveness, and capacity attacks is
 maintained in [member_attack_model.md](member_attack_model.md). After the
 decision engine proposes bundle counts for all tracks and before any
-precommit, the Controller must reserve at least the maximum live
-method-penalty and per-failure exposure across those tracks:
+precommit, the Controller must reserve at least the maximum **policy-scaled**
+assignment reserve across those tracks:
 
 ```text
 max(
-    member collateral multiplier M
-      * live reports.penalty_amount * proposed num_bundles[track]
+    ceil( live reports.penalty_amount * proposed num_bundles[track]
+          * member collateral multiplier bps / 10_000 )
     + exact proposed TIG fee[track]
     + configured per-benchmark failure charge X
     for every proposed track
 )
 ```
 
-`M` is the pool-set per-member collateral multiplier, default 1 and never
-above it, and it scales the method-penalty term only — the TIG fee is an
-outlay the pool certainly makes and `X` is a charge it has already decided to
-levy, so trust discounts neither. It is fixed into the reservation when the
-reservation is made and a later change never reaches an open one.
-[accounting.md](accounting.md) §11.4 owns the term and ADR 0010 the decision.
+The multiplier is the pool-set per-member value in integer basis points,
+default `10_000` and never above it, and it scales the method-penalty term
+only — the TIG fee is an outlay the pool certainly makes and `X` is a charge
+it has already decided to levy, so trust discounts neither. It is fixed into
+the reservation when the reservation is made and a later change never reaches
+an open one. [accounting.md](accounting.md) §11.4 owns the term and ADR 0010
+the decision.
+
+**This is a floor against the scaled reserve, not against the full exposure.**
+Below `10_000` bps the reservation is deliberately smaller than the maximum
+penalty TIG can levy, and the difference is pool risk rather than member
+collateral — `accounting.md` §13 item 21 requires the aggregate to be
+reported for that reason.
 
 TIG selects the track only after precommit, which is why admission uses the
 maximum. The reservation is specific to that member and benchmark and cannot

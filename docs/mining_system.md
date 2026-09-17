@@ -531,17 +531,32 @@ reserved liabilities must still pass the financial gate.
 The complete set of member financial, liveness, and capacity attacks is
 maintained in [member_attack_model.md](member_attack_model.md). After the
 decision engine proposes bundle counts for all tracks and before any
-precommit, the Controller must reserve at least the maximum live
-method-penalty and per-failure exposure across those tracks:
+precommit, the Controller must reserve at least the maximum **policy-scaled**
+assignment reserve across those tracks:
 
 ```text
 max(
-    live reports.penalty_amount * proposed num_bundles[track]
+    ceil( live reports.penalty_amount * proposed num_bundles[track]
+          * member collateral multiplier bps / 10_000 )
     + exact proposed TIG fee[track]
     + configured per-benchmark failure charge X
     for every proposed track
 )
 ```
+
+The multiplier is the pool-set per-member value in integer basis points,
+default `10_000` and never above it, and it scales the method-penalty term
+only — the TIG fee is an outlay the pool certainly makes and `X` is a charge
+it has already decided to levy, so trust discounts neither. It is fixed into
+the reservation when the reservation is made and a later change never reaches
+an open one. [accounting.md](accounting.md) §11.4 owns the term and ADR 0010
+the decision.
+
+**This is a floor against the scaled reserve, not against the full exposure.**
+Below `10_000` bps the reservation is deliberately smaller than the maximum
+penalty TIG can levy, and the difference is pool risk rather than member
+collateral — `accounting.md` §13 item 21 requires the aggregate to be
+reported for that reason.
 
 TIG selects the track only after precommit, which is why admission uses the
 maximum. The reservation is specific to that member and benchmark and cannot
@@ -1113,16 +1128,21 @@ settled in [architecture.md](architecture.md).
   `internal_pool_unverified_limit`/recovery headroom, all as versioned policy;
 - review the technical package deadline and global capacity headroom using
   spike measurements without replacing the settled tier rule;
-- a **trust-label mechanism**, deferred with its direction confirmed: a member
-  the pool trusts could be allowed more concurrent bundles than their
-  collateral alone permits. §8's flat-tier rule stands until it is designed —
-  a tier does not bypass collateral, and nothing may raise an admission limit
-  above §6.1's formula until this decision lands. `accounting.md` §14 records
-  the same item from the accounting side;
+- the **trust-label mechanism** is no longer open: it landed on 2026-09-16 as
+  the per-member collateral multiplier `M` (§6.1, `accounting.md` §11.4,
+  ADR 0010). It gives a trusted member more concurrent bundles for the same
+  balance by lowering what each bundle reserves, rather than by raising an
+  admission limit above §6.1's formula — which this entry forbade and which
+  stays forbidden. §8's flat-tier rule is no longer held open by it, and a
+  tier still does not bypass collateral. The entry is kept rather than deleted
+  because `accounting.md` §14 and this list both recorded the constraint;
 - use spike measurements to decide the mandatory pool-side solution-verification
   and hidden method-reexecution checks before benchmark commitment;
-- account, alias, login, account-level recovery proof, and enrollment-ticket
-  user experience;
+- account, alias, and enrollment-ticket user experience. **Login is decided**:
+  the member's connected wallet is the account identity (ADR 0011), which also
+  settles account-level recovery — there is none, and a lost wallet ends both
+  the balance and the member's authority to recover a worker under
+  `member_protocol.md` §3.3;
 - public member APIs, operator tooling, monitoring, and support workflows; and
 - each additional physical database schema slice when its first behavior is
   implemented.

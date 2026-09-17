@@ -65,7 +65,7 @@ isolation guarantee and must be addressed before public funds.
 | Class | Examples | Minimum handling |
 |---|---|---|
 | Secret | TIG API key, account/payout/deposit-custody private keys, enrollment-ticket HMAC key, database passwords, TLS keys | Never in database business rows, artifacts, source, CLI arguments, logs, or traces; provide only to the process that needs it |
-| Sensitive | Enrollment ticket before use, signed authentication headers, member email/account recovery data, security events, wallet-link nonces | Encrypt in transit; restrict by role; never expose cross-member; redact ordinary telemetry |
+| Sensitive | Enrollment ticket before use, signed authentication headers, worker-recovery ticket data, security events, wallet-link nonces | Encrypt in transit; restrict by role; never expose cross-member; redact ordinary telemetry |
 | Untrusted bulky | Package chunks, manifest, outputs, qualities, Merkle data, derived parse errors | Quarantine; stream under hard bounds; never general-purpose extract or execute |
 | Financial/audit | Decisions, TIG attempts, receipts, qualifier attribution, ledger and operator commands | Append-only or immutable history; durable IDs, hashes, actor, evidence, and timestamps |
 | Public/low sensitivity | Protocol discovery, supported versions, confirmed public TIG facts | Integrity and availability controls still apply |
@@ -164,15 +164,48 @@ The signer receives only immutable approved intents, allow-lists the Base chain
 and TIG token contract, enforces transaction/rolling/hot-balance limits, and
 records the nonce and signed transaction hash before broadcast. The
 member-custody signer additionally requires the approved policy state for the
-transfer's cause and **unconditional multi-person authorization** — every
-transfer, at any amount, with no threshold. This section owns that rule;
-`accounting.md` §12.4 points here rather than restating it, and thresholds
-there govern operating custody only.
+transfer's cause and **multi-person authorization for every transfer except a
+member withdrawal within ADR 0009's per-member caps**. This section owns that
+rule; `accounting.md` §12.4 points here rather than restating it, and
+thresholds there govern operating custody only.
 
-That control guarded every collateral movement before ADR 0008
-merged the pots, and merging them widened what one signature reaches rather
-than narrowing it, so relaxing it here would weaken a check while the reason
-to keep it grew.
+That control guarded every collateral movement before ADR 0008 merged the
+pots, and merging them widened what one signature reaches rather than
+narrowing it. It was therefore unconditional — every transfer, at any amount,
+with no threshold — until ADR 0009, and the argument for keeping it that way
+is recorded here rather than deleted: relaxing it weakens a check while the
+reason to keep it grows.
+
+**What ADR 0009 changed, and what it did not.** A member withdrawal is signed
+with no human authorization when the amount is at or below the per-transaction
+cap and the member's rolling seven-day total stays at or below the weekly cap;
+both caps are per member and both are versioned policy. Every other transfer
+out of member custody — a larger withdrawal, and `accounting.md` §8.6's sweep
+of pool value to operating custody — keeps unconditional multi-person
+authorization. Operating-custody thresholds are unchanged.
+
+**What the rolling total counts, and who counts it.** This section owns both,
+because a cap defined loosely is a cap with a bypass. The total counts every
+withdrawal for that member **already signed or still pending completion**, not
+only finalized ones: Base finality is minutes, and counting finalized
+transfers alone would let a member open several inside that window and clear
+the cap with each. The evaluation happens once, in the Controller accounting
+projector at intent creation, and its result is stamped into the immutable
+intent. The signer checks the stamp and never computes a member's history —
+`architecture.md` §13 invariant 10 and §4's component table keep withdrawal
+calculation out of the Funds Gateway, and §3.4's own rule that the signer
+receives only immutable approved intents would not survive it doing arithmetic
+over a member's recent activity.
+
+The relaxation is bounded by what it can reach. Under ADR 0011 a member's
+withdrawal destination is the wallet that authenticated the session and cannot
+be changed, so the automated path can only ever move a member's own money to
+that member's own address. A compromised member session is therefore not a
+theft; a compromised *signing key* still is, and the caps do nothing about it,
+because a key holder signs directly and the signer's limits are never
+consulted. ADR 0009 records that the owner accepts that exposure for v0 and
+has declined to bound it with a hot-wallet limit, which is the control named
+in the paragraph above that would.
 
 It signs exactly two transfer kinds: a member withdrawal to that member's
 verified address, and `accounting.md` §8.6's sweep of pool value to the one
@@ -224,7 +257,7 @@ request the API:
 5. returns the same non-enumerating denial for absent and cross-worker objects.
 
 Account and operator credentials are separate from worker credentials. A
-worker key cannot change account recovery, link a payout wallet, request or
+worker key cannot perform worker recovery, link a payout wallet, request or
 alter a withdrawal, or invoke an operator endpoint. Operator access cannot
 impersonate a worker request; recovery is an explicit audited action.
 

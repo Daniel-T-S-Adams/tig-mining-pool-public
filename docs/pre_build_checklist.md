@@ -281,6 +281,10 @@ Outputs: [security.md](security.md), [accounting.md](accounting.md), and
 - [x] Confirm payout-address-change protection and who pays Base gas; payout
   authorization, replay protection, limits, and operator
   recovery.
+  — **Superseded by ADR 0011.** There is no payout-address change to protect:
+  the destination is the wallet that authenticated the session
+  (`accounting.md` §12.2). Who pays Base gas, payout authorization, replay
+  protection and limits are unaffected.
 - [x] Enumerate member attacks separately for method fraud, hostile packages,
   slow-but-correct work, missing/invalid work, capacity abuse, and Sybil
   variants.

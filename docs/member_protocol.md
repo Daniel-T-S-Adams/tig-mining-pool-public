@@ -54,7 +54,7 @@ from their contents.
 | Identity | Issuer | Meaning and uniqueness |
 |---|---|---|
 | `member_id` | Pool | One registered pool account. It is never selected by the worker. |
-| `worker_id` | Pool | One installed member agent, permanently scoped to one member unless an audited account-recovery action says otherwise. |
+| `worker_id` | Pool | One installed member agent, permanently scoped to one member unless an audited worker-recovery action says otherwise. |
 | `credential_id` | Pool | One Ed25519 public key authorized for a worker. More than one may exist briefly during rotation. |
 | `slot_id` | Pool | One independently assignable CPU or GPU capacity unit belonging to one worker. |
 | `client_slot_key` | Worker | Stable member-local identity of one logical slot across generations. Unique within a worker. |
@@ -103,8 +103,9 @@ Revoking a worker does not change this historical ownership.
 ### 3.1 Initial enrollment
 
 From an authenticated member account, the member creates a one-time enrollment
-ticket. Account login and the user interface that creates the ticket are
-outside this protocol; the ticket behavior is not:
+ticket. Account login is a wallet signature proving control of the member's
+Base address (ADR 0011, §17); the user interface that creates the ticket
+remains outside this protocol. The ticket behavior is not:
 
 - it is a cryptographically random, single-use bearer value with at least 256
   bits of entropy;
@@ -237,14 +238,18 @@ result; different content for the same ID is a conflict. The ticket is
 bound to its exact `worker_id` and rejected for any other worker. A worker
 revoked as a security action cannot be recovered by this path; only an
 explicit, audited pool decision reinstates it, after which ordinary
-recovery applies. The HTTP route and schema for recovery, and the account
-login that authorizes ticket creation, remain outside this protocol
-version.
+recovery applies. The HTTP route and schema for recovery remain outside this
+protocol version — the route is deferred, not the remedy behind it, which is
+worker recovery and not recovery of the account itself. The account login that
+authorizes ticket creation is not deferred:
+it is a wallet signature proving control of the member's Base address
+(ADR 0011, §17), and because that account cannot itself be recovered, a member
+who loses their wallet loses the authority this ticket depends on.
 
 The member or an operator may revoke one credential or the whole worker.
 Revocation takes effect on the next request and prevents new offers,
 heartbeats, events, and uploads. It does not erase state or reassign a
-benchmark. If revocation was accidental, account recovery may restore access;
+benchmark. If revocation was accidental, worker recovery may restore access;
 if it was a security action, the pool decides explicitly whether any pending
 assignment may continue. Authentication failures themselves do not count
 against mining trust.
@@ -831,11 +836,22 @@ statistics.
 
 ## 17. Decisions left to later documents
 
-This protocol deliberately does not choose the member website login mechanism,
-the account-recovery HTTP route and schema (the recovery proof itself is
-specified in section 3.3), deposit custody details, numerical
-`J[k]`/`X`/global-headroom values, relational schema, artifact-store product,
-deployment topology, or production retention capacity.
+This protocol deliberately does not choose the **worker**-recovery HTTP route
+and schema (the recovery proof itself is specified in section 3.3), deposit
+custody details, numerical `J[k]`/`X`/global-headroom values, relational
+schema, artifact-store product, deployment topology, or production retention
+capacity.
+
+The deferred route is worker recovery, not account recovery. Recovery of the
+member *account* is not deferred — under ADR 0011 there is none, because the
+account is the wallet.
+
+The member website login mechanism, which this section previously also left
+open, **is now chosen**: the member connects a wallet and proves control of
+its Base address, and that address is the member account (ADR 0011). §3.3's
+`WORKER_RECOVERY` ticket is therefore authorized by a wallet signature. There
+is no recovery of the account itself, so a member who loses their wallet also
+loses the authority that issues those tickets.
 Those choices may implement this contract but may not weaken its ownership,
 idempotency, durable-acceptance, or failure-attribution rules.
 

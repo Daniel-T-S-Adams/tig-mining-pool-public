@@ -103,8 +103,9 @@ Revoking a worker does not change this historical ownership.
 ### 3.1 Initial enrollment
 
 From an authenticated member account, the member creates a one-time enrollment
-ticket. Account login and the user interface that creates the ticket are
-outside this protocol; the ticket behavior is not:
+ticket. Account login is a wallet signature proving control of the member's
+Base address (ADR 0011, §17); the user interface that creates the ticket
+remains outside this protocol. The ticket behavior is not:
 
 - it is a cryptographically random, single-use bearer value with at least 256
   bits of entropy;
@@ -237,9 +238,11 @@ result; different content for the same ID is a conflict. The ticket is
 bound to its exact `worker_id` and rejected for any other worker. A worker
 revoked as a security action cannot be recovered by this path; only an
 explicit, audited pool decision reinstates it, after which ordinary
-recovery applies. The HTTP route and schema for recovery, and the account
-login that authorizes ticket creation, remain outside this protocol
-version.
+recovery applies. The HTTP route and schema for recovery remain outside this
+protocol version. The account login that authorizes ticket creation does not:
+it is a wallet signature proving control of the member's Base address
+(ADR 0011, §17), and because that account cannot itself be recovered, a member
+who loses their wallet loses the authority this ticket depends on.
 
 The member or an operator may revoke one credential or the whole worker.
 Revocation takes effect on the next request and prevents new offers,

@@ -110,19 +110,18 @@ terms `pre_build_checklist.md` §9 already requires.
   posts a notice the member has no way to receive is not an appeal process; it
   is a delay before taking their money.
 
-  That machinery is therefore superseded, not repaired. The owner decided on
-  2026-09-17 that a charge does not depend on fault attribution and carries no
-  in-system appeal — a member who believes they were wrongly charged contacts
-  the pool out of band, and a pool investigation that agrees reverses through
-  §10's correction path. With no fault to contest there is no appeal, so the
-  notice this ADR made undeliverable is a notice the design no longer needs.
+  **This ADR creates that gap and does not close it.** Issue #56 owns the
+  fix, and the fix is larger than the gap: repairing the notice means deciding
+  what a charge depends on at all, which reaches `mining_system.md` §8's fault
+  attribution, §10 invariant 7's assignment of post-acceptance responsibility,
+  `architecture.md` §6's slash authority, and `security.md` §3's attribution
+  path. Choosing a notification mechanism inside this ADR would settle those
+  by implication, from a decision about login.
 
-  **Issue #56 owns the replacement**, because §11.2, §11.6 and
-  `mining_system.md` §8 are one mechanism and rewriting them separately would
-  leave the documents inconsistent in between. This ADR records why the rework
-  became necessary; it does not attempt it. Nothing charges a member before
-  slice 8, so the interval carries no member exposure — the contradiction sits
-  in prose that no code reads.
+  What is recorded here is the constraint, not the answer: a seven-day
+  forfeiture deadline may not run against a member the pool has no way to
+  reach. Nothing charges a member before slice 8, so the interval carries no
+  member exposure — the gap sits in prose that no code reads.
 - One wallet is one member. A person operating two wallets is two members,
   with two balances, two multipliers and two trust histories.
 - The pool never holds a member credential that is worth stealing from it. It

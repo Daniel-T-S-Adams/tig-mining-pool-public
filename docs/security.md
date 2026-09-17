@@ -184,6 +184,19 @@ out of member custody — a larger withdrawal, and `accounting.md` §8.6's sweep
 of pool value to operating custody — keeps unconditional multi-person
 authorization. Operating-custody thresholds are unchanged.
 
+**What the rolling total counts, and who counts it.** This section owns both,
+because a cap defined loosely is a cap with a bypass. The total counts every
+withdrawal for that member **already signed or still pending completion**, not
+only finalized ones: Base finality is minutes, and counting finalized
+transfers alone would let a member open several inside that window and clear
+the cap with each. The evaluation happens once, in the Controller accounting
+projector at intent creation, and its result is stamped into the immutable
+intent. The signer checks the stamp and never computes a member's history —
+`architecture.md` §13 invariant 10 and §4's component table keep withdrawal
+calculation out of the Funds Gateway, and §3.4's own rule that the signer
+receives only immutable approved intents would not survive it doing arithmetic
+over a member's recent activity.
+
 The relaxation is bounded by what it can reach. Under ADR 0011 a member's
 withdrawal destination is the wallet that authenticated the session and cannot
 be changed, so the automated path can only ever move a member's own money to
@@ -244,7 +257,7 @@ request the API:
 5. returns the same non-enumerating denial for absent and cross-worker objects.
 
 Account and operator credentials are separate from worker credentials. A
-worker key cannot change account recovery, link a payout wallet, request or
+worker key cannot perform worker recovery, link a payout wallet, request or
 alter a withdrawal, or invoke an operator endpoint. Operator access cannot
 impersonate a worker request; recovery is an explicit audited action.
 

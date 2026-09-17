@@ -1355,25 +1355,15 @@ the private key. The signer:
 - enforces per-transaction, rolling, and hot-wallet limits. Multi-person
   authorization is `security.md` §3.4's rule and is not restated here. For
   member custody it is required for every transfer **except** a member
-  withdrawal within ADR 0009's per-member caps: at or below the
-  per-transaction cap, with the member's rolling seven-day withdrawn total
-  also at or below the weekly cap. That total counts every withdrawal for
-  that member **already signed or still pending completion**, not only
-  finalized ones — counting finalized transfers alone would let a member open
-  several within Base's confirmation window and clear the cap with each.
-  The evaluation happens at intent creation, in the accounting projector, and
-  its result is stamped into the immutable intent; the signer checks the stamp
-  rather than computing a balance of its own, which keeps `security.md` §3.4's
-  "only immutable approved intents" intact. Both caps are versioned policy,
-  not constants, and a transfer that exceeds either is signed only with
-  authorization. Thresholds for operating custody are unchanged.
+  withdrawal that ADR 0009's per-member caps admit. §3.4 owns those caps,
+  what the rolling seven-day total counts, and where it is evaluated; the signer's part
+  is only to read the cap result stamped into the immutable intent by the
+  accounting projector, never to compute a member's history for itself.
+  Thresholds for operating custody are unchanged.
   The hot-wallet limit is a capability the signer must have and a value the
   owner has not set: ADR 0009 declines one for v0 and records what that
   accepts. An unset limit is not an absent control — it must be configurable
   and reported, so setting it later is policy rather than a code change.
-  One pot means the signer must evaluate these caps against the member's own
-  recent history rather than the amount alone — which amounts qualify is
-  policy, never an implementer's choice.
 
 An ambiguous broadcast is reconciled by transaction hash, signer nonce, receipt,
 and token `Transfer` event. A fee replacement uses the same nonce and exact

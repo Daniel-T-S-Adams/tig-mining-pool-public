@@ -47,9 +47,11 @@ a member-supplied field, or from an operator edit.
 Consequently §12.2's address-change controls have nothing left to guard and do
 not apply: no 48-hour hold, no out-of-band change notification, no
 reauthentication or MFA step for a destination change. The remaining §12.2
-rules stand — a member may still request a withdrawal hold, and a missing or
-held destination still leaves the amount in the member's balance and affects
-no other member.
+rules stand — a member may still request a withdrawal hold, and a held
+destination still leaves the amount in the member's balance and affects no
+other member. A destination can no longer be *missing or invalid*: it is
+whatever wallet authenticated the session, so there is no unset state to
+handle (`accounting.md` §8.5 and §12.2).
 
 ## What this costs
 

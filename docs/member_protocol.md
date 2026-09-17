@@ -54,7 +54,7 @@ from their contents.
 | Identity | Issuer | Meaning and uniqueness |
 |---|---|---|
 | `member_id` | Pool | One registered pool account. It is never selected by the worker. |
-| `worker_id` | Pool | One installed member agent, permanently scoped to one member unless an audited account-recovery action says otherwise. |
+| `worker_id` | Pool | One installed member agent, permanently scoped to one member unless an audited worker-recovery action says otherwise. |
 | `credential_id` | Pool | One Ed25519 public key authorized for a worker. More than one may exist briefly during rotation. |
 | `slot_id` | Pool | One independently assignable CPU or GPU capacity unit belonging to one worker. |
 | `client_slot_key` | Worker | Stable member-local identity of one logical slot across generations. Unique within a worker. |
@@ -239,7 +239,9 @@ bound to its exact `worker_id` and rejected for any other worker. A worker
 revoked as a security action cannot be recovered by this path; only an
 explicit, audited pool decision reinstates it, after which ordinary
 recovery applies. The HTTP route and schema for recovery remain outside this
-protocol version. The account login that authorizes ticket creation does not:
+protocol version — the route is deferred, not the remedy behind it, which is
+worker recovery and not recovery of the account itself. The account login that
+authorizes ticket creation is not deferred:
 it is a wallet signature proving control of the member's Base address
 (ADR 0011, §17), and because that account cannot itself be recovered, a member
 who loses their wallet loses the authority this ticket depends on.
@@ -247,7 +249,7 @@ who loses their wallet loses the authority this ticket depends on.
 The member or an operator may revoke one credential or the whole worker.
 Revocation takes effect on the next request and prevents new offers,
 heartbeats, events, and uploads. It does not erase state or reassign a
-benchmark. If revocation was accidental, account recovery may restore access;
+benchmark. If revocation was accidental, worker recovery may restore access;
 if it was a security action, the pool decides explicitly whether any pending
 assignment may continue. Authentication failures themselves do not count
 against mining trust.
@@ -834,11 +836,15 @@ statistics.
 
 ## 17. Decisions left to later documents
 
-This protocol deliberately does not choose the account-recovery HTTP route and
-schema (the recovery proof itself is specified in section 3.3), deposit
+This protocol deliberately does not choose the **worker**-recovery HTTP route
+and schema (the recovery proof itself is specified in section 3.3), deposit
 custody details, numerical `J[k]`/`X`/global-headroom values, relational
 schema, artifact-store product, deployment topology, or production retention
 capacity.
+
+The deferred route is worker recovery, not account recovery. Recovery of the
+member *account* is not deferred — under ADR 0011 there is none, because the
+account is the wallet.
 
 The member website login mechanism, which this section previously also left
 open, **is now chosen**: the member connects a wallet and proves control of

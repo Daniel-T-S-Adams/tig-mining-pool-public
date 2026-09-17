@@ -100,9 +100,29 @@ terms `pre_build_checklist.md` §9 already requires.
   own address — which is not a theft at all. This is why ADR 0009's relaxation
   and this decision are safe together and would not be safe apart.
 - The member website needs no password, no email, no MFA enrolment, no
-  password reset and no session-recovery flow. It also cannot send a member a
-  security notification, because it holds no contact channel — an out-of-band
-  notification is not available to any part of this design.
+  password reset and no session-recovery flow.
+- **The pool has no push channel to a member, and that reaches further than
+  this decision's own subject matter.** Dropping the destination-change
+  warning costs nothing, because there is no destination change to warn about.
+  But §11.2 and §11.6 also require the pool to *notify the member* of a
+  proposed slash or `X` charge, and §11.6 makes an undisputed proposal **final
+  after a seven-day appeal**. A forfeiture clock that starts when the pool
+  posts a notice the member has no way to receive is not an appeal process; it
+  is a delay before taking their money.
+
+  That machinery is therefore superseded, not repaired. The owner decided on
+  2026-09-17 that a charge does not depend on fault attribution and carries no
+  in-system appeal — a member who believes they were wrongly charged contacts
+  the pool out of band, and a pool investigation that agrees reverses through
+  §10's correction path. With no fault to contest there is no appeal, so the
+  notice this ADR made undeliverable is a notice the design no longer needs.
+
+  **Issue #56 owns the replacement**, because §11.2, §11.6 and
+  `mining_system.md` §8 are one mechanism and rewriting them separately would
+  leave the documents inconsistent in between. This ADR records why the rework
+  became necessary; it does not attempt it. Nothing charges a member before
+  slice 8, so the interval carries no member exposure — the contradiction sits
+  in prose that no code reads.
 - One wallet is one member. A person operating two wallets is two members,
   with two balances, two multipliers and two trust histories.
 - The pool never holds a member credential that is worth stealing from it. It

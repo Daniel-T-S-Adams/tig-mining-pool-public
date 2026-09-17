@@ -653,7 +653,11 @@ The balance remains completely separate from delegation and from pool
 operating funds. They cannot pay another member or silently
 cover a pool error. A proposed slash first freezes the disputed amount without
 moving the member liability, notifies the member, and records the evidence and
-appeal deadline. A final slash is a new audited journal batch authorized only
+appeal deadline. **That notice-and-appeal machinery is superseded and awaiting
+rework** — ADR 0011 leaves the pool no channel to notify a member on, and the
+owner has since decided that a charge does not depend on fault and carries no
+in-system appeal. Issue #56 owns the replacement; nothing charges a member
+before slice 8, so no member is exposed to the gap meanwhile. A final slash is a new audited journal batch authorized only
 by the published member-fault policy, with benchmark evidence, amount, policy
 version, actor, and appeal result:
 
@@ -1011,6 +1015,21 @@ it does not by itself create a first-failure ban. The reduced eligible
 collateral may still prevent further admission. A proposed method-loss slash
 may additionally impose the separate method/security suspension. Both provide
 a seven-day appeal. An undisputed proposal becomes final after that deadline.
+
+**This subsection is superseded and awaiting rework (issue #56).** Two things
+broke it. ADR 0011 made the member's wallet the account, so the pool has no
+email, phone or address to send a notice to — and a seven-day forfeiture
+deadline in front of a notice the member cannot receive is not an appeal.
+Separately, the owner decided on 2026-09-17 that a charge does not depend on
+fault attribution at all and carries no in-system appeal: a member who
+believes they were wrongly charged contacts the pool out of band, and a pool
+investigation that agrees reverses through §10's correction path.
+
+Issue #56 replaces the fault bullets above, this appeal machinery, and
+`mining_system.md` §8's matching rule together, because they are one
+mechanism and repairing them separately would leave the document
+inconsistent in between. Nothing charges a member before slice 8, so the
+contradiction is in prose that no code reads.
 A dispute remains frozen until a reviewer who did not make the original fault
 decision records a reasoned result. Pool/TIG fault or insufficient evidence
 releases the freeze; custody is not evidence of member fault.
@@ -1477,6 +1496,21 @@ The owner has confirmed:
    (§12.2, ADR 0011). This supersedes the earlier confirmation that a changed
    payout address is held for 48 hours with out-of-band notification: there is
    no address change to hold, and the pool holds no contact channel to notify.
+   It also leaves the slash and `X`-charge notices in §11.2 and §11.6 with no
+   channel to be delivered on. Those are superseded rather than repaired:
+   decision 10 below removes the appeal they gated; and
+10. **a charge does not depend on fault, and a shortfall is shared across
+    members** (2026-09-17). The member who owned the benchmark is charged
+    whether the cause was the member, the pool, TIG, or unresolved, and there
+    is no in-system appeal — a member who believes they were wrongly charged
+    contacts the pool out of band, and a pool investigation that agrees
+    reverses through §10. Where the member's collateral does not cover the
+    charge, which ADR 0010's multiplier makes possible, the remainder comes
+    out of pool proceeds before distribution, so every member bears a
+    pro-rata share; the charged member loses their collateral *and* their own
+    share of the remainder. **Issue #56 implements this**: §11.2, §11.6, §8's
+    accounts, §13's invariants and `mining_system.md` §8 are one mechanism and
+    are rewritten together there, not piecemeal here.
 
 The remaining decision is:
 

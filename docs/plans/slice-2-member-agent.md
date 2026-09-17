@@ -49,15 +49,28 @@ Deferred with the step that owns them, not dropped:
   publishes the accepted package and the commitment payload; it does not build a
   proof branch or delete anything.
 - **Tiers, collateral, joining fees, deposits, and the member balance** →
-  **steps 6–8**. The `member_unverified < tier_number` half of §7.6's gate stays
-  deferred exactly as slice 1's criterion D2b records; slice 2 continues to
-  enforce the pool-wide half and the per-slot rule ("one open assignment
-  occupies exactly one slot", `member_protocol.md` §16 invariant 1).
+  **steps 6–8**. What is deferred is the **tier** as the source of the number:
+  `tier_number` needs a finalized joining-fee batch (`architecture.md` §7.6),
+  which needs the accounting slices.
+
+  The *bound itself* is not deferred, and slice 1's D2b reasoning does not carry
+  here. D2b was justified by there being no member to test against; slice 2 is
+  the slice that creates members, and a member with N registered slots would
+  otherwise hold N concurrent unverified benchmarks bounded only by the
+  pool-wide limit — which `member_protocol.md` §6 forbids ("absence of an
+  applicable policy produces `NO_ACTION`, never unlimited work") and
+  `security.md` §11 invariant 15 keeps distinct from the global limit. D14 below
+  is the compensating bound slice 2 enforces, from configuration instead of from
+  a tier. Slice 2 also keeps the per-slot rule: one open assignment occupies
+  exactly one slot (`member_protocol.md` §16 invariant 1).
 - **The member account, its login, and the website** → **step 7**. Enrollment
-  and recovery tickets are created in slice 2 by an audited `pool-admin`
-  command rather than by a member-facing account page: `member_protocol.md` §3.1
-  puts account login outside this protocol, and §17 leaves the recovery route to
-  a later document.
+  and recovery tickets are created in slice 2 by an audited `pool-admin` command
+  that calls a private Pool API admin route, rather than by a member-facing
+  account page: `member_protocol.md` §3.1 puts account login outside this
+  protocol, and §17 leaves the recovery route to a later document. The route,
+  not a shared secret file, is what keeps the ticket HMAC key in the one process
+  `security.md` §4.1 gives it to; `pool-admin` never becomes a second holder of
+  a Pool API secret.
 - **Metrics and alert tests** → **step 5**, with slice 1's I2 and I4.
 - **GPU work.** v0 defines GPU slots (`member_protocol.md` §6) and the schema
   accepts them, but the pool serves `cpu` today and TIG's live testnet offers no
@@ -219,7 +232,26 @@ Each criterion is a property with a test, not a task. Where a criterion says
   reassigns the benchmark (§6).
 - D10. Reserving the bundle-scaled financial exposure precedes the precommit,
   and failure to reserve cancels the pending offer **without** a TIG write (§6
-  final paragraph, `accounting.md` §11.4 — the reserve slice 1 already computes).
+  final paragraph). In slice 2 "reserve" means what slice 1's D2c means: the
+  `accounting.md` §11.4 amount is computed and durably recorded with the
+  decision, and nothing is posted. The check against a member's *eligible
+  collateral* arrives with steps 6–8, because there is no balance to check
+  against until then.
+- D11. **The per-member concurrency bound, without tiers.** A member's
+  concurrent unverified benchmarks are capped by a required configuration value
+  standing in for `tier_number`, enforced in the same serialized transaction as
+  the pool-wide limit and the reserve (`architecture.md` §7.6). It is required,
+  not defaulted: a deployment with no value loads no orchestration policy, and
+  an offer under no applicable policy is `NO_ACTION`, never unlimited work
+  (`member_protocol.md` §6 final paragraph). Tests: the (N+1)th concurrent offer
+  from one member is refused while another member's is admitted; concurrent
+  offers from one member cannot both take the last slot; and a missing value
+  fails the config load, the way slice 1's `internal_pool_unverified_limit`
+  does.
+- D12. **The queue allowance follows the same number.** One member may have no
+  more than `max(0, limit - member_unverified)` queued or reserved offers, and a
+  slot may have only one (`member_protocol.md` §6), with `limit` from D11 until
+  tiers supply it.
 
 ### E. The confirmed assignment
 
@@ -242,6 +274,14 @@ Each criterion is a property with a test, not a task. Where a criterion says
   -> worker_id -> member_id` is written in the same transaction as the
   assignment and is immutable afterwards — the row slice 1's F6 wrote a
   placeholder into now carries a real member (§2, `architecture.md` §6).
+- E6. **The bootstrap owner stops being creatable.** `migrations/0006` permits
+  an `owner_kind = 'POOL_BOOTSTRAP'` workflow on testnet, which was slice 1's
+  only way to own a benchmark. `mining_system.md` §10 invariant 1 confines that
+  carve-out to benchmarks created *before members exist*, so once the
+  offer-driven path works, admission must not be able to create one. Test: no
+  code path creates a `POOL_BOOTSTRAP` workflow after slice 2's admission path
+  exists. The constraint stays in the schema — existing rows keep their history,
+  and the negative test keeps something to assert against.
 
 ### F. Heartbeats, events, cancellation
 
@@ -351,16 +391,26 @@ Each criterion is a property with a test, not a task. Where a criterion says
   before publication, after publication and before the commit, after the commit
   and before the response, and an abandoned publication. Test: one crash test
   per point, the shape slice 1's G2 used.
-- I7. An orphaned publication is deletable only after the grace period **and** a
-  database non-reference check (§8.2).
+- I7. **No orphan sweep runs in slice 2.** An unreferenced accepted object is
+  left in place, and the criterion is the predicate only: given an object with
+  no database reference, the eligibility test is false before the grace period
+  and true after it (§8.2). Physical deletion stays where `architecture.md` §13
+  invariant 13 and §8.4 put it — the Artifact Worker, from a controller-issued
+  deletion job — and arrives with retention in step 3.
 
 ### J. The benchmark commitment
 
-- J1. The artifact worker builds the canonical commitment payload — §6.2's
-  `solution_quality`, exactly `precommit.details.num_nonces` signed entries in
-  nonce order, and the `merkle_root` — publishes it under §8.2's derived key, and
-  records it in `pool.commitment_payload`, the table `migrations/0015` created
-  for exactly this.
+- J1. The artifact worker **builds and publishes** the canonical commitment
+  payload — §6.2's `solution_quality`, exactly `precommit.details.num_nonces`
+  signed entries in nonce order, and the `merkle_root` — under §8.2's derived
+  key, and reports the key and digest in its fenced job result. The
+  **controller** records `pool.commitment_payload` from that result, because
+  `architecture.md` §6 gives the worker "build proof or commitment bytes" and
+  "publish accepted artifact and derived payload" while applying a fenced result
+  is the controller's, and `migrations/0015` grants INSERT on that table to
+  `pool_controller` alone. That row guards §13 invariant 4; widening the
+  worker's grants to reach it would move an owner, which §13 invariant 6 forbids
+  doing by accident.
 - J2. A `BENCHMARK` write intent can be created only after durable acceptance
   **and** a recorded commitment payload — `architecture.md` §13 invariant 4,
   which `migrations/0011` and `0015` already enforce against the stub; slice 2 supplies the real records, and the stub
@@ -375,7 +425,8 @@ Each criterion is a property with a test, not a task. Where a criterion says
 
 - K1. `member-agent` generates its Ed25519 key locally; the private key never
   leaves the member machine and never appears in a request, log, or crash report
-  (`member_protocol.md` §3.1, `security.md` §3).
+  (`member_protocol.md` §3.1; `security.md` §4.1, "a worker private key is
+  generated and retained only on the member machine").
 - K2. It recomputes `assignment_digest` and refuses to start if any identity
   field is inconsistent, and verifies every downloaded binary and image against
   its digest before use (`member_protocol.md` §7). Test: each of the three
@@ -399,9 +450,13 @@ Each criterion is a property with a test, not a task. Where a criterion says
 - L1. Every new table follows slice 1's rules: forward-only migrations applied
   by `pool-admin migrate`, tested against an empty database and against the
   preceding schema (`architecture.md` §7.1).
-- L2. `pool_api` and `pool_artifact_worker` exist already — `migrations/0001`
-  created them with `USAGE` on the schema and nothing else, because "object-level
-  grants arrive with the objects themselves, one slice at a time". Slice 2 is
+- L2. `pool_api` and `pool_artifact_worker` exist already. They are provisioned
+  by `scripts/provision-db-roles.sql`, which a superuser runs before
+  `pool-admin migrate` — a migration connects as `pool_migration` and so cannot
+  create the role it runs as. `migrations/0001` grants them `USAGE` on the
+  schema and nothing else, because "object-level grants arrive with the objects
+  themselves, one slice at a time", so no slice-2 migration contains
+  `CREATE ROLE`. Slice 2 is
   that slice for the member-facing tables: `pool_api` may write member rows and
   quarantine ranges and may **not** create intents, change workflows, or post
   ledger rows; `pool_artifact_worker` may write artifact and job rows and may not

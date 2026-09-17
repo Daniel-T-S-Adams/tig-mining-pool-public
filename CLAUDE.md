@@ -12,8 +12,8 @@ workflow bus, S3/filesystem artifact store.
 **Slice 1 shipped; slice 2 starting.** The pool talks to TIG: it takes in
 block-consistent snapshots, decides what to submit, transmits precommits
 through the credential-holding gateway, advances a workflow only on confirmed
-reads, and survives a crash at each of `architecture.md` §12's points without
-paying twice. That ran live on testnet, and where each of its 61 acceptance
+reads, and survives a crash at each of the four `architecture.md` §12 points on
+the TIG write path without paying twice. That ran live on testnet, and where each of its 61 acceptance
 criteria is satisfied is recorded in `docs/evidence/slice-1-criteria.md`.
 
 The active milestone is **slice 2 — member agent, member API, and artifact

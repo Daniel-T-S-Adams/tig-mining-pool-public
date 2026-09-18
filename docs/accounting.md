@@ -446,10 +446,29 @@ Debit   LIABILITY:MEMBER_EARNED_PENDING:<round>:<member>
 Credit  LIABILITY:MEMBER_BALANCE:<member>
 ```
 
-The credit is unencumbered and immediately withdrawable. It does not create a
-transfer intent — under ADR 0008 settlement no longer starts a payout — and it
-is not yet collateral-eligible: §11.7's maturity rule governs when it can be
-reserved under §11.4.
+**When the batch may post.** Two conditions, and the later one governs:
+
+- the round's own slashing is complete — round `R`'s reports close at the end
+  of round `R + submission_period` and their arbitrations are published by the
+  end of `R + submission_period + 1` (`tig_integration.md` §14.2), so by then
+  every charge against that round is known; and
+- the exact corresponding TIG payment is finalized and reconciled in the
+  reward wallet, and §8.3a's member leg has completed.
+
+The first is what makes a charge a *deduction* rather than a reversal: the
+round is never distributed and then clawed back, because nothing is credited
+until every penalty against it is settled. §9's batches stay immutable, and no
+settled round is ever reopened. The second is unchanged and is why the pool
+never advances its own capital.
+
+In practice TIG's payment delay exceeds two rounds, so the second condition
+binds. Both are stated because only the pair is safe under any configuration:
+a payment arriving sooner than arbitration would otherwise credit rewards that
+a later charge still has to reach.
+
+The credit is unencumbered, immediately withdrawable, and **immediately
+collateral-eligible**. It does not create a transfer intent — under ADR 0008
+settlement no longer starts a payout.
 
 This is a distinct recognition path from §11.2's inbound deposit, with
 different evidence: the reconciled round rather than a finalized transfer
@@ -457,9 +476,16 @@ event. Neither path may record the other kind of value.
 
 The batch posts only after §8.3a's **member leg** completes, so the balance it
 credits is covered by member custody at the instant it exists. The operating
-leg is the pool's own money and gates nothing here. Maturity changes
-nothing about where the tokens are (§11.7): it decides only whether the
-balance may back work.
+leg is the pool's own money and gates nothing here.
+
+**This replaces the maturity mechanism.** ADR 0008 rule 2 credited earnings
+immediately and then withheld collateral eligibility until the producing round
+could no longer be penalized, which needed a maturity flag, a withdrawal draw
+order, and a separate invariant to enforce. Waiting to credit at all collapses
+those: everything in a member's balance is collateral-eligible by
+construction, because nothing arrives until the round that produced it is
+settled. ADR 0008 stays as written under the immutability rule; ADR 0012
+records the replacement.
 
 ### 8.5 Funding a member withdrawal
 
@@ -625,8 +651,8 @@ does not reinterpret earlier proceeds or member allocations.
 ### 11.2 Slashable pool security deposit
 
 A member may transfer TIG to the pool's dedicated member-custody address
-(§8, §11.7) at any time. A deposit is one of the two ways matured balance
-arises; §8.4's settled earnings are the other, so a member whose matured
+(§8, §11.7) at any time. A deposit is one of the two ways collateral-eligible
+balance arises; §8.4's settled earnings are the other, so a member whose
 balance already covers §11.4 needs no deposit to keep working.
 
 Recognize a deposit only from a transfer event on the allow-listed token and
@@ -690,9 +716,9 @@ join transaction. Tier `k` grants eligibility for at most `k` concurrent
 unverified benchmarks; it does not purchase guaranteed work or pool capacity.
 The fee is separate from delegated TIG and slashable security collateral.
 
-The member may authorize the fee to be taken only from finalized, **matured**
-unencumbered balance after every existing reservation, recorded withdrawal
-request, and frozen charge.
+The member may authorize the fee to be taken only from finalized unencumbered
+balance, after every existing reservation, recorded withdrawal request, and
+frozen charge.
 
 Activation of the tier and the balanced fee journal batch commit together:
 
@@ -803,9 +829,8 @@ of these example values is compiled into admission logic.
 For member `m`:
 
 ```text
-eligible_collateral[m] = matured[m]
-                         - matured portion of recorded withdrawal requests
-                           not yet posted (§11.7)
+eligible_collateral[m] = balance[m]
+                         - recorded withdrawal requests not yet posted (§11.7)
                          - frozen charge/slash amounts
 
 reserved_exposure[m]   = sum(open assignment reservations)
@@ -814,11 +839,12 @@ new work is allowed only if:
 eligible_collateral[m] - reserved_exposure[m] >= precommit_reserve
 ```
 
-`matured[m]` is the part of §11.7's single balance that may back work:
-finalized recognized deposits, plus settled earnings whose round has matured
-under §11.7. Unmatured earnings are withdrawable but count zero here, which is
-why only the *matured* portion of a request is deducted: spending an unmatured
-earning must not cost admission capacity it never contributed.
+`balance[m]` is §11.7's single balance in full. Every part of it may back
+work, because both ways value enters are already settled: a finalized
+recognized deposit (§11.2), and a round credited under §8.4 only once its own
+slashing is complete and the money has landed. There is no unmatured tranche
+to exclude and no draw order to apply — a distinction ADR 0008 needed and
+ADR 0012's settlement timing removes.
 
 One reservation remains attached to one member-owned benchmark even after the
 member's compute slot is released. Its method portion remains reserved until
@@ -1071,23 +1097,21 @@ A dispute remains frozen until a reviewer who did not make the original fault
 decision records a reasoned result. Pool/TIG fault or insufficient evidence
 releases the freeze; custody is not evidence of member fault.
 
-A withdrawal request immediately removes from admission collateral the
-**matured portion** §11.7's draw order assigns to it, and encumbers its whole
-amount against withdrawal. The two figures differ whenever a request draws on
-unmatured earnings, which never counted as collateral.
+A withdrawal request immediately removes its whole amount from admission
+collateral and encumbers the same amount against withdrawal. Those are one
+figure, not two: every part of the balance is collateral-eligible under
+ADR 0012, so anything a request reserves is capacity it was contributing.
 
 It is payable only after all affected reservations are released,
 the last relevant benchmark is no longer reportable, every report/arbitration
 is terminal, and one additional TIG round has passed. A pending appeal keeps
 only the disputed amount locked.
 
-Under ADR 0008 there is one outbound member path, so a withdrawal may combine
-matured balance and unmatured earnings; what it may never include is
-encumbered balance. §11.7's draw order decides the split: unmatured earnings
-first, then matured balance. Unmatured earnings are subject to none of the
-waits above — nothing was ever reserved against them — so a member whose
-request fits inside them is paid without waiting. Every withdrawal uses the
-verified member wallet under §12.2.
+Under ADR 0008 there is one outbound member path, and what a withdrawal may
+never include is encumbered balance. There is no draw order and no fast path:
+the maturity split that created both is gone under ADR 0012, so every
+withdrawal is subject to the waits above without exception. Every withdrawal
+uses the member's authenticating wallet under §12.2.
 
 Tier fees, failure charges, collateral formulas, concurrency rules, slash
 rules, and effective TIG heights are append-only policy versions. A later
@@ -1101,61 +1125,46 @@ balance** with the pool. §11.2's recognized deposits and §8.4's settled round
 earnings are the same liability, `LIABILITY:MEMBER_BALANCE:<member>`;
 §11.4 reserves against it and §12 withdraws from it.
 
-**Maturity.** A settled earning is withdrawable at once but is not
-collateral-eligible until it can no longer be destroyed by a method penalty.
-Until then the same TIG would be covering the penalty that could take it, so
-counting it as collateral would be counting nothing.
+**There is no maturity split.** Every part of a member's balance may back
+work the moment it is there. Both ways value arrives are already settled: a
+§11.2 deposit is recognized from a finalized transfer, and §8.4 credits a
+round only once its own reports and arbitrations are terminal *and* the money
+has landed. Nothing can enter this balance that a method penalty against its
+own round could still reach.
 
-"Can no longer be destroyed" is the same window §11.6 freezes on, so the same
-bound says when the answer should be readable: `tig_integration.md` §14.2 puts
-an arbitration for a benchmark from round `R` at the end of round
-`R + submission_period + 1` at the latest.
+That is a change, and ADR 0008 is where the previous rule lives: it credited a
+round immediately and then withheld collateral eligibility until the producing
+round could no longer be penalized. Making the credit wait instead removes the
+maturity flag, the per-contributing-benchmark maturation condition, the
+withdrawal draw order, and §13's separate invariant enforcing it — four
+mechanisms that existed only to describe a state a member's balance can no
+longer be in. ADR 0012 records the decision and what it costs: a member waits
+longer to see a round at all, in exchange for the balance meaning one thing.
 
-Maturity is still reached only when every report against every contributing
-benchmark is **observed** terminal. The bound is not a maturation schedule and
-an earning does not mature by the clock — a round still unmatured past the
-bound is an alertable discrepancy under §13 item 16, exactly as an outstanding
-freeze is. What the bound gives a member is an expectation of when their
-earnings should become usable as collateral, not a guarantee that they will;
-the difference matters because maturing an earning early would let it back
-§11.4's admission gate while the penalty that could destroy it is still
-live.
+The condition §8.4 applies is **per contributing benchmark**, not per earning
+round, and that subtlety survives the simplification because it was never
+about maturity. A benchmark's lifespan is measured in blocks while a round is
+far longer, so a benchmark started before a round boundary earns qualifiers
+attributed after it. `tig_integration.md` §14.2's `?round=` selects by the
+*benchmark's* round, so a round's earnings are settleable only when every
+benchmark whose qualifiers were attributed in that round has a closed
+reporting window and terminal reports — not when the earning round's own
+window closes.
 
-The condition is **per contributing benchmark**, not per earning round. A
-round's earnings mature only when *every benchmark whose qualifiers were
-attributed in that round* has both a closed reporting window — the end of round
-`benchmark_round + submission_period`, keyed to that benchmark's own round —
-and every report against it terminal.
-
-Keying it to the earning round alone would be wrong, and not rarely. A
-benchmark's lifespan is measured in blocks while a round is far longer, so a
-benchmark started before a round boundary earns qualifiers attributed after it.
-`tig_integration.md` §14.2's `?round=` selects by the *benchmark's* round, so
-round-R earnings produced by a round R-1 benchmark would be judged against a
-window that had nothing to do with them — and could be called matured, and
-reserved against under §11.4, while a report against that very benchmark was
-still open.
-
-Maturity is an admission property and nothing else. **No transfer corresponds
-to it.** Matured and unmatured value sit in the same custody address, so a
-round maturing moves no tokens, changes no asset, and posts no batch — it
-changes what §11.4's formula may count. This is the simplification one pot
-buys: a member's TIG never moves because its collateral status changed, only
-because it left the pool.
+The bound is not a schedule. `tig_integration.md` §14.2 says when the answer
+should be readable; a round still unsettled past it is an alertable
+discrepancy under §13 item 16, exactly as an outstanding freeze is. Settling
+on the clock rather than on observed terminality would credit a member against
+a penalty still live.
 
 How the pool observes those reports is `tig_integration.md` §14.2's, not this
 section's: that document owns the TIG reads, and §11.6 already depends on the
 same observation for its freeze rule.
 
-A recognized §11.2 deposit is matured on recognition. Nothing about it came
-from a round, so no method penalty can reach back and destroy it.
-
 **Encumbrance.** The balance splits into encumbered and unencumbered parts:
 
 ```text
-matured[m]      = the matured part of LIABILITY:MEMBER_BALANCE:<m>
-unmatured[m]    = the rest of it
-balance[m]      = matured[m] + unmatured[m]
+balance[m]      = LIABILITY:MEMBER_BALANCE:<m>
 
 encumbered[m]   = reserved_exposure[m]
                   + frozen charge/slash amounts
@@ -1175,25 +1184,13 @@ before any batch exists. Without it two requests for the same value would each
 pass §12.1's gate. The request itself is durable state with an owner —
 `architecture.md` §6 names it — not an intention held in memory.
 
-The term deducts the request's **whole recorded amount**, matured and
-unmatured alike. It is what stops a second request claiming value the first
-already claimed, and the motivating case of ADR 0008 — a member whose balance
-is all unmatured earnings, which the draw order takes first — is exactly the
-case where deducting only a matured portion would deduct nothing and let two
-requests for the same value both pass §12.1's gate.
-
-The *other* deduction is narrower, and the two must not be confused. §11.4's
-`eligible_collateral[m]` deducts only the **matured portion** the draw order
-assigns to a request, because its base is `matured[m]` and an unmatured
-earning never contributed admission capacity to begin with. Same request, two
-questions: how much can still leave (here, the whole amount) and how much can
-still back work (there, the matured part).
-
-The matured/unmatured split of a recorded request is re-evaluated whenever the
-round it draws on matures, since maturity moves value between the two
-questions. A request recorded entirely against unmatured round R encumbers the
-same total before and after R matures; what changes is how much of it §11.4
-also deducts.
+The term deducts the request's **whole recorded amount**, which is also what
+§11.4's `eligible_collateral[m]` deducts. Under ADR 0008 those two figures
+could differ, because a request drawing on unmatured earnings encumbered value
+that had never contributed admission capacity; ADR 0012 removes the split, so
+a recorded request now costs a member exactly the same amount of withdrawable
+balance and of admission capacity. One request, one number, deducted from
+both.
 
 Only unencumbered balance may leave under §12. Only encumbered balance may be
 slashed under §11.2. A slash therefore cannot take value a member could have
@@ -1233,13 +1230,11 @@ records the decision and what was weighed. What remains, and what §13 and
 member value never shares an address or key with pool operating funds, and
 never with the pool's TIG protocol identity.
 
-**Withdrawal draw order.** A withdrawal draws unmatured settled earnings
-first, oldest round first, and then matured balance. Without a fixed order the
-amount and the waits would depend on an implementation's choice, because one
-fungible liability carries no record of which atoms were once collateral.
-Oldest-round-first also makes "how much of round R's earnings remain"
-derivable from the ledger, which is what maturity is evaluated against.
-§11.6's waits apply to exactly the matured portion drawn.
+**No withdrawal draw order.** ADR 0008 needed one, because a withdrawal could
+combine matured and unmatured value and the two carried different waits, while
+one fungible liability carries no record of which atoms were once collateral.
+Under ADR 0012 the balance has no tranches, so a withdrawal is a single amount
+against a single figure and §11.6's waits apply to all of it.
 
 **What did not change.** §11.1's delegated TIG is still not pool value and
 still grants no capacity. Pool revenue, the security loss reserve, and
@@ -1255,16 +1250,26 @@ Two separate gates, because ADR 0008 separated the two events.
 
 - every block batch in the round is posted and no unresolved payout suspense
   remains for that round;
-- the complete round is reconciled to TIG's round data; and
+- the complete round is reconciled to TIG's round data;
+- **every charge against that round is settled** — each benchmark whose
+  qualifiers were attributed in it has a closed reporting window and terminal
+  reports (§8.4), so nothing credited can still be reached by a penalty
+  against its own round;
 - the exact corresponding TIG payment is finalized and reconciled in the
   reward wallet (§8.3); and
 - that round's §8.3a **member leg** has completed from its own finalized token
   event, so the balances §8.4 credits are covered by member custody at the
   instant they exist.
 
-The expected TIG payment delay may be several weeks. The pool waits for actual
-funds, not elapsed time. Settlement is automatic and needs no member action;
-what it produces is a balance, not a transfer.
+The expected TIG payment delay may be several weeks and in practice outlasts
+the arbitration window, so the funding condition is normally the binding one.
+Both are required anyway: the pool waits for actual funds, not elapsed time,
+and it waits for the round's own slashing to finish, not for a schedule. A
+payment arriving before arbitration would otherwise credit a member against a
+charge still to come.
+
+Settlement is automatic and needs no member action; what it produces is a
+balance, not a transfer.
 
 **A withdrawal becomes payable** only when:
 
@@ -1273,8 +1278,7 @@ what it produces is a balance, not a transfer.
   request's own recorded amount and no other: a recorded request encumbers
   balance against every **competing** request, but a gate that also counted
   the request it is deciding would refuse every withdrawal ever made;
-- §11.6's waits are satisfied for the matured portion §11.7's draw order
-  assigns to this withdrawal;
+- §11.6's waits are satisfied for the withdrawal, all of it;
 - no accounting/security hold affects the member; and
 - member, token, chain, and destination configuration remains compatible.
 
@@ -1468,8 +1472,13 @@ Before and after every batch, enforce:
 18. tier removal or repurchase never releases existing financial exposure;
 19. the same outcome cannot consume `X` or a method reserve twice under one
     policy reason;
-20. settled earnings count zero toward `eligible_collateral` until their round
-    has matured under §11.7; and
+20. no value enters `LIABILITY:MEMBER_BALANCE` before it is settled — a
+    deposit on finalized recognition (§11.2), a round only once its own
+    reports and arbitrations are terminal and its TIG payment has landed
+    (§8.4). This replaces ADR 0008's rule that settled earnings counted zero
+    toward `eligible_collateral` until maturity: there is no unmatured
+    balance to exclude, so the property is enforced by when the credit posts
+    rather than by a flag on it; and
 21. aggregate uncovered method exposure — the sum of
     `method_reserve - scaled_method_reserve` over every open reservation — is
     reported, not merely derivable. A multiplier below `10_000` bps is the
@@ -1483,8 +1492,8 @@ Daily reconciliation compares:
 - reward receivable versus identified TIG settlement;
 - Base finalized token balances and transfer events versus the reward wallet,
   member custody, and operating custody assets;
-- member balance split by maturity, suspense, and withdrawal-pending
-  liabilities versus member custody's coverage inequality (§13 item 12), with
+- member balance split by suspense and withdrawal-pending liabilities versus
+  member custody's coverage inequality (§13 item 12), with
   each named margin term accounted for;
 - withdrawal and sweep intents versus signer nonces, transactions, receipts,
   and events;

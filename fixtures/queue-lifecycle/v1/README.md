@@ -64,7 +64,7 @@ Lifecycle (`lifecycle.json`):
 3. `delayed_precommit_confirmation` — `OUTCOME_UNKNOWN`, lane reconciliation,
    late confirmation, confirmed settings replace proposed.
 4. `member_package_timeout_failed` — deadline `block_started + 110`,
-   MEMBER-attributed `FAILED`, one chargeable failure `X`.
+   MEMBER-attributed `FAILED`, one chargeable failure charge.
 5. `stopped_benchmark_no_proof` — `details.stopped = true`, no proof,
    chargeable capacity failure but not fraud.
 6. `expired_workflow_pool_side_stall` — age ≥ 120 expiry after durable
@@ -97,9 +97,11 @@ Lifecycle (`lifecycle.json`):
    (`architecture.md` §5.1 step 3) is modeled as ascending lexicographic order
    of `offer_id` after equal timestamps; fixture ids are zero-padded so
    lexicographic and numeric order agree.
-5. **Policy numbers.** `internal_pool_unverified_limit`, tier numbers, `J[k]`,
-   and `X` are versioned policy whose numeric values are intentionally open
+5. **Policy numbers.** `internal_pool_unverified_limit`, tier numbers and
+   `J[k]` are versioned policy whose numeric values are intentionally open
    (`mining_system.md` §11, "Required before full product implementation").
+   The per-failure charge `X` was one of them until ADR 0013 derived it from
+   the benchmark's own fee and penalty; these cases predate that.
    Fixture values carry `policy_version: "fixture-v1"` and bind nothing.
 6. **Slot release on offer termination.** When a queued offer expires or is
    cancelled before any assignment exists, the fixtures return the slot to
@@ -113,9 +115,12 @@ document intentionally leaves open *and* answers elsewhere; they are genuine
 gaps or readings that a reviewer should confirm before the implementation
 treats these fixtures as normative.
 
-1. **Numeric policy values** — `J[k]`, `X`,
+1. **Numeric policy values** — `J[k]` and
    `internal_pool_unverified_limit`/recovery headroom are explicitly open
    (`mining_system.md` §11). The fixture numbers are placeholders only.
+   `X` is no longer among them: ADR 0013 abolished it as a policy value, so a
+   case asserting a flat per-failure charge tests a rule that no longer
+   exists. `v1` is immutable; the correction goes in a `v2` (issue #56).
 2. **Ready-check expiry window** — no document assigns the ready check its own
    numeric deadline; `member_protocol.md` §6 says only that expiry of "the
    ready check or ordinary offer lease" removes the offer. The fixtures bound

@@ -856,7 +856,7 @@ TIG confirms the selected track and exact `fee_paid`, the reservation may be
 reduced to that track's exact requirement, never increased by silently applying
 a later pool policy.
 
-For illustration only, if `P = 10 TIG` and the fee and `X` are omitted,
+For illustration only, if `P = 10 TIG` and the fee term is omitted,
 the method reserve is `40 TIG` for 4 bundles, `100 TIG` for 10 bundles, and `250
 TIG` for 25 bundles. The implementation always reads `P`, fees, bundle counts,
 and applicable configuration from the block-consistent decision snapshot; none

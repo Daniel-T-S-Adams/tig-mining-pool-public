@@ -275,8 +275,11 @@ Outputs: [security.md](security.md), [accounting.md](accounting.md), and
 - [x] Define the renewable FIFO compute-availability queue used only when
   `internal_pool_unverified_limit` is full, including stale-offer expiry and
   fresh checks before precommit.
-- [ ] Choose the versioned numerical tier fee schedule `J[k]`, per-failure
-  charge `X`, and internal-limit recovery headroom.
+- [ ] Choose the versioned numerical tier fee schedule `J[k]` and
+  internal-limit recovery headroom.
+  — **Narrowed by ADR 0013.** The per-failure charge is no longer a number to
+  choose: `accounting.md` §11.6 derives it from the benchmark's own precommit
+  fee and penalty.
 - [x] Define when credits are automatically paid, whether a minimum applies,
   and the payout cadence.
   — **Superseded by ADR 0008.** Settlement into a member's balance stays
@@ -344,6 +347,9 @@ credentials.
   outstanding exposure across re-entry, dormancy, round `U > V`, per-failure
   `X`, and the `f > k` removal boundary.
   — PR #21 (`tier.json`)
+  — **Partly superseded by ADR 0013**; the `X` and non-chargeable-outcome
+  cases no longer match the design. `fixtures/collateral-tier/v1/README.md`
+  open question 0a records which assertions survive.
 - [x] Create availability-queue cases covering FIFO ties, more than one member
   and slot, stale/cancelled offers, ready-check replay/expiry, tier removal,
   newly opened global capacity, and a fresh atomic limit failure at promotion.
@@ -477,8 +483,11 @@ Measure and record (all consolidated in
   — PR #30 and [spike report §5.8](protocol_spike_report.md)
 - [x] throughput lost to each invalid-work path and whether the proposed
   failure charge `X` makes repeated abuse uneconomic; and
-  — PR #30 and [spike report §5.9](protocol_spike_report.md) (parameterized
-  on the still-open policy value `X`)
+  — PR #30 and [spike report §5.9](protocol_spike_report.md), which
+  parameterized the answer on `X` as an open policy value. **ADR 0013 closed
+  it**: the charge is the benchmark's own precommit fee, which is far above
+  the ~0.001–0.01 TIG the spike found sufficient, so §5.9's conclusion holds
+  at the settled value rather than a hypothetical one.
 - [x] storage and bandwidth projections at the intended initial pool size.
   — [spike report §6](protocol_spike_report.md)
 

@@ -373,7 +373,7 @@ transition.
 | Record member/pool/TIG failure attribution | Controller reconciler | Terminal evidence, workflow revision, and reason code |
 | Append an accounting batch/correction | Controller accounting projector | Network/block/policy version or correction ID |
 | Recognize a custody deposit or TIG round settlement | Controller accounting projector | Chain ID, transaction hash, log index, exact token/address, and finalized block |
-| Freeze/finalize a security-deposit slash | Controller accounting projector | Policy version, member-fault evidence, appeal state, and approved command ID |
+| Freeze/finalize a security-deposit charge | Controller accounting projector | Policy version, the benchmark outcome the charge rests on, and approved command ID. Not fault evidence and not an appeal state: `accounting.md` §11.6 charges independently of cause and has no in-system appeal |
 | Record a member withdrawal request | Pool API account system | Member ID, request ID, canonical request hash, and reauthentication evidence |
 | Advance, reduce, or cancel a recorded withdrawal request | Controller accounting projector | Request ID plus request revision; the same transaction that posts `accounting.md` §8.5's batch or §10's correction |
 | Create a member withdrawal or custody-sweep intent | Controller accounting projector | Network/member/withdrawal generation for a withdrawal; network/round/leg for a reward-wallet sweep; and for an operating sweep, `accounting.md` §8.6's cause identifier — tier activation, `X` charge decision, finalized slash, suspense resolution, or correction ID — plus an immutable amount/destination in every case |

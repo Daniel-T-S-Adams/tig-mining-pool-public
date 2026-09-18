@@ -82,12 +82,12 @@ execution is non-reproducible.
 
 | Attack | Pool exposure | Required layers |
 |---|---|---|
-| Accept a precommit, then abandon or miss the technical package cutoff | Non-refundable fee, lost protocol/write capacity, balancing distortion | Tier concurrency, reserved `X`, stopped recovery, round failure count |
-| Return malformed or incomplete data repeatedly | Parser/storage/worker exhaustion plus fee if submitted | Quotas, bounded parser, tier concurrency, reserved `X`, no commitment before acceptance |
+| Accept a precommit, then abandon or miss the technical package cutoff | Non-refundable fee, lost protocol/write capacity, balancing distortion | Tier concurrency, the reserved precommit fee charged back (`accounting.md` §11.6), stopped recovery, round failure count |
+| Return malformed or incomplete data repeatedly | Parser/storage/worker exhaustion plus fee if submitted | Quotas, bounded parser, tier concurrency, the reserved precommit fee charged back, no commitment before acceptance |
 | Return structurally valid outputs that fail TIG solution verification | Verification-pipeline congestion, fee loss, delayed useful benchmarks | Reserved `X`, tier failure threshold, correlation breaker, semantic-screening experiment |
 | Return outputs that later fail method verification | TIG penalty scaling with penalized bundles, loss of rewards/reputation | Dynamic bundle-scaled collateral, retained reserve through reports, exact slash, optional hidden re-execution |
 | Fund many identities or slots | Bypass per-worker limits and occupy a large fraction of pool work | Non-refundable tier fee per identity, global internal limit, FIFO offer leases, collateral cannot be reused |
-| Submit work with zero bundles meeting TIG verification quality | Capacity and fee loss without protocol fraud | Reserved `X` and tier failure count; correlated pool/config failures are exempt |
+| Submit work with zero bundles meeting TIG verification quality | Capacity and fee loss without protocol fraud | The reserved precommit fee charged back and tier failure count. Correlated pool/config failures are **no longer exempt** — `accounting.md` §11.6 charges regardless of cause, so the correlation check exists to detect the incident, not to excuse the charge |
 | Submit TIG-verified work that earns no qualifiers | Pool may simply earn less | No charge; orchestration and qualification tuning |
 | Exploit a TIG penalty/configuration change | Previously sufficient collateral becomes insufficient | Per-block config monitoring, compatibility stop, explicit residual-risk policy |
 
@@ -288,9 +288,12 @@ or collateral reservation. Promotion requires a fresh signed availability
 confirmation and an atomic recheck of the tier, member count, collateral,
 compatibility, and global count. Stale offers expire without a trust penalty.
 
-A confirmed member-caused tier failure atomically preserves the evidence,
-freezes the reserved `X` pending the normal attribution/appeal path, increments
-the round failure count, and checks correlated runtime/configuration failures.
+A chargeable tier failure atomically preserves the evidence, freezes that
+benchmark's charge under `accounting.md` §11.6's table, increments the round
+failure count, and checks correlated runtime/configuration failures. It waits
+on no attribution or appeal path — §11.6 removed both — so the correlation
+check is now the only thing standing between one pool-side incident and a
+round-wide demotion.
 It does not invent a separate reputation score or automatic first-failure ban.
 The financial gate stops new work when collateral is insufficient; `f > k` or
 round `U > V` removes tier `k` at round close. A confirmed method-verification
@@ -537,7 +540,8 @@ At minimum, audit these events:
 - terminal outcome and `MEMBER`/`POOL`/`TIG`/`UNRESOLVED` fault attribution,
   including any later correction;
 - qualifier attribution and accounting batch/correction identifiers;
-- deposit recognition, freeze, appeal, finalized slash, and withdrawal;
+- deposit recognition, freeze, finalized charge, out-of-band reversal under
+  `accounting.md` §10, and withdrawal;
 - round settlement, withdrawal request, withdrawal or custody-sweep intent,
   signing attempt, ambiguous result, finalized transfer, and emergency
   withdrawal hold;

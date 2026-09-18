@@ -786,7 +786,7 @@ without alleging fraud. V0 has no general mining trust score.
 | Package bytes match the declared checksum but its identity, coverage, structure, leaf hashes, or Merkle root are wrong | `MEMBER` |
 | Wrong binary/runtime used, missing or duplicate nonce, or TIG confirms non-reproducible/fraudulent member output | `MEMBER` |
 | Member cancels after precommit or misses the package block deadline while pool and TIG services were available | `MEMBER` |
-| Complete benchmark has zero bundles meeting TIG's minimum verification quality | No fraud attribution; chargeable tier failure unless a pool/TIG/compatibility incident applies |
+| Complete benchmark has zero bundles meeting TIG's minimum verification quality | No fraud attribution; chargeable tier failure, including where a pool/TIG/compatibility incident caused it (`accounting.md` §11.6) |
 | TIG verifies the benchmark but its bundles earn no qualifiers | No failure |
 | Pool stops an otherwise valid complete benchmark for a pool/TIG reason | No member failure |
 | Slot fails or times out during pre-assignment qualification | No mining-trust effect; slot remains ineligible |
@@ -838,7 +838,7 @@ statistics.
 
 This protocol deliberately does not choose the **worker**-recovery HTTP route
 and schema (the recovery proof itself is specified in section 3.3), deposit
-custody details, numerical `J[k]`/`X`/global-headroom values, relational
+custody details, numerical `J[k]`/global-headroom values, relational
 schema, artifact-store product, deployment topology, or production retention
 capacity.
 

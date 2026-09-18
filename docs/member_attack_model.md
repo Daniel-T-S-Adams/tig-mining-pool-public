@@ -206,7 +206,7 @@ security design must also account for the following variants.
 | M12 | Manipulate reported speed, progress, qualities, or benchmark summaries to influence orchestration or payout | Poor scheduling or false member credit | Treat self-reports as telemetry only; use accepted artifacts and confirmed TIG facts for decisions and payout |
 | M13 | Withdraw, reuse, transfer, or race security collateral while exposure remains | Leaves pool unable to recover a later loss | Atomically reserve collateral; a pending withdrawal grants no capacity (`accounting.md` §11.4, §11.6); keep method reserve through report closure |
 | M14 | Exploit a TIG fee, penalty, deadline, schema, or verifier change | Previously safe work becomes under-collateralized or fails in a correlated way | Read live config, version every decision, compatibility breaker, pause rather than blame members |
-| M15 | Use stolen worker credentials or compromise a worker to cancel, upload junk, or claim capacity | Same workflow damage as the account, plus disputed attribution | Worker keys cannot change funds; revocation/recovery; preserve evidence; appeal before slash |
+| M15 | Use stolen worker credentials or compromise a worker to cancel, upload junk, or claim capacity | Same workflow damage as the account, plus a charge the owning member cannot contest in-system | Worker keys cannot change funds; revocation/recovery; preserve evidence. There is no appeal before a charge (`accounting.md` §11.6), so a member whose worker is compromised pays and then asks the pool out of band — the reason worker revocation matters more under this model than under the previous one |
 | M16 | Craft parser data to escape the ingestion sandbox, reach credentials, logs, paths, or internal services | Service compromise and possible protocol-key theft | Isolated no-secret parser, generated paths, no egress, resource limits, redacted telemetry |
 | M17 | Claim durable receipt or pool corruption after sending different/incomplete bytes | Disputed fault and attempted avoidance of consequences | Chunk/package hashes, immutable receipt, accepted-object hash, append-only event history |
 | M18 | Coordinate accounts so failures are staggered below individual thresholds | Sustained pool-wide degradation | Joining fees make cycling costly; global internal limit/outcome breaker bounds pool exposure |
@@ -310,7 +310,7 @@ Different failures require different evidence and consequences.
 
 | Outcome | Minimum evidence | Immediate consequence | Financial consequence status |
 |---|---|---|---|
-| Method-verification penalty attributable to member package | TIG report/penalty, immutable assignment/package, applicable config | Suspend and freeze disputed amount | Exact protocol loss is slashable after appeal; settled in principle |
+| Method-verification penalty against a member-owned benchmark | TIG report/penalty, immutable assignment/package, applicable config | Suspend and freeze the evidenced amount | The evidenced protocol loss is charged on the arbitration itself; no attribution step and no appeal (`accounting.md` §11.6) |
 | Hostile or mechanically invalid package | Accepted byte hash or rejected upload evidence and deterministic parser reason | Stop/recover benchmark; count failure when member-attributable | Charge `X`; round `f > k` removes tier |
 | Technical package cutoff missed, no acceptable package | Confirmed assignment, server receipt history, cutoff/config, absence of pool outage | Stop/recover benchmark; count failure when member-attributable | Charge `X`; round `f > k` removes tier |
 | Correct completion within published deadline | Durable package and timestamps | Normal processing | No slash |
@@ -347,7 +347,7 @@ The remaining implementation values and measurements are:
 2. the pool's recovery headroom below that limit;
 3. the numerical fee schedule `J[k]` and failure charge `X`;
 4. the technical package cutoff and when the pool submits `stopped`;
-5. false-positive/appeal handling for chargeable failure attribution; and
+5. false-positive handling for chargeable failures — out of band under `accounting.md` §11.6, reversed through §10 where the pool agrees, since there is no in-system appeal; and
 6. whether full local solution checking or hidden method re-execution is
    mandatory after its cost and detection value are measured.
 

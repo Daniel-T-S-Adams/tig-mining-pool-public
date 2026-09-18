@@ -263,6 +263,10 @@ Outputs: [security.md](security.md), [accounting.md](accounting.md), and
 - [x] Settle the dynamic bundle-scaled method reserve and separate per-failure
   reserve shape, fault-attribution/appeal boundary, and collateral return
   rule.
+  — **Superseded by ADR 0013.** The fault-attribution and appeal boundary no
+  longer exists: `accounting.md` §11.6 charges the owning member regardless of
+  cause, with an out-of-band remedy rather than an in-system appeal. The
+  reserve shape and collateral return rule stand.
 - [x] Define flat tier `k` as exactly `k` concurrent unverified benchmarks,
   with end-of-round removal for `U > V` or chargeable failures `f > k`.
 - [x] Define non-refundable paid tier entry/re-entry, immediate rejoining with

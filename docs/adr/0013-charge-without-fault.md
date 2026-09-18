@@ -118,7 +118,29 @@ should learn that before depositing, not after a charge.
   §10 invariant 7 gains a sentence separating duty from payment; §11 drops `X`
   from the values still to be chosen, leaving `J[k]` and the headroom limit.
 - `architecture.md` §6's slash row no longer keys on member-fault evidence or
-  appeal state.
+  appeal state, and its §11 storage list no longer stores a failure-charge
+  policy value, because there is no longer one to version.
+- **One charge posts one batch with two credit lines**, and this is a ledger
+  choice made while recording the decision rather than one the owner made.
+  Folding the method penalty and the failure charge into a single table gave
+  one event two candidate credit accounts. The batch now credits
+  `EQUITY:SECURITY_LOSS_RESERVE` for the penalty portion and
+  `REVENUE:FAILURE_CHARGES` for the fee portion — they replace different
+  things, TIG value lost versus a pool outlay reimbursed — under **one** §8.6
+  cause identifier. One cause matters more than the split: §13 item 13 allows
+  one sweep per cause so a retry cannot sweep twice, and §13 item 12's
+  charged-but-unswept margin has to stay computable.
+- **The table is cumulative and the pool charges the increment.** `R` is
+  pooled across the benchmark, so a second successful arbitration raises the
+  total and the pool charges the difference. Re-applying the table per
+  arbitration would take the fee twice, exceed §11.4's reservation, and
+  violate §13 item 19.
+- `fixtures/collateral-tier/v1` asserts the superseded reserve shape, the
+  early `X` release, and the `f * X` arithmetic. `v1` is immutable, so the
+  supersession is recorded in its README as open question 0a and the corrected
+  cases go in a `v2`. Unlike ADR 0008's rename, this is not the same
+  arithmetic under new names: those cases would pass against behaviour §11.4
+  now calls under-reserving.
 - `security.md` §2.3's three control rows and §3's tier-failure rule follow;
   `member_protocol.md` §17 drops `X`, and its failure-classification table
   stops exempting pool/TIG incidents.

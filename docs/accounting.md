@@ -698,10 +698,25 @@ evidence, amount, policy version and actor:
 
 ```text
 Debit   LIABILITY:MEMBER_BALANCE:<member>
-Credit  EQUITY:SECURITY_LOSS_RESERVE
+Credit  EQUITY:SECURITY_LOSS_RESERVE        the penalty portion
+Credit  REVENUE:FAILURE_CHARGES             the fee portion
 ```
 
-A slash reaches only encumbered balance: the frozen amount established by
+**One charge, one cause identifier, two credit lines.** §11.6's table produces
+a single amount with two components, and they replace different things: the
+penalty portion replaces TIG value the pool lost, which is what the loss
+reserve records, and the fee portion reimburses an outlay the pool made, which
+is what `REVENUE:FAILURE_CHARGES` records. Splitting the credit keeps both
+accounts meaning what they meant.
+
+What must not split is the **cause**. §8.6 sweeps under one identifier — the
+charge decision — for the whole batch, because §13 item 13 allows one sweep
+per cause and a retry must not be able to sweep the same value twice. Treating
+one charge as two causes would also make §13 item 12's charged-but-unswept
+margin uncomputable from the ledger. Either component may be zero: a benchmark
+that produced nothing is charged only the fee portion.
+
+A charge reaches only encumbered balance: the frozen amount established by
 §11.6 against a specific reservation. It can never take unencumbered balance,
 which is the member's to withdraw.
 
@@ -1104,6 +1119,16 @@ the reported benchmark's own reservation.
 further decides it. That is the change this section records: the evidence,
 attribution and appeal process this paragraph previously described has been
 removed, so the arbitration outcome is the outcome.
+
+**The table is cumulative; the pool charges the increment.** `R` is pooled
+across the benchmark (`tig_integration.md` §14.1), so the table gives what the
+benchmark owes *in total* once the arbitrations observed so far are counted —
+not what this arbitration owes on its own. A benchmark that survives one
+report is still reportable, and a second successful arbitration raises `R`; the
+pool then charges the difference between the new total and what it has already
+charged. Re-applying the table on each arbitration would charge the fee twice
+and re-charge the penalty already taken, exceed §11.4's reservation, which
+holds one fee, and violate §13 item 19.
 
 A benchmark can arbitrate `NONREPRODUCIBLE` for a pool-side reason —
 `mining_system.md` §8 names pool-constructed wrong proofs, packages the pool

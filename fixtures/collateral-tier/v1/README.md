@@ -69,7 +69,25 @@ open"):
    they remain valid as tests of the formula and invalid as a source of
    account names. `v1` is immutable; the rename goes in a `v2` (issue #31).
 
-1. **Numerical `J[k]` and `X`** are explicitly open ("required before full
+0a. **The reserve shape, the release split, and the `f * X` arithmetic are
+   superseded by ADR 0013 and await a `v2`.** These cases assert
+   `assignment_reserve = method_reserve + F + X`, an `X` portion released when
+   TIG verifies the benchmark, `f * X` tier arithmetic, and
+   `non_chargeable_outcomes_do_not_increment_f` for `POOL`/`TIG`/`UNRESOLVED`.
+   All four are now wrong: `accounting.md` §11.4's reserve is
+   `scaled_method_reserve + F` with **both portions held to terminality** —
+   the early release these cases encode is exactly what §11.4 now identifies
+   as leaving the reservation short by a fee — and §11.6 charges every failure
+   regardless of cause, with the amount derived rather than a policy number.
+
+   Unlike open question 0, this is **not** the same arithmetic under new
+   names. These cases would pass against behaviour the design now calls
+   under-reserving, so they are invalid as a money-math oracle for the
+   reserve, the release condition, and the tier count. The bundle-scaled
+   method term itself is unchanged and those assertions still hold. `v1` is
+   immutable; the corrected cases go in a `v2` (issue #56).
+
+1. **Numerical `J[k]`** is explicitly open ("required before full
    product implementation", mining_system.md §11). The values here are fixture
    inventions; implementation tests must treat them as versioned policy inputs,
    never as expected production constants.

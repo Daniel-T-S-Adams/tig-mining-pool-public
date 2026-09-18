@@ -503,7 +503,9 @@ audits:
 - one aggregate row per member/tier membership/round containing accepted-block
   sample count, unverified benchmark-blocks, verified benchmark-blocks,
   chargeable failure count, and the resulting tier decision; and
-- versioned `J[k]`, `X`, and `internal_pool_unverified_limit` policy values.
+- versioned `J[k]` and `internal_pool_unverified_limit` policy values. No
+  failure-charge policy value is stored: ADR 0013 derives the charge from the
+  benchmark's own precommit fee and penalty, so there is nothing to version.
 
 Closing a tier membership and cancelling its still-queued/ready-check offers is
 one transaction. Offers that already own a precommit intent are not cancelled;

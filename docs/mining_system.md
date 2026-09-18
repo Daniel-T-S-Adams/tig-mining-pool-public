@@ -539,17 +539,19 @@ max(
     ceil( live reports.penalty_amount * proposed num_bundles[track]
           * member collateral multiplier bps / 10_000 )
     + exact proposed TIG fee[track]
-    + configured per-benchmark failure charge X
     for every proposed track
 )
 ```
 
+There is no separate per-benchmark failure charge in this reserve. ADR 0013
+derives that charge from the benchmark's own precommit fee, so the fee term
+above covers it; carrying both would reserve the same money twice.
+
 The multiplier is the pool-set per-member value in integer basis points,
 default `10_000` and never above it, and it scales the method-penalty term
-only — the TIG fee is an outlay the pool certainly makes and `X` is a charge
-it has already decided to levy, so trust discounts neither. It is fixed into
-the reservation when the reservation is made and a later change never reaches
-an open one. [accounting.md](accounting.md) §11.4 owns the term and ADR 0010
+only — the TIG fee is an outlay the pool certainly makes, so trust does not
+discount it. It is fixed into the reservation when the reservation is made and
+a later change never reaches an open one. [accounting.md](accounting.md) §11.4 owns the term and ADR 0010
 the decision.
 
 **This is a floor against the scaled reserve, not against the full exposure.**

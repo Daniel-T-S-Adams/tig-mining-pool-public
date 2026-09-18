@@ -39,9 +39,9 @@ established.
 **The amount is derived from the benchmark, not chosen by policy:**
 
 ```text
-went active, no successfully arbitrated report   ->  0
-went active, R nonces successfully arbitrated    ->  P * min(R, B) + F
-never went active                                ->  F
+earned active bundles, no successfully arbitrated report  ->  0
+earned active bundles, R nonces successfully arbitrated   ->  P * min(R, B) + F
+anything else                                             ->  F
 ```
 
 `P` is the live `reports.penalty_amount` at the charge block, `R` and `B` are
@@ -49,9 +49,21 @@ never went active                                ->  F
 `F` is that benchmark's own precommit fee. `X[policy]` ceases to exist, and
 with it the last unset number in the collateral formula.
 
-**The reserve carries the fee once.** §11.4 previously held `F + X`; with the
-failure charge derived from `F`, those were the same money twice — a member
-held two fees to begin work while never being able to lose more than one.
+The first branch turns on the benchmark having **earned at least one active
+bundle**, not on TIG's `Active` state. `tig_integration.md` §6 defines the
+latter as membership in `block.data.active_ids.benchmark`, which a complete
+benchmark reaches with `num_active_bundles = 0` — work that returned nothing,
+which §11.6 already counts as a chargeable failure. Keying on `Active` alone
+would charge nothing for it.
+
+**The reserve carries the fee once, and holds it to terminality.** §11.4
+previously held `F + X`; with the failure charge derived from `F`, those were
+the same money twice — a member held two fees to begin work while never being
+able to lose more than one. The fee portion is now held under the same
+condition as the method portion, until every report and arbitration is
+terminal, because a reported benchmark is charged `P * min(R, B) + F` and
+releasing `F` at verification would leave the reservation short by a fee even
+at `10_000` bps.
 
 **There is no in-system appeal.** Nothing remains for a member to contest,
 because no attribution is made. A member who believes a charge was wrong
@@ -93,8 +105,15 @@ should learn that before depositing, not after a charge.
 
 ## Consequences
 
-- `accounting.md` §11.2, §11.4, §11.6, §13 item 19 and §14 change together;
-  §11.4's reserve becomes `scaled_method_reserve + F`.
+- `accounting.md` §11.2, §11.4, §11.5, §11.6, §13 item 19 and §14 change
+  together; §11.4's reserve becomes `scaled_method_reserve + F`, held whole to
+  terminality.
+- §11.5 previously said a price-rise shortfall "is not recoverable from the
+  member: the reservation is that member's whole committed exposure". That was
+  the same clause as ADR 0010's and falls with it: the member owes the charge,
+  and only *where the excess comes from* is left open. A charge can now exceed
+  the encumbered amount for two reasons — a multiplier below `10_000` bps and
+  a price rise — and issue #56 owns both.
 - `mining_system.md` §8 loses the fault exemption and the `f * X` arithmetic;
   §10 invariant 7 gains a sentence separating duty from payment; §11 drops `X`
   from the values still to be chosen, leaving `J[k]` and the headroom limit.

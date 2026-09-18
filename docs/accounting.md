@@ -862,12 +862,19 @@ to exclude and no draw order to apply — a distinction ADR 0008 needed and
 ADR 0012's settlement timing removes.
 
 One reservation remains attached to one member-owned benchmark even after the
-member's compute slot is released. Its method portion remains reserved until
-the benchmark can no longer generate a method-verification penalty and every
-report/arbitration is terminal. Its `X` portion releases when TIG verifies the
-benchmark without a chargeable tier failure, or is frozen and charged when a
-member-attributable failure is established. This prevents the same TIG from
-collateralizing several simultaneous risks.
+member's compute slot is released, and **both of its portions are held to the
+same condition**: until the benchmark can no longer generate a
+method-verification penalty and every report and arbitration against it is
+terminal. This prevents the same TIG from collateralizing several
+simultaneous risks.
+
+The fee portion `F` is held that long deliberately, and not only until TIG
+verifies the benchmark. §11.6 charges `P * min(R, B) + F` on a successfully
+reported benchmark, so releasing `F` at verification would leave a reservation
+of `P * B` facing a charge of `P * B + F` — short by a fee even at
+`10_000` bps, where nothing is supposed to be short. Holding both portions to
+terminality is what makes the reserve exactly cover the charge at full
+multiplier.
 
 **When that should be observable.** `tig_integration.md` §14.2 records that an
 arbitration for a benchmark from round `R` is published by the end of round
@@ -952,11 +959,17 @@ knowingly rather than derived from them:
   property of the protocol, and nothing in the pinned source guarantees it.
 
 If `penalty_amount` rose with less notice than the horizon of the benchmarks
-then open, the pool absorbs the difference between what was reserved and what
-is charged. It is not recoverable from the member: the reservation is that
-member's whole committed exposure, and §11.4 never increases a reservation
-after the fact — neither recognition path into the balance, §11.2's transfer
-or §8.4's settlement, enlarges one that already exists.
+then open, the charge exceeds what was reserved. The member still owes it:
+under ADR 0013 the reservation is a floor on what they must hold to begin
+work, not a cap on what they owe, and §11.6 charges the evidenced amount.
+What §11.4 does not do is enlarge an existing reservation after the fact —
+neither recognition path into the balance, §11.2's transfer or §8.4's
+settlement, retroactively increases one.
+
+So a price rise produces a charge larger than the encumbered amount, exactly
+as a multiplier below `10_000` bps does. Where that excess comes from is not
+settled here: §10 rule 7 forbids charging other members or a future block for
+a shortfall, and issue #56 owns that rule.
 
 Should either premise fail, this is the section to revisit, and the
 mechanism to add is a buffer or an additional-collateral call — never a
@@ -973,10 +986,16 @@ slashed zero.
 The charge is the pool's loss on that benchmark, passed through:
 
 ```text
-benchmark went active, no successfully arbitrated report   ->  charge 0
-benchmark went active, R nonces successfully arbitrated    ->  charge
-                                     P * min(R, B) + F
-benchmark never went active                                ->  charge F
+the benchmark earned active bundles, and no report against it
+  was successfully arbitrated                              ->  charge 0
+
+the benchmark earned active bundles, and R nonces were
+  successfully arbitrated against it                       ->  charge
+                                                    P * min(R, B) + F
+
+anything else — abandoned, unusable, solution-verification
+  failure, or zero bundles meeting TIG's minimum
+  verification quality                                     ->  charge F
 ```
 
 `P` is the live `reports.penalty_amount` at the charge block, `R` and `B` are
@@ -985,18 +1004,33 @@ benchmark never went active                                ->  charge F
 number: the failure charge *is* the fee the benchmark wasted, so a benchmark
 that cost more to start costs more to waste.
 
+**"Earned active bundles" is not the same as TIG's `Active`.**
+`tig_integration.md` §6 defines `Active` as membership in
+`block.data.active_ids.benchmark`, which a complete benchmark can reach with
+`num_active_bundles = 0`. That benchmark produced nothing the pool can earn
+from, and the list below already counts it as a chargeable failure — so the
+first branch turns on the benchmark having at least one active bundle, not on
+its appearance in the active set. Keying the table on `Active` alone would
+charge nothing for work that returned nothing.
+
 Three consequences of charging without attribution, stated rather than left to
 be discovered:
 
 - **The member owes the full penalty, not the multiplier-scaled part.**
   ADR 0010's multiplier sets what a member must hold to begin work, not a cap
-  on what they owe. **What happens to the excess is not yet specified**: below
-  `10_000` bps a charge can exceed the reservation by construction, and §10
-  rule 7 currently forbids the obvious answer by name — "never charge other
-  members or a future block silently for the shortfall". Issue #56 owns that
-  rule and the decision replacing it. Until then this section states the
-  liability without stating its recovery, and no member is exposed to the gap
-  because nothing charges anyone before slice 8.
+  on what they owe. A charge exceeds the reservation in two cases: a
+  multiplier below `10_000` bps, which is deliberate, and a `penalty_amount`
+  rise between the snapshot and the charge block, which §11.5 records the
+  owner choosing to carry. At `10_000` bps with an unchanged price the reserve
+  covers the charge exactly, which is why §11.4 holds the fee portion to
+  terminality rather than releasing it at verification.
+
+  **What happens to the excess is not yet specified.** §10 rule 7 currently
+  forbids the obvious answer by name — "never charge other members or a future
+  block silently for the shortfall" — and issue #56 owns that rule and the
+  decision replacing it. Until then this section states the liability without
+  stating its recovery, and no member is exposed to the gap because nothing
+  charges anyone before slice 8.
 - **There is no in-system appeal.** The evidence, attribution and appeal
   process this section previously required has nothing left to decide. A
   member who believes they were charged wrongly contacts the pool out of band;

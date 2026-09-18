@@ -79,17 +79,26 @@ per-nonce basis would not adjust the formula but invalidate it — by a factor
 of `num_nonces_per_bundle`, which is a per-track configuration value and not a
 small one.
 
-It is not confirmed. The pool must read the live value and verify exactly how
-many penalties a benchmark can incur before accepting public member
-collateral. That requirement no longer rests on `accounting.md` §14, whose
-collateral hold ADR 0010 lifted by settling the §11.3–§11.5 policy: it now
-stands on its own, and it is the reason a settled formula is not yet a settled
-reserve. `accounting.md` §11.5 points back here for exactly this.
-`tig_integration.md` §14.1 shows why verification is not a
-formality: the code that applies a penalty sits behind `Context` hooks absent
-from the pinned tree, so the basis cannot be read off the pinned source and
-must be established on testnet or by written TIG confirmation. Until then it
-is an assumption the collateral formula rests on, recorded as one.
+**It is now confirmed, and the answer is the bounded one.**
+`tig_integration.md` §14.1 records the charge as
+`penalty_amount * min(R, B)`: one penalty per distinct nonce successfully
+arbitrated against the benchmark, pooled across every report rather than
+applied per report, and capped at the bundle count. The unbounded per-nonce
+reading above — the one that would have invalidated the formula by a factor of
+`num_nonces_per_bundle` — is not what TIG does. `accounting.md` §11.4's
+The bundle count therefore bounds how many times the price is charged, which
+is what `accounting.md` §11.4's `method_reserve = P[s] * B[t]` assumed. Two
+things it still does not bound: the **price**, which §14.1 determines is read
+live at the charge block and can rise afterwards, and what the member actually
+holds, which is the multiplier-scaled reserve and below `10_000` bps is
+deliberately less (ADR 0010).
+
+The standing of that confirmation is owner statement, not pinned source, and
+the distinction is kept because it is real: the code applying a penalty sits
+behind `Context` hooks absent from the pinned tree, so nothing in the
+repository can check it. A live observation spanning a real report and
+arbitration would upgrade that standing; what it would not change is the
+formula's shape, which is what the reserve depends on.
 
 The live mainnet configuration currently expresses `reports.penalty_amount` as
 `10 TIG`. The pool still reads the live value every accepted block rather than

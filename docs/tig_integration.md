@@ -1037,10 +1037,16 @@ confirmed is the *shape* of the charge. The **value** of `penalty_amount` is
 live configuration and is read per the determination above, never taken from
 this paragraph.
 
-Consequence owned elsewhere: `accounting.md` §11.4's method reserve is
-`P[s] * B[t]`, which is exactly this maximum. That is not a safety margin — the
-reserve and the cap are the same expression, so a member's reservation covers
-the largest penalty their benchmark can attract and not one atom more.
+Consequence owned elsewhere: `accounting.md` §11.4's **unscaled** method
+reserve is `P[s] * B[t]`, which is exactly this maximum — not a safety margin
+and not an estimate, because the reserve and the cap are the same expression.
+
+What a member actually holds is the *scaled* reserve, and below `10_000` bps
+that is deliberately less than this cap: ADR 0010's multiplier is what creates
+the gap, `accounting.md` §13 item 21 makes the aggregate a reported quantity,
+and `mining_system.md` §6.1 states the floor is against the scaled reserve
+rather than the full exposure. This paragraph bounds the penalty; it does not
+claim the member's collateral covers it.
 
 ### 14.2 Method report and arbitration reads
 

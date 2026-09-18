@@ -874,7 +874,9 @@ the *formula*, not the two premises below, and it does not make this position
 into a proof. The penalty **basis** that this once also waited on is no
 longer open: `tig_integration.md` §14.1 records the charge as
 `penalty_amount * min(R, B)` with `R` pooled across the benchmark, so the
-`P * B` reserve is exactly the ceiling rather than a guess at it.
+unscaled `P * B` reserve is exactly the ceiling on the penalty rather than a
+guess at it. It remains true that the *scaled* reserve is smaller below
+`10_000` bps, which is the exposure §13 item 21 reports.
 `CLAUDE.md` reserves security-deposit decisions to an explicit human decision,
 and this section records one rather than deriving it.
 

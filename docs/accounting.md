@@ -744,15 +744,27 @@ assignment_reserve[m,s,t] =
 precommit_reserve = max(assignment_reserve[m,s,t] for every proposed track t)
 ```
 
-**Why `P * B` is the right size, exactly.** `tig_integration.md` §14.1 records
-the penalty as `penalty_amount * min(R, B)`, where `R` is the count of distinct
-nonces in the benchmark whose reports were successfully arbitrated against it,
-pooled across every report rather than applied per report. Because that count
-is capped at the bundle count, `P[s] * B[t]` is precisely the largest penalty
-the benchmark can ever attract — the reserve and the cap are the same
-expression. The reserve is not a margin over the exposure and not an estimate
-of it; below `10_000` bps it is deliberately *less* than the exposure, and the
-difference is what §13 item 21 makes the pool report.
+**What bounds the reserve, and what does not.** `tig_integration.md` §14.1
+records the penalty as `penalty_amount * min(R, B)`, where `R` is the count of
+distinct nonces in the benchmark whose reports were successfully arbitrated
+against it, pooled across every report rather than applied per report.
+
+That settles the **count**: the bundle count caps how many times the price is
+charged, so the penalty can never exceed `penalty_amount * B[t]`. Before it was
+settled, the ceiling might have been the benchmark's whole nonce count — larger
+by `num_nonces_per_bundle`, a per-track value and not a small one — and the
+reserve would have been wrong by that factor rather than merely tight.
+
+It does **not** settle the **price**. §14.1's other determination is that
+`penalty_amount` is read live when the penalty is applied, so it can rise after
+the reservation was taken. `P[s] * B[t]` is therefore the exact ceiling at an
+unchanged `P`, and short by the increase if `P` moves between snapshot `s` and
+the charge block. §11.5 records the owner's decision to carry that residual
+rather than buffer against it.
+
+Two separate reasons the reserve can fall below the exposure, then: a price
+rise, which §11.5 owns, and a multiplier below `10_000` bps, which is
+deliberate and which §13 item 21 makes the pool report.
 
 The multiplier is **integer basis points, not a fraction**, for §3's reason:
 every amount in this document is exact integer attoTIG and §13 item 6 admits
@@ -874,9 +886,10 @@ the *formula*, not the two premises below, and it does not make this position
 into a proof. The penalty **basis** that this once also waited on is no
 longer open: `tig_integration.md` §14.1 records the charge as
 `penalty_amount * min(R, B)` with `R` pooled across the benchmark, so the
-unscaled `P * B` reserve is exactly the ceiling on the penalty rather than a
-guess at it. It remains true that the *scaled* reserve is smaller below
-`10_000` bps, which is the exposure §13 item 21 reports.
+number of times the price is charged is bounded by the bundle count. That
+removes one unknown and leaves this section's intact: the **price** is still
+read live at the charge block, which is the whole subject here, so no formula
+based on the assignment block alone can guarantee coverage.
 `CLAUDE.md` reserves security-deposit decisions to an explicit human decision,
 and this section records one rather than deriving it.
 

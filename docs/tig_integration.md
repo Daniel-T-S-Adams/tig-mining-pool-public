@@ -1037,16 +1037,18 @@ confirmed is the *shape* of the charge. The **value** of `penalty_amount` is
 live configuration and is read per the determination above, never taken from
 this paragraph.
 
-Consequence owned elsewhere: `accounting.md` §11.4's **unscaled** method
-reserve is `P[s] * B[t]`, which is exactly this maximum — not a safety margin
-and not an estimate, because the reserve and the cap are the same expression.
+**What this bounds, stated narrowly.** It bounds the *count* — how many times
+`penalty_amount` is charged for one benchmark — at the bundle count. It does
+not bound the *price*: the determination above is that `penalty_amount` is read
+live when the penalty is applied and can rise after a reservation was taken,
+and nothing here changes that. `accounting.md` §11.5 owns the pool's response
+to a price that moves.
 
-What a member actually holds is the *scaled* reserve, and below `10_000` bps
-that is deliberately less than this cap: ADR 0010's multiplier is what creates
-the gap, `accounting.md` §13 item 21 makes the aggregate a reported quantity,
-and `mining_system.md` §6.1 states the floor is against the scaled reserve
-rather than the full exposure. This paragraph bounds the penalty; it does not
-claim the member's collateral covers it.
+Nor does it say a member's collateral covers the penalty. What they hold is the
+multiplier-scaled reserve, which below `10_000` bps is deliberately less
+(ADR 0010); `accounting.md` §13 item 21 makes that gap a reported quantity and
+`mining_system.md` §6.1 states the floor is against the scaled reserve rather
+than the full exposure.
 
 ### 14.2 Method report and arbitration reads
 

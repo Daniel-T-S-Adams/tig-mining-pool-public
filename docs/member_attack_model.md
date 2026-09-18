@@ -86,9 +86,12 @@ arbitrated against the benchmark, pooled across every report rather than
 applied per report, and capped at the bundle count. The unbounded per-nonce
 reading above — the one that would have invalidated the formula by a factor of
 `num_nonces_per_bundle` — is not what TIG does. `accounting.md` §11.4's
-`P * B` — the *unscaled* method reserve — is therefore the exact ceiling on
-the penalty. What a member holds is the multiplier-scaled version of it, which
-below `10_000` bps is deliberately less (ADR 0010).
+The bundle count therefore bounds how many times the price is charged, which
+is what `accounting.md` §11.4's `method_reserve = P[s] * B[t]` assumed. Two
+things it still does not bound: the **price**, which §14.1 determines is read
+live at the charge block and can rise afterwards, and what the member actually
+holds, which is the multiplier-scaled reserve and below `10_000` bps is
+deliberately less (ADR 0010).
 
 The standing of that confirmation is owner statement, not pinned source, and
 the distinction is kept because it is real: the code applying a penalty sits

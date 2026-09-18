@@ -73,10 +73,11 @@ which is the failure this ADR exists to make impossible.
 
 **A member waits longer to see a round at all.** Under ADR 0008 they saw the
 credit immediately and only its collateral use was delayed; now nothing
-appears until the round is clear. In practice the difference is small, because
-TIG's payment delay already exceeded the arbitration window and the funding
-condition was already binding — but when arbitration is slow, the member sees
-nothing rather than seeing an unusable balance.
+appears until the round is clear. The owner states TIG's payment delay already
+exceeds the arbitration window, which would make the funding condition the
+binding one and the difference small; that is owner confirmation rather than a
+measured fact, and it is not what the rule rests on. When arbitration is slow,
+the member sees nothing rather than seeing an unusable balance.
 
 That is a real reduction in what the member can observe, and it is the price
 of the balance meaning exactly one thing. The member-facing surface should

@@ -448,10 +448,17 @@ Credit  LIABILITY:MEMBER_BALANCE:<member>
 
 **When the batch may post.** Two conditions, and the later one governs:
 
-- the round's own slashing is complete — round `R`'s reports close at the end
-  of round `R + submission_period` and their arbitrations are published by the
-  end of `R + submission_period + 1` (`tig_integration.md` §14.2), so by then
-  every charge against that round is known; and
+- the round's own slashing is complete — **every benchmark whose qualifiers
+  were attributed in that round** has a closed reporting window and an
+  observed terminal arbitration for every report against it, so every charge
+  against the round is known. The condition is per contributing benchmark and
+  keyed to that benchmark's own round, never to the earning round: a benchmark
+  started before a round boundary earns qualifiers attributed after it, and
+  `tig_integration.md` §14.2's `?round=` selects by the benchmark's round. It
+  is also satisfied by observation, never by the clock — §14.2's bound says
+  when an answer should be readable, and a round still unsettled past it is a
+  §13 item 16 discrepancy rather than a licence to credit. §11.7 owns both
+  points; and
 - the exact corresponding TIG payment is finalized and reconciled in the
   reward wallet, and §8.3a's member leg has completed.
 
@@ -461,10 +468,12 @@ until every penalty against it is settled. §9's batches stay immutable, and no
 settled round is ever reopened. The second is unchanged and is why the pool
 never advances its own capital.
 
-In practice TIG's payment delay exceeds two rounds, so the second condition
-binds. Both are stated because only the pair is safe under any configuration:
-a payment arriving sooner than arbitration would otherwise credit rewards that
-a later charge still has to reach.
+The owner states that the payment lands later than the arbitration window, so
+the second condition is expected to bind in practice — owner confirmation,
+recorded as such, and not something the pinned tree establishes. Both are
+required regardless: only the pair is safe under any configuration, and a
+payment arriving sooner than arbitration would otherwise credit rewards that a
+later charge still has to reach.
 
 The credit is unencumbered, immediately withdrawable, and **immediately
 collateral-eligible**. It does not create a transfer intent — under ADR 0008
@@ -1217,8 +1226,10 @@ The inequality holds at every batch boundary without any in-flight allowance,
 because no batch in this document moves value between member custody and
 anywhere else except at a finalized token event: §8.3a's inbound sweep, §8.6's
 outbound sweep, §11.2's recognized deposit, and §12.5's completed withdrawal.
-The batches in between — settlement, reservation, freeze, maturation — move
-liabilities inside the one pot.
+The batches in between — settlement, reservation, freeze — move liabilities
+inside the one pot. There is no maturation batch: under ADR 0012 nothing is
+credited before it is settled, so no later event reclassifies value already in
+the balance.
 
 **What one pot costs, recorded plainly.** The pool's earlier design split
 member value across two custody addresses so that a stolen payout key could
@@ -1261,12 +1272,12 @@ Two separate gates, because ADR 0008 separated the two events.
   event, so the balances §8.4 credits are covered by member custody at the
   instant they exist.
 
-The expected TIG payment delay may be several weeks and in practice outlasts
-the arbitration window, so the funding condition is normally the binding one.
-Both are required anyway: the pool waits for actual funds, not elapsed time,
-and it waits for the round's own slashing to finish, not for a schedule. A
-payment arriving before arbitration would otherwise credit a member against a
-charge still to come.
+The expected TIG payment delay may be several weeks, and the owner states it
+outlasts the arbitration window, so the funding condition is expected to bind
+— owner confirmation, not a measured fact. Both are required regardless: the
+pool waits for actual funds, not elapsed time, and it waits for the round's
+own slashing to finish, not for a schedule. A payment arriving before
+arbitration would otherwise credit a member against a charge still to come.
 
 Settlement is automatic and needs no member action; what it produces is a
 balance, not a transfer.

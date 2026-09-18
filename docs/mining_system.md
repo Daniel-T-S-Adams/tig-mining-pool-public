@@ -1007,10 +1007,16 @@ does not relabel the outcome as fraud. Ordinary non-qualifying work that TIG
 does verify is not a tier failure merely because it earns no qualifier.
 
 After durable package acceptance, availability of the member or deletion of
-the member's local artifacts cannot be treated as a member failure. If the
-origin of corruption or failure is not established, the system records an
-unresolved operational outcome rather than automatically penalizing the
-member.
+the member's local artifacts is not something the member is expected to
+maintain — §5 releases both obligations at that point, and the pool must never
+ask for either again.
+
+It does not follow that such a benchmark is free for the member. Under
+`accounting.md` §11.6 a charge no longer turns on whose failure it was, so a
+benchmark that fails after durable acceptance is charged to its owner like any
+other. The same holds where the origin of a corruption is never established:
+the system still records an unresolved operational outcome for the operator's
+purposes, and that record no longer decides whether a charge happens.
 
 The database records the outcome and reason for every member-owned benchmark,
 the per-round `U`/`V` aggregate, every chargeable failure, the tier decision,

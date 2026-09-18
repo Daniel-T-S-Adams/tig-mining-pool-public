@@ -983,7 +983,11 @@ established. This replaces the fault-attribution boundaries this section
 previously set, under which `POOL`, `TIG` and `UNRESOLVED` attribution each
 slashed zero.
 
-The charge is the pool's loss on that benchmark, passed through:
+The charge is the pool's whole loss on that benchmark. It has two parts and
+they come from different places: `tig_integration.md` §14.1's penalty, which
+TIG takes from the pool, and the precommit fee, which the pool spent itself.
+Neither this table nor §14.1 should be read as saying TIG charges a fee — it
+does not.
 
 ```text
 the benchmark earned active bundles, and no report against it
@@ -1112,8 +1116,10 @@ state.
 
 On `REPRODUCIBLE` or `INCONCLUSIVE` the member is charged nothing for that
 report. Those are not fault findings in the member's favour; they are
-arbitrations under which TIG levies nothing, and the charge is a pass-through
-of what TIG actually took.
+arbitrations under which TIG levies no penalty, so the penalty term is zero.
+A benchmark that earned active bundles and is never successfully reported is
+charged nothing at all — the fee term applies only where the benchmark
+produced nothing, which is the table's third branch.
 
 Settling a report is not the same as releasing the reservation. The freeze
 lifts, but the method portion goes on being held under §11.4's ordinary

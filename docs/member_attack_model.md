@@ -181,8 +181,10 @@ stopped-benchmark recovery path without making a normal commitment. If invalid
 work is discovered only after commitment and TIG sampling, stopping may no
 longer be available; the workflow must follow the confirmed TIG terminal state.
 
-Every member-attributable abandoned, unusable, or solution-invalid benchmark
-charges the versioned amount `X` from its reserved collateral and increments
+Every abandoned, unusable, or solution-invalid benchmark charges its owner
+that benchmark's own amount under `accounting.md` §11.6 — the precommit fee,
+since it earned no active bundles — from its reserved collateral, and
+increments
 the round failure count `f`. A benchmark with zero bundles meeting TIG's
 minimum verification quality is treated the same way for capacity economics,
 without being called fraud. For tier `k`, `f > k` removes the tier at round
@@ -311,13 +313,13 @@ Different failures require different evidence and consequences.
 | Outcome | Minimum evidence | Immediate consequence | Financial consequence status |
 |---|---|---|---|
 | Method-verification penalty against a member-owned benchmark | TIG report/penalty, immutable assignment/package, applicable config | Suspend and freeze the evidenced amount | The evidenced protocol loss is charged on the arbitration itself; no attribution step and no appeal (`accounting.md` §11.6) |
-| Hostile or mechanically invalid package | Accepted byte hash or rejected upload evidence and deterministic parser reason | Stop/recover benchmark; count failure when member-attributable | Charge `X`; round `f > k` removes tier |
-| Technical package cutoff missed, no acceptable package | Confirmed assignment, server receipt history, cutoff/config, absence of pool outage | Stop/recover benchmark; count failure when member-attributable | Charge `X`; round `f > k` removes tier |
+| Hostile or mechanically invalid package | Accepted byte hash or rejected upload evidence and deterministic parser reason | Stop/recover benchmark; count the failure | Charge the benchmark's fee (`accounting.md` §11.6); round `f > k` removes tier |
+| Technical package cutoff missed, no acceptable package | Confirmed assignment, server receipt history, cutoff/config, absence of pool outage | Stop/recover benchmark; count the failure | Charge the benchmark's fee; round `f > k` removes tier |
 | Correct completion within published deadline | Durable package and timestamps | Normal processing | No slash |
-| TIG solution-verification failure | TIG terminal evidence tied to immutable member package and pool runtime/config | Review correlated failures; count when member-attributable | Charge `X`; round `f > k` removes tier |
+| TIG solution-verification failure | TIG terminal evidence tied to immutable member package and pool runtime/config | Review correlated failures; count the failure | Charge the benchmark's fee; round `f > k` removes tier |
 | Zero bundles meet TIG minimum verification quality | Accepted/confirmed benchmark outcome and policy | Count as tier capacity failure, not fraud | Charge `X`; round `f > k` removes tier |
 | TIG-verified work earns no qualifiers | Accepted/confirmed benchmark outcome | Normal tier accounting | No charge |
-| Pool, TIG, correlated compatibility, or unresolved fault | Incident evidence | Pause affected path and investigate | No slash |
+| Pool, TIG, correlated compatibility, or unresolved fault | Incident evidence | Pause affected path and investigate | **Charged like any other failure** — `accounting.md` §11.6 charges the owning member regardless of cause. The investigation is for the pool's own purposes and, where it concludes the pool was at fault, for deciding whether to reverse under §10 |
 
 Intent need not be proven to stop further exposure. Intent or strong evidence
 of deliberate abuse may matter to permanent exclusion, but a slash must still
@@ -333,7 +335,8 @@ The v0 control shape is settled:
 2. exactly `k` concurrent unverified benchmarks at tier `k`;
 3. tier removal when round-average unverified exceeds current
    verified/active, equivalently `sum(U) > sum(V)`;
-4. charge `X` for every member-attributable tier failure and remove tier `k`
+4. charge every chargeable failure its own amount under `accounting.md` §11.6,
+   whatever caused it, and remove tier `k`
    when round failures `f > k`;
 5. dormancy with `U = V = 0` has no consequence;
 6. a pool-wide internal unverified limit below the TIG limit; and
@@ -345,7 +348,9 @@ The remaining implementation values and measurements are:
 1. the authoritative pending-limit formula, exact rounding/scope, and stopped
    benchmark behavior;
 2. the pool's recovery headroom below that limit;
-3. the numerical fee schedule `J[k]` and failure charge `X`;
+3. the numerical fee schedule `J[k]`. The failure charge is no longer a
+   number to set: `accounting.md` §11.6 derives it from the benchmark's own
+   precommit fee and penalty;
 4. the technical package cutoff and when the pool submits `stopped`;
 5. false-positive handling for chargeable failures — out of band under `accounting.md` §11.6, reversed through §10 where the pool agrees, since there is no in-system appeal; and
 6. whether full local solution checking or hidden method re-execution is

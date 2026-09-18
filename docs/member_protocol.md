@@ -775,9 +775,11 @@ schema mismatch is incompatible input, not a value to coerce.
 ## 15. Failure attribution and trust effects
 
 Every terminal outcome records one of `MEMBER`, `POOL`, `TIG`, or `UNRESOLVED`
-plus a machine reason and evidence. Only published chargeable tier-failure
-reason codes increment `f`; a `MEMBER` method-verification outcome instead uses
-the separate method-loss rule unless another chargeable failure also occurred.
+plus a machine reason and evidence. That classification is operational
+reporting: under `accounting.md` §11.6 it no longer decides whether a charge
+happens or how large it is. Every chargeable failure increments `f` whichever
+code it carries, and a method-verification outcome is charged by §11.6's table
+under its own term rather than as a second flat charge.
 The explicit zero-verification-quality capacity rule below may increment `f`
 without alleging fraud. V0 has no general mining trust score.
 
@@ -788,7 +790,7 @@ without alleging fraud. V0 has no general mining trust score.
 | Member cancels after precommit or misses the package block deadline while pool and TIG services were available | `MEMBER` |
 | Complete benchmark has zero bundles meeting TIG's minimum verification quality | No fraud attribution; chargeable tier failure, including where a pool/TIG/compatibility incident caused it (`accounting.md` §11.6) |
 | TIG verifies the benchmark but its bundles earn no qualifiers | No failure |
-| Pool stops an otherwise valid complete benchmark for a pool/TIG reason | No member failure |
+| Pool stops an otherwise valid complete benchmark for a pool/TIG reason | No member *fault*; still a chargeable failure of its owner (`accounting.md` §11.6 charges regardless of cause) |
 | Slot fails or times out during pre-assignment qualification | No mining-trust effect; slot remains ineligible |
 | Authentication failure, duplicate request, stale request timestamp, lost heartbeat, or transient member network error by itself | No trust effect |
 | Pool issued an assignment inconsistent with confirmed TIG data | `POOL` |

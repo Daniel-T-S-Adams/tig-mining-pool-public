@@ -1000,6 +1000,48 @@ readings put the governing configuration after the benchmark — so
 `accounting.md` §11.5 decides against the conservative reading, which is the
 wider of the two.
 
+**How much is charged (owner confirmation, 2026-09-18).** The section above
+settles *which* configuration supplies `penalty_amount`. This settles how many
+times it is applied:
+
+```text
+R = distinct nonces in the benchmark whose report was successfully
+    arbitrated against it
+B = the benchmark's num_bundles
+
+benchmarker penalty = penalty_amount * min(R, B)
+```
+
+Three properties of that rule, each of which the pool depends on:
+
+- **A nonce can be reported only once.** `R` counts distinct nonces, so
+  re-reporting the same nonce cannot inflate it.
+- **`R` is pooled across the whole benchmark, not per report.** Several
+  reports against one benchmark do not each levy their own penalty; their
+  successfully arbitrated nonces are counted once, together, and the cap is
+  applied to that total. A second report arriving after a first has resolved
+  raises `R`, and the charge is the difference — never a fresh application of
+  the formula.
+- **The cap is what bounds the exposure.** `min` with `num_bundles` is load
+  bearing: without it the ceiling would be the benchmark's nonce count,
+  `num_bundles * num_nonces_per_bundle`, which is larger by a per-track factor
+  that is not small. Worked example: five nonces reported against a
+  three-bundle benchmark charges `penalty_amount * 3`, not five — the count
+  stops at the bundle count rather than subtracting it.
+
+This is **owner confirmation, not a pinned-source fact** — the same standing
+as §14.2's arbitration bound, and recorded for the same reason: the code that
+applies a penalty sits behind the `Context` hooks named above and is not in
+the pinned tree, so there is nothing here to check it against. What is
+confirmed is the *shape* of the charge. The **value** of `penalty_amount` is
+live configuration and is read per the determination above, never taken from
+this paragraph.
+
+Consequence owned elsewhere: `accounting.md` §11.4's method reserve is
+`P[s] * B[t]`, which is exactly this maximum. That is not a safety margin — the
+reserve and the cap are the same expression, so a member's reservation covers
+the largest penalty their benchmark can attract and not one atom more.
+
 ### 14.2 Method report and arbitration reads
 
 `GET /get-reports?round=<round>` returns method reports for one round

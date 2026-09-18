@@ -744,6 +744,16 @@ assignment_reserve[m,s,t] =
 precommit_reserve = max(assignment_reserve[m,s,t] for every proposed track t)
 ```
 
+**Why `P * B` is the right size, exactly.** `tig_integration.md` §14.1 records
+the penalty as `penalty_amount * min(R, B)`, where `R` is the count of distinct
+nonces in the benchmark whose reports were successfully arbitrated against it,
+pooled across every report rather than applied per report. Because that count
+is capped at the bundle count, `P[s] * B[t]` is precisely the largest penalty
+the benchmark can ever attract — the reserve and the cap are the same
+expression. The reserve is not a margin over the exposure and not an estimate
+of it; below `10_000` bps it is deliberately *less* than the exposure, and the
+difference is what §13 item 21 makes the pool report.
+
 The multiplier is **integer basis points, not a fraction**, for §3's reason:
 every amount in this document is exact integer attoTIG and §13 item 6 admits
 no other. `10_000` bps is the default and means no discount; `5_000` bps
@@ -861,11 +871,10 @@ This is recorded as the owner's position on the exposure, not as a derived
 result. §14's collateral hold has since been lifted — ADR 0010 settled the
 §11.3–§11.5 policy as §11.4 with a per-member multiplier — but that settles
 the *formula*, not the two premises below, and it does not make this position
-into a proof. One precondition for accepting public member collateral
-therefore survives the lifting of §14's hold: the penalty **basis** must be
-established, per
-[member_attack_model.md](member_attack_model.md)'s section on the same
-formula. A settled formula over an unverified basis is not a settled reserve.
+into a proof. The penalty **basis** that this once also waited on is no
+longer open: `tig_integration.md` §14.1 records the charge as
+`penalty_amount * min(R, B)` with `R` pooled across the benchmark, so the
+`P * B` reserve is exactly the ceiling rather than a guess at it.
 `CLAUDE.md` reserves security-deposit decisions to an explicit human decision,
 and this section records one rather than deriving it.
 
@@ -1525,12 +1534,12 @@ The remaining decision is:
 
 Decisions 6 and 7 lift this section's former prohibition: an implementation
 may accept member collateral under §11.4 and may present it as settled policy.
-**One precondition survives the lifting and is not satisfied**: §11.5,
-[member_attack_model.md](member_attack_model.md) and ADR 0010 all record that
-the penalty *basis* is unverified — whether a benchmark incurs
-`penalty_amount` once or per reported nonce — and a settled formula over an
-unverified basis is not a settled reserve. Public member collateral still
-waits on that verification. The public-funds gates in
+The precondition that ADR 0010 recorded as surviving that lifting — the
+unverified penalty *basis*, whether a benchmark incurs `penalty_amount` once
+or per reported nonce — **is now met**: `tig_integration.md` §14.1 records the
+charge as `penalty_amount * min(R, B)`, owner-confirmed 2026-09-18. That
+supersedes ADR 0010's consequence bullet to the contrary, which stays as
+written under the ADR immutability rule. The public-funds gates in
 `pre_build_checklist.md` §9 are untouched and still govern real member money,
 and testnet continues to exercise deposit fixtures with explicit fixture
 policy values.

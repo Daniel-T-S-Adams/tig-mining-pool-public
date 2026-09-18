@@ -314,8 +314,9 @@ LIABILITY:MEMBER_WITHDRAWAL_PENDING:<member_id>:<generation>
 LIABILITY:PAYOUT_SUSPENSE:<block_id>
 REVENUE:POOL_FEE
 REVENUE:TIER_JOINING_FEES
-REVENUE:FAILURE_CHARGES                        §11.6's chargeable `X`
-EQUITY:SECURITY_LOSS_RESERVE               finalized slashes; restricted use
+REVENUE:FAILURE_CHARGES                    §11.6's charge, fee portion
+EQUITY:SECURITY_LOSS_RESERVE               §11.6's charge, penalty portion;
+                                           restricted use
 EXPENSE:ACCOUNTING_LOSS                    explicit approved correction only
 ```
 
@@ -531,18 +532,23 @@ The causes, each with its own cause identifier:
 | Cause | Identifier |
 |---|---|
 | §11.3's tier joining fee | the tier activation |
-| §11.6's chargeable failure charge | the charge decision |
-| A finalized slash (§11.2) | the finalized slash |
+| §11.6's charge, penalty portion and fee portion alike | the charge decision |
 | The pool's share of a §7 suspense resolution — the §5 deferred fee, or a full award | `(network, block_id, resolution_generation)` |
 | A §10 correction that moves member value to a pool account | the correction ID |
 
-`sweep_cause_id` in §9 is whichever of these applies. The
-`X` charge is listed separately from a slash on purpose: §11.6 and
-`mining_system.md` §8 both refuse to describe a chargeable tier failure as
-fraud, and sweeping it under a slash's identifier would record it as one. Its
-credit side is `REVENUE:FAILURE_CHARGES` (§8), distinct from the pool fee and
-from the loss reserve, so §13 item 12's margin term for un-swept charges is
-computable from the ledger rather than inferred.
+`sweep_cause_id` in §9 is whichever of these applies. **A charge and a slash
+are no longer two causes**, because under §11.6 they are no longer two events:
+one table produces one batch, whose penalty portion credits the loss reserve
+and whose fee portion credits `REVENUE:FAILURE_CHARGES`. Listing both a charge
+decision and a finalized slash would put two identifiers on one batch, and
+§13 item 13 allows one sweep per cause precisely so a retry after an ambiguous
+broadcast cannot sweep the same member-custody value twice under the other
+name.
+
+The two credit accounts stay distinct so §13 item 12's margin term for
+un-swept charges is computable from the ledger rather than inferred, and so
+the pool's recorded revenue never includes TIG value it lost. What does not
+follow from the split is a second cause.
 
 These are the **only** transfers out of member custody other than a member
 withdrawal, and their destination is allow-listed to operating custody. There
@@ -1176,12 +1182,19 @@ penalty plus the fee where it was successfully reported:
 
 ```text
 Debit   LIABILITY:MEMBER_BALANCE:<member>
-Credit  REVENUE:FAILURE_CHARGES
+Credit  EQUITY:SECURITY_LOSS_RESERVE        the penalty portion
+Credit  REVENUE:FAILURE_CHARGES             the fee portion
 ```
 
+This is the same batch §11.2 describes, posted here in the section that
+computes it. The split is not cosmetic: crediting the penalty portion to
+revenue would overstate what the pool earned and leave the loss reserve empty
+of the loss it exists to record. Either line may be zero — a benchmark that
+produced nothing is charged only the fee portion.
+
 `REVENUE:FAILURE_CHARGES` is its own account, not the pool fee and not the
-loss reserve. §8.6 sweeps its tokens out of member custody under the charge
-decision's own identifier, and §13 item 12 counts what is charged but not yet
+loss reserve. §8.6 sweeps the whole batch out of member custody under the
+charge decision's single identifier, and §13 item 12 counts what is charged but not yet
 swept as a named margin term — both of which need this credit side to exist
 before they can be computed. V0 chargeable failures are an abandoned or
 unusable package, TIG solution-verification failure, and a benchmark with zero
@@ -1348,7 +1361,7 @@ ASSET:TIG_MEMBER_CUSTODY  >=  sum(balance[m])
 Coverage rather than equality. The pot also holds, briefly and by name: a
 round's member share swept under §8.3a but not yet settled by §8.4, unresolved
 §8.2 suspense proceeds swept with it, and value that became the pool's — a
-tier fee, an `X` charge, a finalized slash, a correction — awaiting §8.6's
+tier fee, a §11.6 charge, a correction — awaiting §8.6's
 sweep. §13 item 12 enumerates the same terms, and daily reconciliation
 accounts for each rather than treating it as a mismatch.
 
@@ -1602,8 +1615,9 @@ Before and after every batch, enforce:
     custody only at a finalized token event;
 13. one withdrawal intent spends one liability once, and one sweep per cause:
     `(network, round, leg)` for each leg of a reward-wallet sweep, and §8.6's
-    cause identifier — tier activation, `X` charge decision, finalized slash,
-    suspense resolution, or correction ID — for an operating sweep;
+    cause identifier — tier activation, charge decision, suspense resolution,
+    or correction ID — for an operating sweep. A §11.6 charge has exactly one
+    identifier however its credit lines split;
 14. one signed intent fixes chain, token, destination, amount, signer, and
     nonce;
 15. only a finalized exact token event completes a withdrawal or a sweep;

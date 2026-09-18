@@ -104,18 +104,23 @@ it is exceeded rather than a compensating guess.
   immutability rule. ADR 0008's decision — one balance, deposits and earnings
   together, collateral reserved from it — is untouched; only the timing of the
   credit and the maturity apparatus change.
-- It is also what makes a shortfall spread possible without reopening a
-  settled batch: a charge that exceeds a member's collateral is deducted from
-  the round before it is distributed, so §9's immutable batches are never
-  disturbed. That mechanism is not specified here.
+- It removes one structural obstacle to any future rule that adjusts a round
+  before it is distributed: while a round was credited on settlement, such an
+  adjustment would have had to reopen a posted batch, which §9 forbids
+  outright. This ADR does **not** introduce such a rule, and three settled
+  rules currently stand against the obvious one: §11.6 caps a method slash at
+  its reserved method amount, §10 rule 7 forbids charging other members or a
+  future block for a shortfall, and ADR 0010 records that the uncovered
+  portion cannot be recovered from the member. Changing any of that is issue
+  #56's, and nothing here should be read as having decided it.
 
 ## Alternatives rejected
 
 **Keep ADR 0008's maturity rule.** It works and it is already written down.
 Rejected because the four mechanisms it needs exist only to describe a state —
-credited but unusable — that this decision makes unreachable, and because a
-shortfall spread over a round's earnings has no clean home while those
-earnings have already been credited.
+credited but unusable — that this decision makes unreachable. Whether anything
+should later adjust a round before it is distributed is issue #56's question,
+not a reason weighed here.
 
 **Credit immediately and claw back on a later charge.** Simplest for the
 member, and impossible here: §9's batches are immutable and §10's corrections

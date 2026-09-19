@@ -10,8 +10,8 @@
 //! `POOL_REQUIRE_DB_TESTS=1` turns a skip into a failure in CI.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use pool_test_support::{MIGRATOR, TempDb};
-use sqlx::{Connection, PgConnection};
+use pool_test_support::{MIGRATOR, TempDb, exec};
+use sqlx::{AssertSqlSafe, Connection, PgConnection};
 
 const ALICE: &str = "0x1111111111111111111111111111111111111111";
 const BOB: &str = "0x2222222222222222222222222222222222222222";
@@ -197,8 +197,9 @@ async fn the_multiplier_is_append_only_and_bounded() {
 
     sqlx::query(
         "INSERT INTO pool.member_collateral_multiplier
-             (network, member_id, version, bps, reason)
-         VALUES ('testnet', $1::uuid, 1, 5000, 'early member discount')",
+             (network, member_id, version, bps, reason, set_by, effective_from)
+         VALUES ('testnet', $1::uuid, 1, 5000, 'early member discount',
+                 'operator:daniel', now())",
     )
     .bind(&member)
     .execute(&mut controller)
@@ -243,8 +244,8 @@ async fn the_multiplier_is_append_only_and_bounded() {
     for bad in [0_i32, 10_001, -1] {
         let r = sqlx::query(
             "INSERT INTO pool.member_collateral_multiplier
-                 (network, member_id, version, bps, reason)
-             VALUES ('testnet', $1::uuid, 2, $2, 'out of range')",
+                 (network, member_id, version, bps, reason, set_by, effective_from)
+             VALUES ('testnet', $1::uuid, 2, $2, 'out of range', 'operator:daniel', now())",
         )
         .bind(&member)
         .bind(bad)
@@ -253,18 +254,66 @@ async fn the_multiplier_is_append_only_and_bounded() {
         assert!(r.is_err(), "{bad} bps is outside 1..=10000");
     }
 
-    let blank = sqlx::query(
-        "INSERT INTO pool.member_collateral_multiplier
-             (network, member_id, version, bps, reason)
-         VALUES ('testnet', $1::uuid, 2, 5000, '   ')",
-    )
-    .bind(&member)
-    .execute(&mut controller)
-    .await;
+    // ADR 0010 rule 3 asks for the value, when it takes effect, who set it,
+    // and why. A row missing either half of the accountability is a discount
+    // that is append-only and unattributable.
+    for (reason, actor) in [("   ", "operator:daniel"), ("a reason", "  ")] {
+        let r = sqlx::query(
+            "INSERT INTO pool.member_collateral_multiplier
+                 (network, member_id, version, bps, reason, set_by, effective_from)
+             VALUES ('testnet', $1::uuid, 2, 5000, $2, $3, now())",
+        )
+        .bind(&member)
+        .bind(reason)
+        .bind(actor)
+        .execute(&mut controller)
+        .await;
+        assert!(
+            r.is_err(),
+            "reason={reason:?} set_by={actor:?} must be refused"
+        );
+    }
+}
+
+#[tokio::test]
+async fn multiplier_versions_advance_together_with_their_effective_times() {
+    // `accounting.md` §11.4 re-derives a reservation from "the policy that was
+    // in force". That phrase has one meaning only if versions and effective
+    // times advance together; otherwise two readers ordering by different
+    // columns re-derive two different reservations from one history.
+    let Some((db, mut api)) = migrated("member_multiplier_order", "pool_api").await else {
+        return;
+    };
+    let (member, _, _) = enrolled(&mut api, ALICE, &KEY_A).await;
+    let mut controller = PgConnection::connect_with(&db.as_role("pool_controller"))
+        .await
+        .unwrap();
+
+    let insert = |version: i64, offset: &str| {
+        format!(
+            "INSERT INTO pool.member_collateral_multiplier
+                 (network, member_id, version, bps, reason, set_by, effective_from)
+             VALUES ('testnet', '{member}'::uuid, {version}, 5000, 'r', 'operator:daniel',
+                     now() + interval '{offset}')"
+        )
+    };
+
+    exec(&mut controller, insert(1, "0 seconds")).await.unwrap();
+
+    let skipped = exec(&mut controller, insert(3, "1 hour")).await;
+    assert!(skipped.is_err(), "versions are consecutive");
+
+    let backdated = exec(&mut controller, insert(2, "-1 hour"))
+        .await
+        .expect_err("a later version cannot take effect earlier");
     assert!(
-        blank.is_err(),
-        "a discount without a reason reports nothing"
+        format!("{backdated}").contains("takes effect at or before"),
+        "expected the ordering trigger, got: {backdated}"
     );
+
+    exec(&mut controller, insert(2, "1 hour"))
+        .await
+        .expect("the next version, taking effect later");
 }
 
 #[tokio::test]
@@ -513,6 +562,338 @@ async fn a_ticket_is_bound_to_its_purpose_and_used_once() {
 }
 
 #[tokio::test]
+async fn a_ticket_cannot_name_another_members_worker() {
+    // The hole this closes: §3.3 has consuming a recovery ticket attach a new
+    // key to the named worker and revoke every old credential. A ticket issued
+    // for member A that names member B's worker is therefore a path to B's
+    // agent, and before this the only thing standing in its way was API code
+    // that does not exist yet.
+    let Some((_db, mut api)) = migrated("member_ticket_chain", "pool_api").await else {
+        return;
+    };
+    let (alice, alice_worker, _) = enrolled(&mut api, ALICE, &KEY_A).await;
+    let (bob, bob_worker, _) = enrolled(&mut api, BOB, &KEY_B).await;
+
+    let cross = sqlx::query(
+        "INSERT INTO pool.enrollment_ticket
+             (network, ticket_hmac, member_id, purpose, worker_id, expires_at)
+         VALUES ('testnet', $1, $2::uuid, 'WORKER_RECOVERY', $3::uuid,
+                 now() + interval '15 minutes')",
+    )
+    .bind([0x11_u8; 32].as_slice())
+    .bind(&alice)
+    .bind(&bob_worker)
+    .execute(&mut api)
+    .await;
+    assert!(
+        cross.is_err(),
+        "a recovery ticket names a worker of its own member"
+    );
+
+    sqlx::query(
+        "INSERT INTO pool.enrollment_ticket
+             (network, ticket_hmac, member_id, purpose, worker_id, expires_at)
+         VALUES ('testnet', $1, $2::uuid, 'WORKER_RECOVERY', $3::uuid,
+                 now() + interval '15 minutes')",
+    )
+    .bind([0x12_u8; 32].as_slice())
+    .bind(&alice)
+    .bind(&alice_worker)
+    .execute(&mut api)
+    .await
+    .expect("its own member's worker is exactly what it may name");
+
+    // And the worker that consumes a ticket is that member's too, so an
+    // enrollment cannot be closed out by someone else's agent.
+    sqlx::query(
+        "INSERT INTO pool.enrollment_ticket
+             (network, ticket_hmac, member_id, purpose, expires_at)
+         VALUES ('testnet', $1, $2::uuid, 'WORKER_ENROLLMENT', now() + interval '15 minutes')",
+    )
+    .bind([0x13_u8; 32].as_slice())
+    .bind(&bob)
+    .execute(&mut api)
+    .await
+    .unwrap();
+
+    let consumed_by_stranger = sqlx::query(
+        "UPDATE pool.enrollment_ticket
+            SET consumed_at = now(), consumed_by_worker_id = $2::uuid
+          WHERE ticket_hmac = $1",
+    )
+    .bind([0x13_u8; 32].as_slice())
+    .bind(&alice_worker)
+    .execute(&mut api)
+    .await;
+    assert!(
+        consumed_by_stranger.is_err(),
+        "a ticket is consumed by its own member's worker"
+    );
+}
+
+#[tokio::test]
+async fn a_ticket_cannot_be_re_armed_or_re_termed() {
+    // Single use, a fifteen-minute life and a fixed purpose are properties
+    // `member_protocol.md` §3.1 and `security.md` §4.1 give the ticket. With
+    // only a grant behind them they would be properties of whichever UPDATE
+    // statement someone wrote.
+    let Some((db, mut api)) = migrated("member_ticket_terms", "pool_api").await else {
+        return;
+    };
+    let (member, worker, _) = enrolled(&mut api, ALICE, &KEY_A).await;
+
+    let too_long = sqlx::query(
+        "INSERT INTO pool.enrollment_ticket
+             (network, ticket_hmac, member_id, purpose, expires_at)
+         VALUES ('testnet', $1, $2::uuid, 'WORKER_ENROLLMENT', now() + interval '2 hours')",
+    )
+    .bind([0x21_u8; 32].as_slice())
+    .bind(&member)
+    .execute(&mut api)
+    .await;
+    assert!(too_long.is_err(), "fifteen minutes is the life of a ticket");
+
+    sqlx::query(
+        "INSERT INTO pool.enrollment_ticket
+             (network, ticket_hmac, member_id, purpose, expires_at)
+         VALUES ('testnet', $1, $2::uuid, 'WORKER_ENROLLMENT', now() + interval '15 minutes')",
+    )
+    .bind([0x22_u8; 32].as_slice())
+    .bind(&member)
+    .execute(&mut api)
+    .await
+    .unwrap();
+
+    // The API is stopped at the privilege: it holds UPDATE on two columns.
+    // The ticket is addressed by a bound parameter throughout — an inline
+    // bytea literal that does not decode matches no rows, and an UPDATE that
+    // matches no rows succeeds, which would leave every assertion below
+    // passing without testing anything.
+    let ticket = [0x22_u8; 32];
+    for column in [
+        "purpose = 'WORKER_RECOVERY'",
+        "expires_at = now() + interval '15 minutes'",
+    ] {
+        let sql = format!("UPDATE pool.enrollment_ticket SET {column} WHERE ticket_hmac = $1");
+        let by_grant = sqlx::query(AssertSqlSafe(sql))
+            .bind(ticket.as_slice())
+            .execute(&mut api)
+            .await
+            .expect_err("the API may only record consumption");
+        assert!(
+            format!("{by_grant}").contains("permission denied"),
+            "expected a privilege refusal, got: {by_grant}"
+        );
+    }
+
+    // The owner holds every privilege and is stopped by the trigger, which is
+    // the guard that survives a later grant.
+    let mut owner = PgConnection::connect_with(&db.as_role("pool_migration"))
+        .await
+        .unwrap();
+    for column in [
+        "purpose = 'WORKER_RECOVERY'",
+        "expires_at = now() + interval '1 hour'",
+        "member_id = gen_random_uuid()",
+    ] {
+        let sql = format!("UPDATE pool.enrollment_ticket SET {column} WHERE ticket_hmac = $1");
+        let by_trigger = sqlx::query(AssertSqlSafe(sql))
+            .bind(ticket.as_slice())
+            .execute(&mut owner)
+            .await
+            .expect_err("a ticket's terms are fixed when it is issued");
+        assert!(
+            format!("{by_trigger}").contains("terms are fixed"),
+            "expected the terms trigger, got: {by_trigger}"
+        );
+    }
+
+    sqlx::query(
+        "UPDATE pool.enrollment_ticket
+            SET consumed_at = now(), consumed_by_worker_id = $2::uuid
+          WHERE ticket_hmac = $1",
+    )
+    .bind([0x22_u8; 32].as_slice())
+    .bind(&worker)
+    .execute(&mut api)
+    .await
+    .unwrap();
+
+    let re_armed = sqlx::query(
+        "UPDATE pool.enrollment_ticket
+            SET consumed_at = NULL, consumed_by_worker_id = NULL
+          WHERE ticket_hmac = $1",
+    )
+    .bind(ticket.as_slice())
+    .execute(&mut owner)
+    .await
+    .expect_err("a spent bearer authority is never re-armed");
+    assert!(
+        format!("{re_armed}").contains("never re-armed"),
+        "expected the single-use trigger, got: {re_armed}"
+    );
+}
+
+#[tokio::test]
+async fn a_worker_cannot_be_re_pointed_at_another_member() {
+    // `member_protocol.md` §2 makes a worker "permanently scoped to one
+    // member", and `mining_system.md` §10 invariant 1 charges faults through
+    // that binding. `migrations/0006` made the same property structural for
+    // `pool.workflow`'s owner; this is that, for the row underneath it.
+    let Some((db, mut api)) = migrated("member_worker_binding", "pool_api").await else {
+        return;
+    };
+    let (_, worker, _) = enrolled(&mut api, ALICE, &KEY_A).await;
+    let (bob, _, _) = enrolled(&mut api, BOB, &KEY_B).await;
+
+    let by_grant = exec(
+        &mut api,
+        format!(
+            "UPDATE pool.worker SET member_id = '{bob}'::uuid WHERE worker_id = '{worker}'::uuid"
+        ),
+    )
+    .await
+    .expect_err("the API holds UPDATE on standing columns only");
+    assert!(
+        format!("{by_grant}").contains("permission denied"),
+        "expected a privilege refusal, got: {by_grant}"
+    );
+
+    let mut owner = PgConnection::connect_with(&db.as_role("pool_migration"))
+        .await
+        .unwrap();
+    for column in [
+        format!("member_id = '{bob}'::uuid"),
+        "enrollment_request_id = gen_random_uuid()".to_string(),
+        "enrollment_request_sha256 = decode(repeat('00', 32), 'hex')".to_string(),
+    ] {
+        let by_trigger = exec(
+            &mut owner,
+            format!("UPDATE pool.worker SET {column} WHERE worker_id = '{worker}'::uuid"),
+        )
+        .await
+        .expect_err("the binding does not move, for anyone");
+        assert!(
+            format!("{by_trigger}").contains("permanently scoped"),
+            "expected the binding trigger, got: {by_trigger}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_key_is_never_rewritten_and_a_revocation_is_never_undone() {
+    // Rotation and recovery both work by adding a credential and revoking the
+    // old one (§3.3). Nothing legitimate rewrites a key in place, and
+    // `security.md` §4.2 resolves authorization through exactly that column —
+    // so an editable key is an editable authorization.
+    let Some((db, mut api)) = migrated("member_key_immutable", "pool_api").await else {
+        return;
+    };
+    let (_, worker, credential) = enrolled(&mut api, ALICE, &KEY_A).await;
+
+    let mut owner = PgConnection::connect_with(&db.as_role("pool_migration"))
+        .await
+        .unwrap();
+
+    let rewritten = exec(
+        &mut owner,
+        format!(
+            "UPDATE pool.worker_credential SET public_key = '\\xbb'::bytea || public_key
+              WHERE credential_id = '{credential}'::uuid"
+        ),
+    )
+    .await
+    .expect_err("a credential's key is fixed");
+    assert!(
+        format!("{rewritten}").contains("key and owner are fixed"),
+        "expected the credential trigger, got: {rewritten}"
+    );
+
+    sqlx::query(
+        "UPDATE pool.worker_credential SET state = 'REVOKED', revoked_at = now()
+          WHERE credential_id = $1::uuid",
+    )
+    .bind(&credential)
+    .execute(&mut api)
+    .await
+    .unwrap();
+
+    let revived = exec(
+        &mut owner,
+        format!(
+            "UPDATE pool.worker_credential SET state = 'ACTIVE', revoked_at = NULL
+              WHERE credential_id = '{credential}'::uuid"
+        ),
+    )
+    .await
+    .expect_err("a revoked credential is not reactivated");
+    assert!(
+        format!("{revived}").contains("never reactivated"),
+        "expected the reactivation refusal, got: {revived}"
+    );
+
+    // §3.3: a security revocation is reinstated only by "an explicit, audited
+    // pool decision". That path does not exist yet, so the answer is no.
+    sqlx::query(
+        "UPDATE pool.worker
+            SET state = 'REVOKED', revoked_at = now(), revocation_reason = 'SECURITY'
+          WHERE worker_id = $1::uuid",
+    )
+    .bind(&worker)
+    .execute(&mut api)
+    .await
+    .unwrap();
+
+    let reinstated = exec(
+        &mut owner,
+        format!(
+            "UPDATE pool.worker
+                SET state = 'ACTIVE', revoked_at = NULL, revocation_reason = NULL
+              WHERE worker_id = '{worker}'::uuid"
+        ),
+    )
+    .await
+    .expect_err("a security revocation stands until an audited decision");
+    assert!(
+        format!("{reinstated}").contains("audited pool decision"),
+        "expected the reinstatement refusal, got: {reinstated}"
+    );
+}
+
+#[tokio::test]
+async fn a_rotation_grace_cannot_outlive_ten_minutes() {
+    // §3.3 bounds the grace at ten minutes, and the column exists so the grace
+    // a rotation promised survives a configuration change — which is the case
+    // where an out-of-range value would otherwise persist.
+    let Some((_db, mut api)) = migrated("member_grace", "pool_api").await else {
+        return;
+    };
+    let (_, worker, _) = enrolled(&mut api, ALICE, &KEY_A).await;
+
+    let too_long = sqlx::query(
+        "INSERT INTO pool.worker_credential
+             (network, credential_id, worker_id, public_key, not_after)
+         VALUES ('testnet', gen_random_uuid(), $1::uuid, $2, now() + interval '1 hour')",
+    )
+    .bind(&worker)
+    .bind(KEY_B.as_slice())
+    .execute(&mut api)
+    .await;
+    assert!(too_long.is_err(), "ten minutes is the longest grace");
+
+    sqlx::query(
+        "INSERT INTO pool.worker_credential
+             (network, credential_id, worker_id, public_key, not_after)
+         VALUES ('testnet', gen_random_uuid(), $1::uuid, $2, now() + interval '9 minutes')",
+    )
+    .bind(&worker)
+    .bind(KEY_B.as_slice())
+    .execute(&mut api)
+    .await
+    .expect("a grace inside the bound is accepted");
+}
+
+#[tokio::test]
 async fn monitoring_sees_standing_and_not_tickets_or_keys() {
     // `migrations/0001` refuses a blanket default so each table decides this.
     // The decision here: an operator asks whether a worker is revoked, never
@@ -541,13 +922,32 @@ async fn monitoring_sees_standing_and_not_tickets_or_keys() {
                 .unwrap();
         assert_eq!(granted, visible, "monitoring visibility of {table}");
 
-        let writable: bool =
-            sqlx::query_scalar("SELECT has_table_privilege('pool_readonly', $1, 'INSERT')")
+        for write in ["INSERT", "UPDATE", "DELETE"] {
+            let sql = format!("SELECT has_table_privilege('pool_readonly', $1, '{write}')");
+            let writable: bool = sqlx::query_scalar(AssertSqlSafe(sql))
                 .bind(table)
                 .fetch_one(&mut readonly)
                 .await
                 .unwrap();
-        assert!(!writable, "monitoring never writes {table}");
+            assert!(!writable, "monitoring never {write}s {table}");
+        }
+    }
+
+    // And the collateral multiplier is not member-facing data: the migration
+    // says "the API never sees it", which is only true if no grant says
+    // otherwise.
+    for privilege in ["SELECT", "INSERT", "UPDATE", "DELETE"] {
+        let sql = format!(
+            "SELECT has_table_privilege('pool_api', 'pool.member_collateral_multiplier', '{privilege}')"
+        );
+        let granted: bool = sqlx::query_scalar(AssertSqlSafe(sql))
+            .fetch_one(&mut api)
+            .await
+            .unwrap();
+        assert!(
+            !granted,
+            "the API must not {privilege} a member's collateral terms"
+        );
     }
 }
 

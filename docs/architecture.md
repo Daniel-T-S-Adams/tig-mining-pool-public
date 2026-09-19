@@ -346,6 +346,8 @@ transition.
 |---|---|---|
 | Enroll or rotate worker credential | Pool API | Enrollment or rotation ID plus request hash |
 | Recover/revoke worker credential | Pool API | Recovery/command ID, worker binding, and current credential state |
+| Suspend or reinstate a member account | Controller | Operator-command ID, actor and reason; the Pool API creates accounts and cannot change their standing. A worker revoked as a security action is reinstated only by this path (`member_protocol.md` §3.3) |
+| Set a member's collateral multiplier | Controller | Operator-command ID plus an append-only version carrying the value, when it takes effect, who set it and why (ADR 0010, `accounting.md` §11.4). A member cannot influence it, and a new version never reaches an open reservation |
 | Register/reconfigure/qualify slot | Pool API | Registration or qualification-result ID and current generation |
 | Record a member offer, event, or heartbeat command | Pool API | Offer/event/heartbeat ID and canonical request hash |
 | Admit/reject/queue an offer and reserve its slot | Controller | Slot row lock, tier/qualification checks, per-member queue allowance, and one-open-work-per-slot constraint |

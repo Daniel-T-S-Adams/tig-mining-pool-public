@@ -116,76 +116,129 @@ async fn qualified_slot(
     (worker, slot, spec)
 }
 
-/// Record one offer in `state`.
-async fn offer(
+/// Record one offer, as the Pool API does: `RECEIVED`, undecided.
+async fn record(
     conn: &mut PgConnection,
     worker: &str,
     slot: &str,
     spec: &[u8; 32],
-    state: &str,
 ) -> Result<String, sqlx::Error> {
-    let queued = matches!(state, "QUEUED" | "READY_CHECK");
-    let leased = matches!(state, "QUEUED" | "READY_CHECK" | "PENDING");
     sqlx::query_scalar(
         "INSERT INTO pool.capacity_offer
              (network, worker_id, offer_id, slot_id, slot_generation, spec_digest,
-              state, offer_sha256, queue_accepted_at, lease_expires_at,
-              ready_check_id, ready_check_expires_at)
+              state, offer_sha256)
          VALUES ('testnet', $1::uuid, gen_random_uuid(), $2::uuid, 1, $3,
-                 $4, $5,
-                 CASE WHEN $6 THEN now() ELSE NULL END,
-                 CASE WHEN $7 THEN now() + interval '90 seconds' ELSE NULL END,
-                 CASE WHEN $4 = 'READY_CHECK' THEN gen_random_uuid() ELSE NULL END,
-                 CASE WHEN $4 = 'READY_CHECK' THEN now() + interval '60 seconds' ELSE NULL END)
+                 'RECEIVED', $4)
          RETURNING offer_id::text",
     )
     .bind(worker)
     .bind(slot)
     .bind(spec.as_slice())
-    .bind(state)
     .bind(SHA.as_slice())
-    .bind(queued)
-    .bind(leased)
     .fetch_one(&mut *conn)
     .await
+}
+
+/// Dispose of one offer, as the Controller does.
+async fn dispose(
+    controller: &mut PgConnection,
+    offer: &str,
+    state: &str,
+) -> Result<(), sqlx::Error> {
+    let lease = matches!(state, "QUEUED" | "READY_CHECK" | "PENDING");
+    let queued = matches!(state, "QUEUED");
+    let checking = matches!(state, "READY_CHECK");
+    exec(
+        controller,
+        format!(
+            "UPDATE pool.capacity_offer
+                SET state = '{state}',
+                    lease_expires_at = CASE WHEN {lease}
+                        THEN now() + interval '90 seconds' ELSE lease_expires_at END,
+                    queue_accepted_at = CASE WHEN {queued} AND queue_accepted_at IS NULL
+                        THEN now() ELSE queue_accepted_at END,
+                    ready_check_id = CASE WHEN {checking}
+                        THEN gen_random_uuid() ELSE ready_check_id END,
+                    ready_check_expires_at = CASE WHEN {checking}
+                        THEN now() + interval '60 seconds' ELSE ready_check_expires_at END
+              WHERE offer_id = '{offer}'::uuid"
+        ),
+    )
+    .await
+}
+
+/// Record an offer and walk it to `state` through the states before it.
+async fn offer_in(
+    api: &mut PgConnection,
+    controller: &mut PgConnection,
+    worker: &str,
+    slot: &str,
+    spec: &[u8; 32],
+    state: &str,
+) -> String {
+    let id = record(api, worker, slot, spec).await.unwrap();
+    let path: &[&str] = match state {
+        "RECEIVED" => &[],
+        "QUEUED" | "PENDING" | "NO_ACTION" | "REJECTED" => &[state],
+        "READY_CHECK" => &["QUEUED", "READY_CHECK"],
+        "ADMITTED" => &["PENDING", "ADMITTED"],
+        other => panic!("no path to {other}"),
+    };
+    for step in path {
+        dispose(controller, &id, step)
+            .await
+            .unwrap_or_else(|e| panic!("disposing to {step}: {e}"));
+    }
+    id
 }
 
 #[tokio::test]
 async fn a_slot_holds_one_live_offer() {
     // §6 step 1: "Atomically reject another open offer or assignment for the
-    // slot." §16 invariant 1 is what it protects — one open assignment
-    // occupies exactly one slot, and two live offers are two claims on one.
-    let Some((_db, mut api)) = migrated("offer_one_live", "pool_api").await else {
+    // slot." §16 invariant 1 is what it protects — one open assignment occupies
+    // exactly one slot, and two live offers are two claims on one.
+    let Some((db, mut api)) = migrated("offer_one_live", "pool_api").await else {
         return;
     };
+    let mut controller = PgConnection::connect_with(&db.as_role("pool_controller"))
+        .await
+        .unwrap();
     let (w, slot, spec) = qualified_slot(&mut api, "cpu-0", 0x01).await;
 
-    offer(&mut api, &w, &slot, &spec, "PENDING").await.unwrap();
+    let first = offer_in(&mut api, &mut controller, &w, &slot, &spec, "PENDING").await;
 
-    for state in ["PENDING", "QUEUED", "READY_CHECK"] {
-        let second = offer(&mut api, &w, &slot, &spec, state).await;
-        assert!(
-            second.is_err(),
-            "a slot holds one live offer, not a {state}"
-        );
-    }
+    // `RECEIVED` is in the live set too: an offer the pool has not yet disposed
+    // of is still a claim on the slot, and leaving it out would let a member
+    // record ten and have the controller pick.
+    let second = record(&mut api, &w, &slot, &spec).await;
+    assert!(second.is_err(), "a slot holds one live offer");
 
     // A refusal is not a live offer: §6 step 4 returns it "without queuing", so
     // it holds nothing and must not block the next attempt.
-    offer(&mut api, &w, &slot, &spec, "REJECTED")
+    dispose(&mut controller, &first, "CANCELLED").await.unwrap();
+    let refused = record(&mut api, &w, &slot, &spec).await.unwrap();
+    dispose(&mut controller, &refused, "REJECTED")
+        .await
+        .unwrap();
+    record(&mut api, &w, &slot, &spec)
         .await
         .expect("a refusal occupies nothing");
 }
 
 #[tokio::test]
-async fn an_offer_needs_a_qualification_for_the_generation_it_names() {
-    // §16 invariant 2, at the point it bites. The offer carries a generation
-    // and a digest; without a QUALIFIED row for that exact pair there is
-    // nothing to offer from.
+async fn an_offer_is_admitted_only_from_a_slot_qualified_now() {
+    // §16 invariant 2 at the point it bites, and on the disposition rather than
+    // the arrival: §6 applies these checks during admission, and the API's job
+    // before that is to record what the member sent — including an offer the
+    // pool is about to refuse, which is how the member gets told `REJECTED`
+    // and how the retry of that request returns the same answer.
     let Some((db, mut api)) = migrated("offer_qualified", "pool_api").await else {
         return;
     };
-    let (w, slot, _spec) = qualified_slot(&mut api, "cpu-0", 0x01).await;
+    let mut controller = PgConnection::connect_with(&db.as_role("pool_controller"))
+        .await
+        .unwrap();
+    let (w, slot, spec) = qualified_slot(&mut api, "cpu-0", 0x01).await;
 
     // A second slot, registered but never qualified.
     let mut tx = sqlx::Connection::begin(&mut api).await.unwrap();
@@ -216,34 +269,71 @@ async fn an_offer_needs_a_qualification_for_the_generation_it_names() {
     .unwrap();
     tx.commit().await.unwrap();
 
-    let unqualified = offer(&mut api, &w, &bare, &[0x02; 32], "PENDING")
+    // Recorded, because a refusal has to be recordable.
+    let unqualified = record(&mut api, &w, &bare, &[0x02; 32]).await.unwrap();
+    dispose(&mut controller, &unqualified, "REJECTED")
         .await
-        .expect_err("an unqualified slot cannot offer");
+        .expect("an unqualified slot's refusal is recorded, not an error");
+
+    let promoted = record(&mut api, &w, &bare, &[0x02; 32]).await;
+    // The live index holds one per slot; the refused one is not live, so this
+    // records, and the disposition is what refuses it.
+    let promoted = promoted.unwrap();
+    let refused = dispose(&mut controller, &promoted, "PENDING")
+        .await
+        .expect_err("an unqualified slot cannot be reserved");
     assert!(
-        format!("{unqualified}").contains("no qualification at generation"),
-        "expected the qualification check, got: {unqualified}"
+        format!("{refused}").contains("no qualification at generation"),
+        "expected the qualification check, got: {refused}"
     );
 
     // §6: the offer "repeats the current compute facts and qualification-spec
-    // digest so unexpected drift fails closed". A digest that is not what
-    // qualified is exactly that drift.
-    let drifted = offer(&mut api, &w, &slot, &[0xee; 32], "PENDING")
+    // digest so unexpected drift fails closed".
+    let drifting = record(&mut api, &w, &slot, &[0xee; 32]).await.unwrap();
+    let drifted = dispose(&mut controller, &drifting, "PENDING")
         .await
         .expect_err("a digest that did not qualify is drift");
     assert!(
         format!("{drifted}").contains("not what qualified"),
         "expected the digest check, got: {drifted}"
     );
-
-    // And a refusal is recordable whatever the slot's standing — §6 step 4's
-    // `REJECTED` is how `UNQUALIFIED` gets told to the member at all.
-    let mut controller = PgConnection::connect_with(&db.as_role("pool_controller"))
+    dispose(&mut controller, &drifting, "REJECTED")
         .await
         .unwrap();
-    let _ = &mut controller;
-    offer(&mut api, &w, &bare, &[0x02; 32], "REJECTED")
+
+    // And the case the first version of this migration missed: a slot
+    // reconfigured to a newer generation, offering under the pass its previous
+    // configuration earned.
+    sqlx::query(
+        "INSERT INTO pool.slot_generation
+             (network, slot_id, generation, slot_registration_id, registration_sha256,
+              prior_slot_generation, compute_kind, compute_type, cpu_arch,
+              cpu_vendor, logical_cores, agent_version, runtime_bundle_version,
+              available_image_manifest_digests, spec_digest)
+         VALUES ('testnet', $1::uuid, 2, gen_random_uuid(), $2, 1,
+                 'CPU', 'aws_t4g', 'arm64', 'arm', 8, '0.1.0', '0.1.0',
+                 '[]'::jsonb, $3)",
+    )
+    .bind(&slot)
+    .bind(SHA.as_slice())
+    .bind([0x33_u8; 32].as_slice())
+    .execute(&mut api)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE pool.slot SET generation = 2 WHERE slot_id = $1::uuid")
+        .bind(&slot)
+        .execute(&mut api)
         .await
-        .expect("an unqualified slot's refusal is recordable");
+        .unwrap();
+
+    let stale = record(&mut api, &w, &slot, &spec).await.unwrap();
+    let stale_error = dispose(&mut controller, &stale, "PENDING")
+        .await
+        .expect_err("a reconfigured slot does not offer under its old pass");
+    assert!(
+        format!("{stale_error}").contains("is at generation"),
+        "expected the current-generation check, got: {stale_error}"
+    );
 }
 
 #[tokio::test]
@@ -255,14 +345,12 @@ async fn a_queued_offer_keeps_its_place_while_its_lease_renews() {
     let Some((db, mut api)) = migrated("offer_queue", "pool_api").await else {
         return;
     };
-    let (w, slot, spec) = qualified_slot(&mut api, "cpu-0", 0x01).await;
-    let id = offer(&mut api, &w, &slot, &spec, "QUEUED").await.unwrap();
-
     let mut controller = PgConnection::connect_with(&db.as_role("pool_controller"))
         .await
         .unwrap();
+    let (w, slot, spec) = qualified_slot(&mut api, "cpu-0", 0x01).await;
+    let id = offer_in(&mut api, &mut controller, &w, &slot, &spec, "QUEUED").await;
 
-    // A lease renews without touching the place in the line.
     exec(
         &mut controller,
         format!(
@@ -287,20 +375,9 @@ async fn a_queued_offer_keeps_its_place_while_its_lease_renews() {
         "expected the FIFO trigger, got: {moved}"
     );
 
-    // Promotion: §6 issues a fresh `ready_check_id`, and only the worker's echo
-    // permits the admission that follows.
-    exec(
-        &mut controller,
-        format!(
-            "UPDATE pool.capacity_offer
-                SET state = 'READY_CHECK', ready_check_id = gen_random_uuid(),
-                    ready_check_expires_at = now() + interval '60 seconds',
-                    lease_expires_at = now() + interval '90 seconds'
-              WHERE offer_id = '{id}'::uuid"
-        ),
-    )
-    .await
-    .expect("a queued offer is promoted to a ready check");
+    dispose(&mut controller, &id, "READY_CHECK")
+        .await
+        .expect("a queued offer is promoted to a ready check");
 
     let reissued = exec(
         &mut controller,
@@ -318,25 +395,22 @@ async fn a_queued_offer_keeps_its_place_while_its_lease_renews() {
 }
 
 #[tokio::test]
-async fn an_offer_does_not_go_backwards_and_admitted_is_terminal() {
-    // `ADMITTED` means a precommit intent exists for this offer. Going back to
-    // `PENDING` from there would be an offer whose write is in flight claiming
-    // to be waiting for one — which is how a second precommit gets created for
-    // one reservation.
+async fn an_offer_does_not_go_backwards_and_closes_rather_than_sealing_its_slot() {
+    // `ADMITTED` means a precommit intent exists. Going back to `PENDING` would
+    // be an offer whose write is in flight claiming to be waiting for one —
+    // which is how a second precommit gets created for one reservation. And
+    // `ADMITTED` is not the end: §6 says "after durable acceptance the slot may
+    // offer again", so the offer closes and releases its place.
     let Some((db, mut api)) = migrated("offer_ladder", "pool_api").await else {
         return;
     };
-    let (w, slot, spec) = qualified_slot(&mut api, "cpu-0", 0x01).await;
-    let id = offer(&mut api, &w, &slot, &spec, "PENDING").await.unwrap();
-
     let mut controller = PgConnection::connect_with(&db.as_role("pool_controller"))
         .await
         .unwrap();
-    let set = |state: &str| {
-        format!("UPDATE pool.capacity_offer SET state = '{state}' WHERE offer_id = '{id}'::uuid")
-    };
+    let (w, slot, spec) = qualified_slot(&mut api, "cpu-0", 0x01).await;
+    let id = offer_in(&mut api, &mut controller, &w, &slot, &spec, "PENDING").await;
 
-    let backwards = exec(&mut controller, set("QUEUED"))
+    let backwards = dispose(&mut controller, &id, "QUEUED")
         .await
         .expect_err("a reserved offer does not rejoin the queue");
     assert!(
@@ -344,19 +418,43 @@ async fn an_offer_does_not_go_backwards_and_admitted_is_terminal() {
         "expected the ladder trigger, got: {backwards}"
     );
 
-    exec(&mut controller, set("ADMITTED"))
+    dispose(&mut controller, &id, "ADMITTED")
         .await
         .expect("a reserved offer is admitted when its precommit intent exists");
 
+    // §6 makes the member's commitment irrevocable once the precommit is
+    // recorded, so neither side drops it here.
     for state in ["PENDING", "CANCELLED", "EXPIRED"] {
-        let after = exec(&mut controller, set(state))
+        let after = dispose(&mut controller, &id, state)
             .await
-            .expect_err("ADMITTED is terminal for the offer");
+            .expect_err("an admitted offer is not dropped");
         assert!(
-            format!("{after}").contains("is terminal"),
-            "expected the terminal refusal for {state}, got: {after}"
+            format!("{after}").contains("does not go from"),
+            "expected the ladder refusal for {state}, got: {after}"
         );
     }
+
+    // An admitted offer still occupies its slot — until the work is over.
+    let while_admitted = record(&mut api, &w, &slot, &spec).await;
+    assert!(
+        while_admitted.is_err(),
+        "an admitted offer holds its slot (§16 invariant 1)"
+    );
+
+    dispose(&mut controller, &id, "CLOSED")
+        .await
+        .expect("the work ends and the offer closes");
+    record(&mut api, &w, &slot, &spec)
+        .await
+        .expect("§6: after durable acceptance the slot may offer again");
+
+    let after_closed = dispose(&mut controller, &id, "PENDING")
+        .await
+        .expect_err("CLOSED is terminal");
+    assert!(
+        format!("{after_closed}").contains("is terminal"),
+        "expected the terminal refusal, got: {after_closed}"
+    );
 }
 
 #[tokio::test]
@@ -364,42 +462,35 @@ async fn a_lease_exists_exactly_where_it_means_something() {
     // §6: a pending offer is heartbeated against an explicit `lease_expires_at`
     // and "if the lease expires before a precommit is submitted, the offer is
     // cancelled without trust effect". A refused offer holds no lease, because
-    // it holds nothing at all.
-    let Some((_db, mut api)) = migrated("offer_lease", "pool_api").await else {
+    // it holds nothing at all — and a recorded one holds none yet, because
+    // nothing has been granted.
+    let Some((db, mut api)) = migrated("offer_lease", "pool_api").await else {
         return;
     };
+    let mut controller = PgConnection::connect_with(&db.as_role("pool_controller"))
+        .await
+        .unwrap();
     let (w, slot, spec) = qualified_slot(&mut api, "cpu-0", 0x01).await;
+    let id = record(&mut api, &w, &slot, &spec).await.unwrap();
 
-    let leaseless_pending = sqlx::query(
-        "INSERT INTO pool.capacity_offer
-             (network, worker_id, offer_id, slot_id, slot_generation, spec_digest,
-              state, offer_sha256)
-         VALUES ('testnet', $1::uuid, gen_random_uuid(), $2::uuid, 1, $3,
-                 'PENDING', $4)",
+    let leaseless_pending = exec(
+        &mut controller,
+        format!("UPDATE pool.capacity_offer SET state = 'PENDING' WHERE offer_id = '{id}'::uuid"),
     )
-    .bind(&w)
-    .bind(&slot)
-    .bind(spec.as_slice())
-    .bind(SHA.as_slice())
-    .execute(&mut api)
     .await;
     assert!(
         leaseless_pending.is_err(),
         "a reserved offer is held by a lease"
     );
 
-    let leased_refusal = sqlx::query(
-        "INSERT INTO pool.capacity_offer
-             (network, worker_id, offer_id, slot_id, slot_generation, spec_digest,
-              state, offer_sha256, lease_expires_at)
-         VALUES ('testnet', $1::uuid, gen_random_uuid(), $2::uuid, 1, $3,
-                 'REJECTED', $4, now() + interval '90 seconds')",
+    let leased_refusal = exec(
+        &mut controller,
+        format!(
+            "UPDATE pool.capacity_offer
+                SET state = 'REJECTED', lease_expires_at = now() + interval '90 seconds'
+              WHERE offer_id = '{id}'::uuid"
+        ),
     )
-    .bind(&w)
-    .bind(&slot)
-    .bind(spec.as_slice())
-    .bind(SHA.as_slice())
-    .execute(&mut api)
     .await;
     assert!(
         leased_refusal.is_err(),
@@ -409,20 +500,47 @@ async fn a_lease_exists_exactly_where_it_means_something() {
 
 #[tokio::test]
 async fn the_api_records_and_the_controller_disposes() {
-    // `architecture.md` §6: "Record a member offer ... | Pool API" and
-    // "Admit/reject/queue an offer and reserve its slot | Controller". The API
-    // cannot write the queue position, the lease, or the ready check — a member
-    // who could would be admitting themselves.
+    // `architecture.md` §5.1 step 1: the Pool API "records its idempotent
+    // command. It does not decide whether the member may receive work." That is
+    // a statement about the INSERT, which no column grant can express — so the
+    // value is constrained too.
     let Some((db, mut api)) = migrated("offer_grants", "pool_api").await else {
         return;
     };
+    let mut controller = PgConnection::connect_with(&db.as_role("pool_controller"))
+        .await
+        .unwrap();
     let (w, slot, spec) = qualified_slot(&mut api, "cpu-0", 0x01).await;
-    let id = offer(&mut api, &w, &slot, &spec, "QUEUED").await.unwrap();
 
+    // An offer that arrives already decided is refused whoever inserts it.
+    for state in ["PENDING", "QUEUED", "ADMITTED", "REJECTED"] {
+        let decided = exec(
+            &mut api,
+            format!(
+                "INSERT INTO pool.capacity_offer
+                     (network, worker_id, offer_id, slot_id, slot_generation,
+                      spec_digest, state, offer_sha256)
+                 VALUES ('testnet', '{w}'::uuid, gen_random_uuid(), '{slot}'::uuid, 1,
+                         decode(repeat('01', 32), 'hex'), '{state}',
+                         decode(repeat('7e', 32), 'hex'))"
+            ),
+        )
+        .await
+        .expect_err("an offer is recorded undecided");
+        assert!(
+            format!("{decided}").contains("recorded as RECEIVED")
+                || format!("{decided}").contains("permission denied"),
+            "expected the arrival guard for {state}, got: {decided}"
+        );
+    }
+
+    // And the decision columns are not the API's, at insert or afterwards.
+    let id = record(&mut api, &w, &slot, &spec).await.unwrap();
     for column in [
         "lease_expires_at = now() + interval '1 hour'",
         "queue_accepted_at = now() - interval '1 day'",
         "ready_check_id = gen_random_uuid()",
+        "state = 'PENDING'",
     ] {
         let denied = exec(
             &mut api,
@@ -436,23 +554,77 @@ async fn the_api_records_and_the_controller_disposes() {
         );
     }
 
-    let mut controller = PgConnection::connect_with(&db.as_role("pool_controller"))
+    // The arrival guard holds against the table owner too, which is the case a
+    // column grant cannot cover: an offer that appears already holding a lease,
+    // a queue position or a ready check is a decision with no record of who
+    // made it.
+    let mut owner = PgConnection::connect_with(&db.as_role("pool_migration"))
         .await
         .unwrap();
-    let recorded = exec(
+    for column in [
+        ("lease_expires_at", "now() + interval '90 seconds'"),
+        ("queue_accepted_at", "now()"),
+        ("ready_check_id", "gen_random_uuid()"),
+        ("terminal_reason", "'POOL_LIMIT'"),
+    ] {
+        let (name, value) = column;
+        let granted = exec(
+            &mut owner,
+            format!(
+                "INSERT INTO pool.capacity_offer
+                     (network, worker_id, offer_id, slot_id, slot_generation,
+                      spec_digest, state, offer_sha256, {name})
+                 VALUES ('testnet', '{w}'::uuid, gen_random_uuid(), '{slot}'::uuid, 1,
+                         decode(repeat('01', 32), 'hex'), 'RECEIVED',
+                         decode(repeat('7e', 32), 'hex'), {value})"
+            ),
+        )
+        .await
+        .expect_err("a lease, a queue position and a ready check are the pool's to grant");
+        assert!(
+            format!("{granted}").contains("pool's to grant"),
+            "expected the arrival guard for {name}, got: {granted}"
+        );
+    }
+
+    // And an offer names a slot its own worker owns. Two independent
+    // references — one to the worker, one to the slot — would each be satisfied
+    // by a row offering somebody else's.
+    // The *other* worker's slot, which has no live offer of its own — so the
+    // one-live-offer index cannot be what refuses this, and the ownership
+    // reference has to be.
+    let (_other_worker, other_slot, _) = qualified_slot(&mut api, "cpu-9", 0x09).await;
+    let strangers_slot = exec(
+        &mut api,
+        format!(
+            "INSERT INTO pool.capacity_offer
+                 (network, worker_id, offer_id, slot_id, slot_generation, spec_digest,
+                  state, offer_sha256)
+             VALUES ('testnet', '{w}'::uuid, gen_random_uuid(), '{other_slot}'::uuid, 1,
+                     decode(repeat('09', 32), 'hex'), 'RECEIVED',
+                     decode(repeat('7e', 32), 'hex'))"
+        ),
+    )
+    .await;
+    assert!(
+        strangers_slot.is_err(),
+        "a worker offers its own slot, not another's"
+    );
+
+    let invented = exec(
         &mut controller,
         format!(
             "INSERT INTO pool.capacity_offer
                  (network, worker_id, offer_id, slot_id, slot_generation, spec_digest,
                   state, offer_sha256)
              VALUES ('testnet', '{w}'::uuid, gen_random_uuid(), '{slot}'::uuid, 1,
-                     decode(repeat('01', 32), 'hex'), 'REJECTED',
+                     decode(repeat('01', 32), 'hex'), 'RECEIVED',
                      decode(repeat('7e', 32), 'hex'))"
         ),
     )
     .await;
     assert!(
-        recorded.is_err(),
+        invented.is_err(),
         "the controller does not invent offers a member did not make"
     );
 

@@ -17,6 +17,13 @@
 -- Pool API records the offer a member made, and the Controller decides what the
 -- pool does about it. That division is the grants at the bottom.
 
+-- The foreign-key target for "this worker's slot". `migrations/0019` gave
+-- `pool.slot` a generation-scoped unique index for the same reason; this is the
+-- ownership-scoped one, and it is what lets the offer below reference the pair
+-- rather than each half independently.
+CREATE UNIQUE INDEX slot_identity_is_worker_scoped
+    ON pool.slot (network, worker_id, slot_id);
+
 CREATE TABLE pool.capacity_offer (
     network   text NOT NULL,
     worker_id uuid NOT NULL,
@@ -36,17 +43,28 @@ CREATE TABLE pool.capacity_offer (
     slot_generation bigint NOT NULL,
     spec_digest     bytea  NOT NULL,
 
-    -- §6's dispositions, plus the two that arrive later:
+    -- What the offer is, which is two different kinds of fact:
+    --
+    --   RECEIVED              the member made an offer, and nothing is decided
     --
     --   NO_ACTION / REJECTED  the member is not eligible, and nothing queued
     --   QUEUED                eligible, but the pool-wide limit is full
     --   READY_CHECK           promoted, awaiting the worker's signed echo
     --   PENDING               the slot is reserved, awaiting the precommit
     --   ADMITTED              a precommit intent exists for this offer
+    --   CLOSED                the work it led to is over; the slot is free
     --   EXPIRED / CANCELLED   a lease ran out, or either side stopped it
     --
-    -- `NO_ACTION` and `REJECTED` are terminal on arrival: §6 step 4 returns
-    -- them "without queuing", so they name an offer that never held anything.
+    -- The first is the Pool API's, and the rest are the Controller's.
+    -- `architecture.md` §6 splits them — "Record a member offer ... | Pool API"
+    -- against "Admit/reject/queue an offer and reserve its slot | Controller" —
+    -- and §5.1 step 1 says the API "does not decide whether the member may
+    -- receive work". An offer that could arrive already `PENDING` would be the
+    -- member deciding, whatever the grants on UPDATE said afterwards, so
+    -- `RECEIVED` exists to be the only thing an INSERT may say.
+    --
+    -- `NO_ACTION` and `REJECTED` are terminal: §6 step 4 returns them "without
+    -- queuing", so they name an offer that never held anything.
     state text NOT NULL,
 
     -- §6: the offer is heartbeated against "an explicit `lease_expires_at`".
@@ -82,8 +100,9 @@ CREATE TABLE pool.capacity_offer (
     CONSTRAINT offer_network_known
         CHECK (network IN ('testnet', 'mainnet')),
     CONSTRAINT offer_state_known
-        CHECK (state IN ('NO_ACTION', 'REJECTED', 'QUEUED', 'READY_CHECK',
-                         'PENDING', 'ADMITTED', 'EXPIRED', 'CANCELLED')),
+        CHECK (state IN ('RECEIVED', 'NO_ACTION', 'REJECTED', 'QUEUED',
+                         'READY_CHECK', 'PENDING', 'ADMITTED', 'CLOSED',
+                         'EXPIRED', 'CANCELLED')),
     CONSTRAINT offer_digests_are_32_bytes
         CHECK (length(spec_digest) = 32 AND length(offer_sha256) = 32),
     CONSTRAINT offer_terminal_reason_known
@@ -120,12 +139,17 @@ CREATE TABLE pool.capacity_offer (
     CONSTRAINT offer_lease_matches_state
         CHECK (
             (state IN ('QUEUED', 'READY_CHECK', 'PENDING') AND lease_expires_at IS NOT NULL)
-            OR (state IN ('NO_ACTION', 'REJECTED') AND lease_expires_at IS NULL)
-            OR state IN ('ADMITTED', 'EXPIRED', 'CANCELLED')
+            OR (state IN ('RECEIVED', 'NO_ACTION', 'REJECTED') AND lease_expires_at IS NULL)
+            OR state IN ('ADMITTED', 'CLOSED', 'EXPIRED', 'CANCELLED')
         ),
-    CONSTRAINT offer_has_a_worker
-        FOREIGN KEY (network, worker_id)
-        REFERENCES pool.worker (network, worker_id),
+    -- The worker that made the offer owns the slot it offered. Two independent
+    -- references — one to the worker, one to the slot — would each be satisfied
+    -- by a row offering somebody else's slot, and `migrations/0018`'s
+    -- `ticket_worker_belongs_to_its_member` is the same chain expressed the
+    -- same way.
+    CONSTRAINT offer_slot_belongs_to_its_worker
+        FOREIGN KEY (network, worker_id, slot_id)
+        REFERENCES pool.slot (network, worker_id, slot_id),
     -- The offer is for a slot at a generation, and both must exist. §6's drift
     -- check compares what the offer carried against what the slot is now; a
     -- reference to a generation that never existed is not drift, it is a
@@ -140,7 +164,14 @@ CREATE TABLE pool.capacity_offer (
 -- per slot, whatever its stage.
 CREATE UNIQUE INDEX offer_one_live_per_slot
     ON pool.capacity_offer (network, slot_id)
-    WHERE state IN ('QUEUED', 'READY_CHECK', 'PENDING', 'ADMITTED');
+    WHERE state IN ('RECEIVED', 'QUEUED', 'READY_CHECK', 'PENDING', 'ADMITTED');
+
+-- `ADMITTED` is in that set because an admitted offer still occupies its slot —
+-- §16 invariant 1, and §9's ladder, which keeps the slot busy until the receipt.
+-- It leaves the set by being `CLOSED`, which is §6's "after durable acceptance
+-- the slot may offer again" and §12's receipt releasing it. Without that exit
+-- an admitted offer would seal its slot for ever, which is what the first draft
+-- of this migration did: `ADMITTED` was terminal *and* counted as live.
 
 -- §6's FIFO order, `(queue_accepted_at, offer_id)`. The index carries the same
 -- pair so "the oldest eligible live offer" is a read rather than a scan.
@@ -199,17 +230,24 @@ BEGIN
     END IF;
 
     IF NEW.state <> OLD.state THEN
-        IF OLD.state IN ('NO_ACTION', 'REJECTED', 'EXPIRED', 'CANCELLED', 'ADMITTED') THEN
+        IF OLD.state IN ('NO_ACTION', 'REJECTED', 'EXPIRED', 'CANCELLED', 'CLOSED') THEN
             RAISE EXCEPTION
                 'offer state % is terminal (member_protocol.md §6)', OLD.state
                 USING ERRCODE = 'raise_exception';
         END IF;
 
         IF NOT (
-            NEW.state IN ('EXPIRED', 'CANCELLED')
+            -- An admitted offer is past the point where either side may drop
+            -- it: §6 makes the member's commitment "irrevocable" once
+            -- `PRECOMMIT_SUBMITTED` is recorded, and what ends it is the work
+            -- ending, which is `CLOSED`.
+            (NEW.state IN ('EXPIRED', 'CANCELLED') AND OLD.state <> 'ADMITTED')
+            OR (OLD.state = 'RECEIVED'
+                AND NEW.state IN ('NO_ACTION', 'REJECTED', 'QUEUED', 'PENDING'))
             OR (OLD.state = 'QUEUED'      AND NEW.state = 'READY_CHECK')
             OR (OLD.state = 'READY_CHECK' AND NEW.state = 'PENDING')
             OR (OLD.state = 'PENDING'     AND NEW.state = 'ADMITTED')
+            OR (OLD.state = 'ADMITTED'    AND NEW.state = 'CLOSED')
         ) THEN
             RAISE EXCEPTION
                 'an offer does not go from % to % (member_protocol.md §6)',
@@ -228,29 +266,98 @@ CREATE TRIGGER capacity_offer_ladder
     FOR EACH ROW
     EXECUTE FUNCTION pool.capacity_offer_advances();
 
--- An offer is for a slot that is qualified at the generation it names.
+-- An offer arrives undecided.
+--
+-- `architecture.md` §5.1 step 1: the Pool API "authenticates a capacity offer
+-- and records its idempotent command. It does not decide whether the member may
+-- receive work." A column grant cannot express that, because the API legitimately
+-- writes the row — so the value is what is constrained. Every disposition, every
+-- lease, every queue position and every ready check is therefore an UPDATE, and
+-- the UPDATE grants are the Controller's.
+--
+-- This refuses the insert whoever makes it, including the controller and the
+-- table owner: an offer that appeared already admitted would have no record of
+-- the decision that admitted it.
+CREATE OR REPLACE FUNCTION pool.capacity_offer_arrives_undecided()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF NEW.state <> 'RECEIVED' THEN
+        RAISE EXCEPTION
+            'an offer is recorded as RECEIVED and disposed of afterwards (architecture.md §5.1)'
+            USING ERRCODE = 'raise_exception';
+    END IF;
+
+    IF NEW.lease_expires_at IS NOT NULL
+       OR NEW.queue_accepted_at IS NOT NULL
+       OR NEW.ready_check_id IS NOT NULL
+       OR NEW.ready_check_expires_at IS NOT NULL
+       OR NEW.terminal_reason IS NOT NULL
+    THEN
+        RAISE EXCEPTION
+            'a lease, a queue position and a ready check are the pool''s to grant (architecture.md §6)'
+            USING ERRCODE = 'raise_exception';
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER capacity_offer_undecided
+    BEFORE INSERT ON pool.capacity_offer
+    FOR EACH ROW
+    EXECUTE FUNCTION pool.capacity_offer_arrives_undecided();
+
+-- An offer reaches a live state only from a slot qualified at its *current*
+-- generation.
 --
 -- §16 invariant 2, at the point it bites: "A slot may offer capacity only with
--- a successful qualification for its exact current generation." The offer
--- carries a generation and a digest; this requires a QUALIFIED row for that
--- exact pair, so a slot whose qualification failed — or whose reconfiguration
--- left the old pass behind — cannot enter the queue at all.
+-- a successful qualification for its exact current generation." A slot whose
+-- qualification failed, or whose reconfiguration left an old pass behind,
+-- cannot be queued or reserved.
 --
--- On INSERT only. An offer already in flight when a requalification fails is
--- §6's business, not a row's: the pool cancels it, which is a state change this
--- check must not block.
+-- On the **disposition**, not the arrival. §6 applies these checks during
+-- admission, and the API's job before that is to record what the member sent —
+-- including an offer from a slot that is not qualified, which is how the member
+-- gets told `REJECTED` with reason `UNQUALIFIED` and how the retry of that
+-- request returns the same answer. Refusing the INSERT would replace a recorded
+-- refusal with an error nobody can look up.
+--
+-- It does not run on the way *out* either: an offer already live when a
+-- requalification fails is cancelled by the pool, and this must not stand in
+-- the way of recording that.
 CREATE OR REPLACE FUNCTION pool.capacity_offer_is_qualified()
 RETURNS trigger
 LANGUAGE plpgsql
 AS $$
 DECLARE
-    qualified_digest bytea;
+    qualified_digest   bytea;
+    current_generation bigint;
 BEGIN
-    IF NEW.state IN ('NO_ACTION', 'REJECTED') THEN
-        -- §6 step 4 returns these "without queuing", and an ineligible member's
-        -- refusal is recorded whatever the slot's standing — including
-        -- `UNQUALIFIED`, which could not be recorded if this check refused it.
+    IF NEW.state NOT IN ('QUEUED', 'READY_CHECK', 'PENDING', 'ADMITTED') THEN
         RETURN NEW;
+    END IF;
+
+    IF TG_OP = 'UPDATE' AND OLD.state = NEW.state THEN
+        -- A lease renewal or a ready-check issue, not an admission.
+        RETURN NEW;
+    END IF;
+
+    -- §16 invariant 2 is about the slot's *exact current* generation, and §6
+    -- says "a new registration generation invalidates every older
+    -- qualification". Checking only that the named generation has a pass would
+    -- let a reconfigured slot offer under the pass its previous configuration
+    -- earned — which is the thing the invariant names.
+    SELECT generation INTO current_generation
+      FROM pool.slot
+     WHERE network = NEW.network AND slot_id = NEW.slot_id;
+
+    IF current_generation IS DISTINCT FROM NEW.slot_generation THEN
+        RAISE EXCEPTION
+            'slot % is at generation %, the offer names % (member_protocol.md §16 invariant 2)',
+            NEW.slot_id, current_generation, NEW.slot_generation
+            USING ERRCODE = 'raise_exception';
     END IF;
 
     SELECT q.spec_digest INTO qualified_digest
@@ -278,7 +385,7 @@ END;
 $$;
 
 CREATE TRIGGER capacity_offer_qualified
-    BEFORE INSERT ON pool.capacity_offer
+    BEFORE INSERT OR UPDATE ON pool.capacity_offer
     FOR EACH ROW
     EXECUTE FUNCTION pool.capacity_offer_is_qualified();
 
@@ -288,16 +395,21 @@ CREATE TRIGGER capacity_offer_qualified
 
 -- §6: "Record a member offer, event, or heartbeat command | Pool API", guarded
 -- by "Offer/event/heartbeat ID and canonical request hash". Recording is all it
--- does: the API cannot decide the disposition, which is the next row of that
--- table and the controller's.
-GRANT SELECT, INSERT ON pool.capacity_offer TO pool_api;
+-- does, and the columns it may write are the ones a member's offer consists of.
+-- Everything a decision is made of is absent from this grant *and* refused at
+-- INSERT by the trigger above, because a grant alone would still let the API
+-- record an offer that had already decided itself.
+GRANT SELECT ON pool.capacity_offer TO pool_api;
+GRANT INSERT (network, worker_id, offer_id, slot_id, slot_generation,
+              spec_digest, state, offer_sha256)
+    ON pool.capacity_offer TO pool_api;
 
--- The member may withdraw an offer, and that reaches the pool through the API
--- (§8: "A member cancellation is a request"). Before a precommit is submitted
--- §8 lets the pool accept it without trust effect; after, the ladder above
--- refuses it, because `ADMITTED` is terminal here and the workflow owns what
--- happens next.
-GRANT UPDATE (state, terminal_reason) ON pool.capacity_offer TO pool_api;
+-- The API has **no** UPDATE. §8 makes a member cancellation "a request, not an
+-- immediate local rewrite", so the API records the request and the Controller
+-- applies it — and the request is a member command, which arrives with the
+-- events table in the next migration. Granting the API `state` here would let
+-- the member-facing role write `ADMITTED`, which §16 invariant 15 requires a
+-- fresh atomic capacity check to reach.
 
 -- §6: "Admit/reject/queue an offer and reserve its slot | Controller" and
 -- "Promote a queued offer | Controller". Every column that is a decision.

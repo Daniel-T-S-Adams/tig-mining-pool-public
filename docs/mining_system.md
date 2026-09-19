@@ -563,7 +563,8 @@ penalty TIG can levy. The member still owes the unscaled amount —
 what they must hold to start rather than a cap on what they owe — so the
 difference is uncollateralized member liability, not a smaller liability. How
 the pool collects it is unsettled (issue #56); until it is, the difference
-sits as pool risk in practice, and `accounting.md` §13 item 21 requires the aggregate to be
+sits as pool risk in practice, and `accounting.md` §13 item 21 requires the
+aggregate to be
 reported for that reason.
 
 TIG selects the track only after precommit, which is why admission uses the

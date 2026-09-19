@@ -1697,10 +1697,10 @@ Before and after every batch, enforce:
     rather than by a flag on it; and
 21. aggregate uncovered method exposure — the sum of
     `method_reserve - scaled_method_reserve` over every open reservation — is
-    reported, not merely derivable. A multiplier below `10_000` bps is the
-    pool choosing to stand behind a member (§11.4, ADR 0010); the amount it
-    stands behind must be visible before a slash lands, not reconstructed
-    after one.
+    reported, not merely derivable. Below `10_000` bps the member owes more
+    than they hold (§11.5, §11.6), so this is the amount the pool would have
+    to collect by a route that does not yet exist (issue #56) or absorb. It
+    must be visible before a charge lands, not reconstructed after one.
 
 Daily reconciliation compares:
 

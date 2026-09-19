@@ -561,11 +561,11 @@ Below `10_000` bps the reservation is deliberately smaller than the maximum
 penalty TIG can levy. The member still owes the unscaled amount —
 `accounting.md` §11.6 charges the evidenced penalty, and the multiplier sets
 what they must hold to start rather than a cap on what they owe — so the
-difference is uncollateralized member liability, not a smaller liability. How
-the pool collects it is unsettled (issue #56); until it is, the difference
-sits as pool risk in practice, and `accounting.md` §13 item 21 requires the
-aggregate to be
-reported for that reason.
+difference is uncollateralized member liability, not a smaller liability.
+`accounting.md` §8.4 collects it from the round's other earners when the
+charge lands, which is why §13 item 21 requires the aggregate to be reported:
+it is what the membership is underwriting on that member's behalf, and the
+pool sets it by choosing the multiplier.
 
 TIG selects the track only after precommit, which is why admission uses the
 maximum. The reservation is specific to that member and benchmark and cannot

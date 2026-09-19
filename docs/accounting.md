@@ -449,17 +449,32 @@ Credit  LIABILITY:MEMBER_BALANCE:<member>
 
 **When the batch may post.** Two conditions, and the later one governs:
 
-- the round's own slashing is complete — **every benchmark whose qualifiers
-  were attributed in that round** has a closed reporting window and an
-  observed terminal arbitration for every report against it, so every charge
-  against the round is known. The condition is per contributing benchmark and
-  keyed to that benchmark's own round, never to the earning round: a benchmark
-  started before a round boundary earns qualifiers attributed after it, and
-  `tig_integration.md` §14.2's `?round=` selects by the benchmark's round. It
-  is also satisfied by observation, never by the clock — §14.2's bound says
-  when an answer should be readable, and a round still unsettled past it is a
-  §13 item 16 discrepancy rather than a licence to credit. §11.7 owns both
-  points; and
+- the round's own slashing is complete. Two sets of benchmarks must be
+  resolved, each with a closed reporting window and an observed terminal
+  arbitration for every report against it:
+
+  - **every benchmark whose qualifiers were attributed in that round**, whose
+    charges could reduce what this round pays out; and
+  - **every benchmark whose own round is this one**, whether or not it earned
+    anything here, because §8.4's deduction keys an uncovered remainder to the
+    benchmark's own round and that remainder must be known before the round it
+    belongs to settles.
+
+  The second set is what ADR 0012 did not state. It waited only on
+  contributing benchmarks, which leaves a benchmark created in round `R` that
+  earned only after the boundary — or earned nothing at all — blocking
+  nothing, so `R` could settle before that benchmark's charge existed. §9
+  forbids reopening `R` and §13 item 22 forbids carrying the remainder
+  forward, so the charge would have had nowhere lawful to go. ADR 0014 records
+  the refinement; ADR 0012 stays as written.
+
+  Both sets are keyed to the benchmark's own round, never to an earning round:
+  a benchmark started before a round boundary earns qualifiers attributed
+  after it, and `tig_integration.md` §14.2's `?round=` selects by the
+  benchmark's round. The condition is satisfied by observation, never by the
+  clock — §14.2's bound says when an answer should be readable, and a round
+  still unsettled past it is a §13 item 16 discrepancy rather than a licence
+  to credit. §11.7 owns both points; and
 - the exact corresponding TIG payment is finalized and reconciled in the
   reward wallet, and §8.3a's member leg has completed.
 
@@ -479,6 +494,103 @@ later charge still has to reach.
 The credit is unencumbered, immediately withdrawable, and **immediately
 collateral-eligible**. It does not create a transfer intent — under ADR 0008
 settlement no longer starts a payout.
+
+**Uncovered charges are deducted here, before the credit.** §11.6 charges a
+member the evidenced amount, and §11.2 bounds the posted debit to their
+encumbered balance, so a charge larger than the reservation leaves a
+remainder the member owes and the pool has not collected. That remainder is
+taken from this round's earnings before they reach anyone's balance:
+
+```text
+S[round]  = sum of uncovered remainders on benchmarks whose
+            own round is this one
+E[m]      = member m's MEMBER_EARNED_PENDING for this round
+E[total]  = sum(E[m])
+
+spread    = min(S, E[total])
+share[m]  = spread * E[m] / E[total], by §6's largest-remainder
+            method so the shares sum to exactly spread
+            (E[total] = 0 gives spread = 0 and no shares)
+
+pool_absorbs = S - spread
+```
+
+`spread` is capped at `E[total]` deliberately: an uncapped
+`S * E[m] / E[total]` exceeds `E[m]` for every member whenever `S` is larger
+than the round's earnings, which would drive pending balances negative, and it
+divides by zero on a round that earned nothing. Both are cases this section
+expects — a pool-wide incident produces exactly them — so the cap is part of
+the rule rather than an implementation detail. `pool_absorbs` is what §5's fee
+revenue for that round, and then operating funds, take up.
+
+Debited from each `MEMBER_EARNED_PENDING:<round>:<member>` and credited to the
+same accounts §11.6's charge credits — the penalty portion to
+`EQUITY:SECURITY_LOSS_RESERVE`, the fee portion to `REVENUE:FAILURE_CHARGES`.
+What remains settles into balances as above.
+
+**Which round a benchmark's remainder belongs to.** A benchmark's qualifiers
+can be attributed across a round boundary — §8.4's settlement condition above
+exists because of exactly that — but its charge is one amount and is not split
+per round. It is borne by **the benchmark's own round**, the one it was
+created in, because that is how everything else about a benchmark is keyed:
+`tig_integration.md` §14.2 selects its reports by that round and §11.6
+computes one charge per benchmark.
+
+The settlement condition above is what makes that keying safe, and it had to
+be extended to do so. Waiting only on benchmarks that *earned* in `R` would
+let `R` settle while a benchmark created in `R` — one that earned only after
+the boundary, or earned nothing at all — was still open, and its later
+remainder would have had no lawful home: §9 forbids reopening `R` and item 22
+forbids carrying it forward. The condition now also waits on every benchmark
+whose own round is `R`, so by the time `R` settles every charge keyed to `R`
+is known.
+
+**The deduction is its own §8.6 cause, keyed `(network, round)`.** It cannot
+reuse the originating charge's identifier for two reasons. That identifier was
+consumed when §11.6's charge batch was swept, and §13 item 13 permits one
+sweep per cause — the deducted tokens would have no lawful route out of member
+custody. And `S` aggregates the remainders of every uncovered charge in the
+round, so one deduction batch would have to carry several charge identifiers,
+which §11.2 forbids. One round, one deduction, one identifier, swept once.
+
+Three properties this placement buys, and they are why the deduction is here
+rather than anywhere else:
+
+- **No posted batch is reopened.** The per-block batches of §6 are untouched;
+  §13 items 2 and 4 remain exactly true of them, because fee plus member
+  allocations still equals proceeds at the block. The deduction is a later
+  event against a pending liability, not a revision of an earlier one.
+- **The charged member is not exempt, but is not guaranteed to pay either.**
+  Their collateral goes first under §11.6, and their own earnings are in
+  `E[m]` on the same terms as everyone else's, so where they earned in the
+  round they bear a share of what their own benchmark left uncovered.
+
+  Where they did not, they bear none of it. A shortfall needs the penalty
+  term — a benchmark charged only its fee is covered by its reservation — so
+  it comes from a benchmark that went active and was successfully reported.
+  That benchmark's owner can still have no attributed qualifiers in its own
+  round: its bundles may not have qualified, or may have qualified after the
+  round boundary, which is the straddle the settlement condition above exists
+  for. `E[m]` is then zero, `share[m]` is zero, and the whole remainder falls
+  on members who earned alongside them.
+
+  This is a consequence of spreading pro-rata by earnings rather than a
+  separate rule, and it is stated because it is the case where the design is
+  least defensible to the members paying: the one member whose benchmark
+  caused the loss can be the one member who contributes nothing to covering
+  it.
+- **Nobody is made negative.** The spread is bounded by `E[total]`: a share
+  can never exceed what that member earned in the round. Where `S` exceeds
+  `E[total]`, the round's earnings are exhausted and the remainder falls on
+  the pool — §5's fee revenue for that round first, then operating funds. It
+  is never carried into a later round, which is what §10 rule 7 forbids.
+
+**This is a deliberate mutualisation and members must be told.** A member's
+earnings can be reduced by another member's failed benchmark, including one
+that failed for a reason neither of them caused. Nothing in a member's own
+conduct bounds their exposure to it; what bounds it is the pool's multiplier
+policy, since a member at `10_000` bps leaves no remainder to spread. The
+member terms required by `pre_build_checklist.md` §9 must say so plainly.
 
 This is a distinct recognition path from §11.2's inbound deposit, with
 different evidence: the reconciled round rather than a finalized transfer
@@ -533,6 +645,7 @@ The causes, each with its own cause identifier:
 |---|---|
 | §11.3's tier joining fee | the tier activation |
 | §11.6's charge, penalty portion and fee portion alike | the charge decision |
+| §8.4's shortfall deduction for one round | `(network, round)` |
 | The pool's share of a §7 suspense resolution — the §5 deferred fee, or a full award | `(network, block_id, resolution_generation)` |
 | A §10 correction that moves member value to a pool account | the correction ID |
 
@@ -625,7 +738,17 @@ If a correction reduces a member balance:
 6. if the member has already been paid too much, record an explicit member
    receivable/negative future-earnings balance, stop new withdrawal intents
    and work, notify the member, and require an operator resolution; and
-7. never charge other members or a future block silently for the shortfall.
+7. never charge other members or a future block **silently** for the
+   shortfall. The adverb is the rule. An accounting error's shortfall is
+   never mutualised at all: it goes to `EXPENSE:ACCOUNTING_LOSS` under the
+   paragraph below, or to the member receivable in rule 6, and never to the
+   membership. What §8.4 does with an uncovered *charge* is the permitted
+   case and is not an exception smuggled in here — it is bounded by the
+   round's own earnings, computed by a stated formula, posted under the
+   own stated cause identifier `(network, round)`, visible to every member it
+   touches,
+   and never carried into a later round. A shortfall that reaches members
+   without all five of those is the thing this rule forbids.
 
 Writing off a shortfall to `EXPENSE:ACCOUNTING_LOSS` requires an explicit
 approved correction and does not relabel it as mining expense or payout dust.
@@ -692,8 +815,17 @@ recognized only from the transfer event above, and a settled earning only from
 a reconciled round. Neither may record the other kind of value.
 
 The balance remains completely separate from delegation and from pool
-operating funds. They cannot pay another member or silently
-cover a pool error. A proposed charge first freezes the evidenced amount
+operating funds, and cannot pay another member.
+
+They also cannot cover a pool **accounting** error — §10 rule 7 keeps that off
+the membership entirely, sending it to `EXPENSE:ACCOUNTING_LOSS` or a member
+receivable. A pool-caused *benchmark* failure is a different thing and is
+charged to its owner under §11.6 whatever caused it, with any uncovered
+remainder deducted from the round at §8.4. The distinction is between a
+mistake in the books and a benchmark that failed, not between whose fault the
+failure was.
+
+A proposed charge first freezes the evidenced amount
 without moving the member liability, and records the evidence and the outcome
 it rests on. There is no notice to deliver and no appeal deadline to run:
 §11.6 makes a charge independent of fault, so there is nothing for the member
@@ -995,9 +1127,9 @@ exactly as a multiplier below `10_000` bps does. **The posted batch is still
 bounded by the encumbrance**: §11.2 and §11.7 both hold, so a charge debits
 only encumbered balance and can never reach value the member was free to
 withdraw. The excess is not a larger debit against the balance; it is an
-amount the reservation does not cover, and where it comes from is not settled
-here. §10 rule 7 forbids charging other members or a future block for a
-shortfall, and issue #56 owns that rule.
+amount the reservation does not cover, and where it comes from is §8.4's to
+say, not this section's: it is deducted from the round's earnings before they
+are credited, under §10 rule 7's permitted case and ADR 0014.
 
 Should either premise fail, this is the section to revisit, and the
 mechanism to add is a buffer or an additional-collateral call — never a
@@ -1064,14 +1196,14 @@ be discovered:
   covers the charge exactly, which is why §11.4 holds the fee portion to
   terminality rather than releasing it at verification.
 
-  **What happens to the excess is not yet specified**, and the posted batch
-  does not reach for it: §11.2 and §11.7 bound a charge to encumbered balance,
-  so the debit stops at the reservation whatever the evidenced amount. §10
-  rule 7 forbids the obvious recovery by name — "never charge other members or
-  a future block silently for the shortfall" — and issue #56 owns that rule
-  and the decision replacing it. Until then this section states the liability
-  without stating its recovery, and no member is exposed because nothing
-  charges anyone before slice 8.
+  **The excess is recovered from the round, not from the member's balance.**
+  The posted batch does not reach further: §11.2 and §11.7 bound a charge to
+  encumbered balance, so the debit stops at the reservation whatever the
+  evidenced amount. What the reservation does not cover is deducted at §8.4
+  from the round's earnings before they are credited, shared pro-rata across
+  the members who earned in it — the charged member included. §10 rule 7
+  permits that and forbids a silent version of it; ADR 0014 records the
+  decision and what it costs the members who did nothing wrong.
 - **There is no in-system appeal.** The evidence, attribution and appeal
   process this section previously required has nothing left to decide. A
   member who believes they were charged wrongly contacts the pool out of band;
@@ -1382,10 +1514,12 @@ round, and that subtlety survives the simplification because it was never
 about maturity. A benchmark's lifespan is measured in blocks while a round is
 far longer, so a benchmark started before a round boundary earns qualifiers
 attributed after it. `tig_integration.md` §14.2's `?round=` selects by the
-*benchmark's* round, so a round's earnings are settleable only when every
-benchmark whose qualifiers were attributed in that round has a closed
-reporting window and terminal reports — not when the earning round's own
-window closes.
+*benchmark's* round, so a round's earnings are settleable only when two sets
+of benchmarks have a closed reporting window and terminal reports: every one
+whose qualifiers were attributed in that round, and every one whose own round
+it is. §8.4 states the condition and why it needs both — the first set bounds
+what the round pays out, the second bounds what §8.4's deduction must carry.
+Neither is the earning round's own window closing.
 
 The bound is not a schedule. `tig_integration.md` §14.2 says when the answer
 should be readable; a round still unsettled past it is an alertable
@@ -1489,10 +1623,14 @@ Two separate gates, because ADR 0008 separated the two events.
 - every block batch in the round is posted and no unresolved payout suspense
   remains for that round;
 - the complete round is reconciled to TIG's round data;
-- **every charge against that round is settled** — each benchmark whose
-  qualifiers were attributed in it has a closed reporting window and terminal
-  reports (§8.4), so nothing credited can still be reached by a penalty
-  against its own round;
+- **every charge against that round is settled** — both of §8.4's sets have a
+  closed reporting window and terminal reports: every benchmark whose
+  qualifiers were attributed in the round, and every benchmark whose own round
+  it is. The second set is required because §8.4 keys an uncovered remainder
+  to the benchmark's own round, and a benchmark created in the round that
+  earned only after the boundary, or earned nothing, is in no other set. With
+  both, nothing credited can still be reached by a charge keyed to this
+  round;
 - the exact corresponding TIG payment is finalized and reconciled in the
   reward wallet (§8.3); and
 - that round's §8.3a **member leg** has completed from its own finalized token
@@ -1699,9 +1837,11 @@ Before and after every batch, enforce:
     custody only at a finalized token event;
 13. one withdrawal intent spends one liability once, and one sweep per cause:
     `(network, round, leg)` for each leg of a reward-wallet sweep, and §8.6's
-    cause identifier — tier activation, charge decision, suspense resolution,
-    or correction ID — for an operating sweep. A §11.6 charge has exactly one
-    identifier however its credit lines split;
+    cause identifier — tier activation, charge decision, shortfall deduction,
+    suspense resolution, or correction ID — for an operating sweep. A §11.6
+    charge has exactly one identifier however its credit lines split, and
+    §8.4's deduction has its own, one per round, distinct from the charges
+    that produced it;
 14. one signed intent fixes chain, token, destination, amount, signer, and
     nonce;
 15. only a finalized exact token event completes a withdrawal or a sweep;
@@ -1721,9 +1861,16 @@ Before and after every batch, enforce:
 21. aggregate uncovered method exposure — the sum of
     `method_reserve - scaled_method_reserve` over every open reservation — is
     reported, not merely derivable. Below `10_000` bps the member owes more
-    than they hold (§11.5, §11.6), so this is the amount the pool would have
-    to collect by a route that does not yet exist (issue #56) or absorb. It
-    must be visible before a charge lands, not reconstructed after one.
+    than they hold (§11.5, §11.6), and §8.4 recovers the difference from the
+    round's other earners, so this figure is what the membership is currently
+    underwriting. It must be visible before a charge lands, not reconstructed
+    after one; and
+22. a §8.4 shortfall deduction is exact and bounded. The shares sum to exactly
+    `min(S, E[total])` under §6's largest-remainder method, no share exceeds
+    that member's `MEMBER_EARNED_PENDING` for the round, and a round that
+    earned nothing takes no shares at all. Whatever `S` exceeds the round's
+    earnings falls on §5's fee revenue for that round and then on operating
+    funds — never on a later round (§10 rule 7).
 
 Daily reconciliation compares:
 
@@ -1739,7 +1886,12 @@ Daily reconciliation compares:
 - aggregate uncovered method exposure (§13 item 21) against the pool's own
   funds, and each member's rolling seven-day withdrawn total against ADR
   0009's weekly cap, so an automated path that has stopped binding is seen;
-  and
+- each settled round's shortfall deduction (§8.4) against the charges that
+  produced it: the shares must sum to `min(S, E[total])`, `S` must equal the
+  uncovered remainders of that round's own benchmarks, and `S - min(S,
+  E[total])` must appear against that round's fee revenue or operating funds
+  rather than unexplained. A round whose shares sum to `S` when `S` exceeds
+  its earnings has dropped the cap and driven pending balances negative; and
 - ledger cached balances versus a journal rebuild.
 
 ## 14. Owner decisions required
@@ -1795,7 +1947,15 @@ The owner has confirmed:
     `P * min(R, B)` plus that fee where it was successfully reported. The
     `X[policy]` number this section previously listed as unset no longer
     exists, and §11.4's reserve carries the fee once rather than twice
-    (§11.6, ADR 0013).
+    (§11.6, ADR 0013); and
+13. **an uncovered charge is spread across the round's earners**
+    (2026-09-19). What a member's reservation does not cover is deducted at
+    §8.4 from that round's earnings before they are credited, pro-rata to what
+    each member earned, the charged member included. Where the round's
+    earnings do not cover it the remainder falls on §5's fee revenue for that
+    round and then on operating funds, never on a later round. A member's
+    earnings can therefore be reduced by another member's failed benchmark,
+    which the member terms must state plainly (§8.4, §10 rule 7, ADR 0014).
 
 The remaining decision is:
 

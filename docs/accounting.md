@@ -1159,12 +1159,17 @@ they could not have prevented and, after durable acceptance, could not even
 have observed. The remedy is the out-of-band contact above, not a protocol
 state.
 
-On `REPRODUCIBLE` or `INCONCLUSIVE` the member is charged nothing for that
-report. Those are not fault findings in the member's favour; they are
-arbitrations under which TIG levies no penalty, so the penalty term is zero.
-A benchmark that earned active bundles and is never successfully reported is
-charged nothing at all — the fee term applies only where the benchmark
-produced nothing, which is the table's third branch.
+On `REPRODUCIBLE` or `INCONCLUSIVE` the member is charged nothing **for that
+report**: those arbitrations levy no penalty, so they add nothing to `R` and
+nothing to the charge.
+
+Whether the benchmark is charged at all is the table's question, not this
+paragraph's. A benchmark that earned active bundles and ends with no
+successfully arbitrated report is charged nothing — branch one. One that ends
+with at least one is charged `P * min(R, B) + F`, the fee included — branch
+two. The fee is not reserved for benchmarks that produced nothing; branch
+three is simply the case where the fee is *all* there is, because no penalty
+term exists without an arbitrated report.
 
 Settling a report is not the same as releasing the reservation. The freeze
 lifts, but the reservation goes on being held under §11.4's ordinary
@@ -1728,10 +1733,9 @@ The owner has confirmed:
    (§12.2, ADR 0011). This supersedes the earlier confirmation that a changed
    payout address is held for 48 hours with out-of-band notification: there is
    no address change to hold, and the pool holds no contact channel to notify.
-   It also leaves the slash and `X`-charge notices in §11.2 and §11.6 with no
-   channel to be delivered on — **a known gap, tracked in issue #56**, not
-   something this PR resolves. Nothing charges a member before slice 8, so no
-   member is exposed while it stands open.
+   It also left the slash and charge notices in §11.2 and §11.6 with no
+   channel to be delivered on. Decision 11 below closes that by removing the
+   notices and the appeal they gated, rather than by finding them a channel.
 
 11. **a charge does not depend on fault, and there is no in-system appeal**
     (2026-09-17). The member who owned the benchmark is charged whether the

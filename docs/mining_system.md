@@ -545,7 +545,9 @@ max(
 
 There is no separate per-benchmark failure charge in this reserve. ADR 0013
 derives that charge from the benchmark's own precommit fee, so the fee term
-above covers it; carrying both would reserve the same money twice.
+above covers it; carrying both would reserve the same money twice. The slice-1
+implementation still has a third term set to zero, which computes the same
+amount; issue #61 removes it.
 
 The multiplier is the pool-set per-member value in integer basis points,
 default `10_000` and never above it, and it scales the method-penalty term

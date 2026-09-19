@@ -46,8 +46,14 @@ anything else                                             ->  F
 
 `P` is the live `reports.penalty_amount` at the charge block, `R` and `B` are
 `tig_integration.md` §14.1's distinct arbitrated nonces and bundle count, and
-`F` is that benchmark's own precommit fee. `X[policy]` ceases to exist, and
-with it the last unset number in the collateral formula.
+`F` is that benchmark's own precommit fee. `X[policy]` ceases to exist as a
+design concept, and with it the last unset number in the collateral formula.
+
+It does not cease to exist in code on the day this ADR is accepted. Slice 1
+shipped `precommit_failure_charge_atoms` as a config value and reserves
+`method + fee + that value`; it is set to zero, so the arithmetic already
+equals the formula above, and issue #61 removes the term. This ADR is the
+design decision, not a claim about what is currently compiled.
 
 The first branch turns on the benchmark having **earned at least one active
 bundle**, not on TIG's `Active` state. `tig_integration.md` §6 defines the

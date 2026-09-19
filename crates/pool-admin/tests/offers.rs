@@ -379,7 +379,11 @@ async fn a_queued_offer_keeps_its_place_while_its_lease_renews() {
         .await
         .expect("a queued offer is promoted to a ready check");
 
-    let reissued = exec(
+    // A restarted controller re-issues, and the fixture
+    // `ready_check_replay_stale_id_ignored` says so: a second id is issued for
+    // the same offer and the pre-restart echo is ignored. What a re-issue must
+    // be is a new *window*, so the id and the deadline move together.
+    let stale_window = exec(
         &mut controller,
         format!(
             "UPDATE pool.capacity_offer SET ready_check_id = gen_random_uuid()
@@ -387,11 +391,23 @@ async fn a_queued_offer_keeps_its_place_while_its_lease_renews() {
         ),
     )
     .await
-    .expect_err("a ready check is issued once");
+    .expect_err("a re-issued check cannot inherit the old deadline");
     assert!(
-        format!("{reissued}").contains("issued once"),
-        "expected the ready-check trigger, got: {reissued}"
+        format!("{stale_window}").contains("later deadline"),
+        "expected the ready-check trigger, got: {stale_window}"
     );
+
+    exec(
+        &mut controller,
+        format!(
+            "UPDATE pool.capacity_offer
+                SET ready_check_id = gen_random_uuid(),
+                    ready_check_expires_at = ready_check_expires_at + interval '60 seconds'
+              WHERE offer_id = '{id}'::uuid"
+        ),
+    )
+    .await
+    .expect("a restarted controller re-issues with a fresh window");
 }
 
 #[tokio::test]

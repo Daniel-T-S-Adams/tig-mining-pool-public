@@ -218,14 +218,28 @@ BEGIN
             USING ERRCODE = 'raise_exception';
     END IF;
 
-    -- §6: the worker confirms "by echoing that ID". A check reissued under the
-    -- same id would let a stale echo satisfy a later promotion.
+    -- §6: the worker confirms "by echoing that ID", and the id has to be
+    -- *fresh* — not issued once.
+    --
+    -- This first read "issued once", which the pinned fixture contradicts:
+    -- `fixtures/queue-lifecycle/v1/availability-queue.json`'s
+    -- `ready_check_replay_stale_id_ignored` has a controller restart re-issue a
+    -- second id for the same offer, and the offer is promoted on that one while
+    -- the pre-restart echo is ignored. A rule that forbade the re-issue would
+    -- leave a restarted controller with two bad choices: honour an id the
+    -- fixture calls stale, or expire the offer and cost it the FIFO place §6
+    -- protects.
+    --
+    -- What must hold is that a re-issue is a *new window*: the id changes and
+    -- the deadline moves with it, so an echo of the older id cannot satisfy the
+    -- current check and the current check cannot inherit an expired deadline.
     IF OLD.ready_check_id IS NOT NULL
        AND NEW.ready_check_id IS NOT NULL
        AND NEW.ready_check_id IS DISTINCT FROM OLD.ready_check_id
+       AND NOT (NEW.ready_check_expires_at > OLD.ready_check_expires_at)
     THEN
         RAISE EXCEPTION
-            'a ready check is issued once; promote again with a fresh one (member_protocol.md §6)'
+            'a re-issued ready check carries a later deadline (member_protocol.md §6)'
             USING ERRCODE = 'raise_exception';
     END IF;
 

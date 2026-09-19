@@ -1010,7 +1010,7 @@ does verify is not a tier failure merely because it earns no qualifier.
 
 After durable package acceptance, availability of the member or deletion of
 the member's local artifacts is not something the member is expected to
-maintain — §5 releases both obligations at that point, and the pool must never
+maintain — §9 releases both obligations at that point, and the pool must never
 ask for either again.
 
 It does not follow that such a benchmark is free for the member. Under

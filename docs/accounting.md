@@ -1277,7 +1277,7 @@ it, breaching §11.7's coverage inequality and stopping reconciliation under
 Two shapes resolve it and both are the owner's: hold a charged amount in
 member custody for a period before sweeping it, which makes a reversal pure
 bookkeeping inside one pot, or admit a funded transfer from operating custody
-back to member custody under §3.4's authorization. Until one is chosen the
+back to member custody under `security.md` §3.4's authorization. Until one is chosen the
 remedy above is a promise the ledger cannot execute, which matters because it
 is the only recourse a member has. Nothing charges anyone before slice 8.
 

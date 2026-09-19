@@ -725,8 +725,20 @@ the slot again.
 
 If processing fails before durable acceptance, status returns a stable typed
 reason. The member retains its package and may retry or create a corrected
-generation. If the pool loses an artifact after issuing the receipt, it is a
-pool failure and cannot be charged to the member.
+generation.
+
+If the pool loses an artifact after issuing the receipt, it is a **pool
+failure** — `mining_system.md` §10 invariant 7 puts artifact retention, proof
+construction and proof availability on the pool from durable acceptance
+onward, and the member is never asked to keep or re-supply anything.
+
+**It is charged to the member all the same.** `accounting.md` §11.6 charges
+the owning member for a failed benchmark whatever caused it, so a benchmark
+the pool broke after acceptance is charged like any other. This document said
+the opposite until ADR 0013; it is stated here rather than left implicit
+because this is the member-facing contract, and a member reading it should not
+have to infer from an accounting document that the reassurance was withdrawn.
+The remedy is to contact the pool (§11.6); there is no in-system appeal.
 
 ## 13. Retry, timeout, and clock rules
 

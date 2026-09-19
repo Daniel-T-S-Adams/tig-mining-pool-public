@@ -449,32 +449,19 @@ Credit  LIABILITY:MEMBER_BALANCE:<member>
 
 **When the batch may post.** Two conditions, and the later one governs:
 
-- the round's own slashing is complete. Two sets of benchmarks must be
-  resolved, each with a closed reporting window and an observed terminal
-  arbitration for every report against it:
+- the round's own slashing is complete: **every benchmark whose round this
+  is** has a closed reporting window and an observed terminal arbitration for
+  every report against it. A benchmark belongs to exactly one round — it is
+  submitted in that round, active in that round, and earns for that round
+  alone — so the benchmarks that could reduce what this round pays out and the
+  benchmarks whose uncovered remainders this round must carry are the same
+  set. Its arbitration comes at the end of round `X + 2`, which is TIG's time
+  to arbitrate rather than a window in which it keeps earning.
 
-  - **every benchmark whose qualifiers were attributed in that round**, whose
-    charges could reduce what this round pays out; and
-  - **every benchmark whose own round is this one**, whether or not it earned
-    anything here, because §8.4's deduction keys an uncovered remainder to the
-    benchmark's own round and that remainder must be known before the round it
-    belongs to settles.
-
-  The second set is what ADR 0012 did not state. It waited only on
-  contributing benchmarks, which leaves a benchmark created in round `R` that
-  earned only after the boundary — or earned nothing at all — blocking
-  nothing, so `R` could settle before that benchmark's charge existed. §9
-  forbids reopening `R` and §13 item 22 forbids carrying the remainder
-  forward, so the charge would have had nowhere lawful to go. ADR 0014 records
-  the refinement; ADR 0012 stays as written.
-
-  Both sets are keyed to the benchmark's own round, never to an earning round:
-  a benchmark started before a round boundary earns qualifiers attributed
-  after it, and `tig_integration.md` §14.2's `?round=` selects by the
-  benchmark's round. The condition is satisfied by observation, never by the
-  clock — §14.2's bound says when an answer should be readable, and a round
-  still unsettled past it is a §13 item 16 discrepancy rather than a licence
-  to credit. §11.7 owns both points; and
+  The condition is satisfied by observation, never by the clock — §14.2's
+  bound says when an answer should be readable, and a round still unsettled
+  past it is a §13 item 16 discrepancy rather than a licence to credit. §11.7
+  owns that point; and
 - the exact corresponding TIG payment is finalized and reconciled in the
   reward wallet, and §8.3a's member leg has completed.
 
@@ -528,22 +515,19 @@ same accounts §11.6's charge credits — the penalty portion to
 `EQUITY:SECURITY_LOSS_RESERVE`, the fee portion to `REVENUE:FAILURE_CHARGES`.
 What remains settles into balances as above.
 
-**Which round a benchmark's remainder belongs to.** A benchmark's qualifiers
-can be attributed across a round boundary — §8.4's settlement condition above
-exists because of exactly that — but its charge is one amount and is not split
-per round. It is borne by **the benchmark's own round**, the one it was
-created in, because that is how everything else about a benchmark is keyed:
-`tig_integration.md` §14.2 selects its reports by that round and §11.6
-computes one charge per benchmark.
+**Which round a benchmark's remainder belongs to** is not a question the
+design has to answer, because a benchmark has one round. It is submitted in
+that round, active in it, and earns for it alone; the `X + 2` wait before
+arbitration is TIG's time to arbitrate, not a period in which the benchmark
+keeps earning. `tig_integration.md` §14.2 selects its reports by that round
+and §11.6 computes one charge per benchmark, so the charge, the earnings it
+may reduce, and the round that must carry any remainder are all the same
+round.
 
-The settlement condition above is what makes that keying safe, and it had to
-be extended to do so. Waiting only on benchmarks that *earned* in `R` would
-let `R` settle while a benchmark created in `R` — one that earned only after
-the boundary, or earned nothing at all — was still open, and its later
-remainder would have had no lawful home: §9 forbids reopening `R` and item 22
-forbids carrying it forward. The condition now also waits on every benchmark
-whose own round is `R`, so by the time `R` settles every charge keyed to `R`
-is known.
+The settlement condition above is what makes that safe: `R` cannot settle
+while a benchmark whose round is `R` is unresolved, so by the time `R` settles
+every charge keyed to `R` is known. §9 forbids reopening `R` and item 22
+forbids carrying a remainder forward, and neither is ever reached.
 
 **The deduction is its own §8.6 cause, keyed `(network, round)`.** It cannot
 reuse the originating charge's identifier for two reasons. That identifier was
@@ -569,10 +553,10 @@ rather than anywhere else:
   term — a benchmark charged only its fee is covered by its reservation — so
   it comes from a benchmark that went active and was successfully reported.
   That benchmark's owner can still have no attributed qualifiers in its own
-  round: its bundles may not have qualified, or may have qualified after the
-  round boundary, which is the straddle the settlement condition above exists
-  for. `E[m]` is then zero, `share[m]` is zero, and the whole remainder falls
-  on members who earned alongside them.
+  round, because going active and earning qualifiers are different things: its
+  bundles may have met TIG's activation bar and won nothing. `E[m]` is then
+  zero, `share[m]` is zero, and the whole remainder falls on members who
+  earned alongside them.
 
   This is a consequence of spreading pro-rata by earnings rather than a
   separate rule, and it is stated because it is the case where the design is
@@ -1509,17 +1493,29 @@ mechanisms that existed only to describe a state a member's balance can no
 longer be in. ADR 0012 records the decision and what it costs: a member waits
 longer to see a round at all, in exchange for the balance meaning one thing.
 
-The condition §8.4 applies is **per contributing benchmark**, not per earning
-round, and that subtlety survives the simplification because it was never
-about maturity. A benchmark's lifespan is measured in blocks while a round is
-far longer, so a benchmark started before a round boundary earns qualifiers
-attributed after it. `tig_integration.md` §14.2's `?round=` selects by the
-*benchmark's* round, so a round's earnings are settleable only when two sets
-of benchmarks have a closed reporting window and terminal reports: every one
-whose qualifiers were attributed in that round, and every one whose own round
-it is. §8.4 states the condition and why it needs both — the first set bounds
-what the round pays out, the second bounds what §8.4's deduction must carry.
-Neither is the earning round's own window closing.
+The condition §8.4 applies is **per benchmark, keyed to the benchmark's own
+round**. A benchmark belongs to one round: submitted in it, active in it, and
+earning for it alone. Its arbitration arrives at the end of round `X + 2`,
+which is TIG's time to arbitrate rather than a period in which the benchmark
+goes on earning. So a round's earnings are settleable when every benchmark
+whose round it is has a closed reporting window and terminal reports.
+
+**This corrects a premise, not a rule.** ADR 0012 justified keying per
+benchmark by asserting that "a benchmark started before a round boundary earns
+qualifiers attributed after it", inferred from a benchmark's lifespan being
+measured in blocks while a round is longer. That inference was never confirmed
+and is wrong: a benchmark earns only for its own round. The keying it produced
+is still right, and `tig_integration.md` §14.2's `?round=` still selects
+reports by the benchmark's round — the rule simply rests on the benchmark
+belonging to one round rather than on it spanning two.
+
+Two ADRs carry the mistaken reason and both are immutable, so this is where a
+reader learns of it. ADR 0012 states the inference as its justification.
+ADR 0014 then describes "refining" that condition to cover a benchmark that
+"earned only after the boundary" — a refinement for a case that cannot occur,
+which is why §8.4's condition is one set rather than two. Neither ADR's
+*decision* is affected: settlement still waits for the round's own slashing,
+and an uncovered charge is still spread across that round's earners.
 
 The bound is not a schedule. `tig_integration.md` §14.2 says when the answer
 should be readable; a round still unsettled past it is an alertable
@@ -1623,14 +1619,12 @@ Two separate gates, because ADR 0008 separated the two events.
 - every block batch in the round is posted and no unresolved payout suspense
   remains for that round;
 - the complete round is reconciled to TIG's round data;
-- **every charge against that round is settled** — both of §8.4's sets have a
-  closed reporting window and terminal reports: every benchmark whose
-  qualifiers were attributed in the round, and every benchmark whose own round
-  it is. The second set is required because §8.4 keys an uncovered remainder
-  to the benchmark's own round, and a benchmark created in the round that
-  earned only after the boundary, or earned nothing, is in no other set. With
-  both, nothing credited can still be reached by a charge keyed to this
-  round;
+- **every charge against that round is settled** — every benchmark whose round
+  this is has a closed reporting window and terminal reports (§8.4). A
+  benchmark belongs to one round and earns for it alone, so that one set
+  covers both the charges that reduce what this round pays out and the
+  remainders it must carry; nothing credited can still be reached by a charge
+  keyed to this round;
 - the exact corresponding TIG payment is finalized and reconciled in the
   reward wallet (§8.3); and
 - that round's §8.3a **member leg** has completed from its own finalized token

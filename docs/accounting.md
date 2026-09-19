@@ -771,7 +771,7 @@ Tier removal creates no refund. A removed member may immediately buy a tier by
 paying its then-current `J[k]` again; there is no cooldown or tier-admission
 queue. Every purchase has a new idempotent fee batch and membership period.
 Rejoining does not release or reset outstanding benchmarks, reservations,
-fines, appeals, pending withdrawals, or method-verification exposure.
+fines, pending withdrawals, or method-verification exposure.
 
 ### 11.4 Dynamic per-assignment collateral
 

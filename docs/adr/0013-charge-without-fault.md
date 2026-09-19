@@ -124,7 +124,7 @@ should learn that before depositing, not after a charge.
   §10 invariant 7 gains a sentence separating duty from payment; §11 drops `X`
   from the values still to be chosen, leaving `J[k]` and the headroom limit.
 - `architecture.md` §6's slash row no longer keys on member-fault evidence or
-  appeal state, and its §11 storage list no longer stores a failure-charge
+  appeal state, and its §7.6 storage list no longer stores a failure-charge
   policy value, because there is no longer one to version.
 - **One charge posts one batch with two credit lines**, and this is a ledger
   choice made while recording the decision rather than one the owner made.

@@ -487,8 +487,8 @@ remainder the member owes and the pool has not collected. That remainder is
 taken from this round's earnings before they reach anyone's balance:
 
 ```text
-S[round]  = sum of uncovered remainders on benchmarks
-            attributed in this round
+S[round]  = sum of uncovered remainders on benchmarks whose
+            own round is this one
 E[m]      = member m's MEMBER_EARNED_PENDING for this round
 E[total]  = sum(E[m])
 
@@ -497,8 +497,28 @@ each member's share = S * E[m] / E[total], by §6's largest-remainder
 ```
 
 Debited from each `MEMBER_EARNED_PENDING:<round>:<member>` and credited to the
-same accounts §11.6's charge credits, under the originating charge's cause
-identifier. What remains settles into balances as above.
+same accounts §11.6's charge credits — the penalty portion to
+`EQUITY:SECURITY_LOSS_RESERVE`, the fee portion to `REVENUE:FAILURE_CHARGES`.
+What remains settles into balances as above.
+
+**Which round a benchmark's remainder belongs to.** A benchmark's qualifiers
+can be attributed across a round boundary — §8.4's settlement condition above
+exists because of exactly that — but its charge is one amount and is not split
+per round. It is borne by **the benchmark's own round**, the one it was
+created in, because that is how everything else about a benchmark is keyed:
+`tig_integration.md` §14.2 selects its reports by that round, §11.6 computes
+one charge per benchmark, and the settlement condition above is already keyed
+per contributing benchmark to its own round. A round cannot settle while a
+benchmark that earned in it is unresolved, so by the time round `R` settles,
+the charge on any round-`R` benchmark is known.
+
+**The deduction is its own §8.6 cause, keyed `(network, round)`.** It cannot
+reuse the originating charge's identifier for two reasons. That identifier was
+consumed when §11.6's charge batch was swept, and §13 item 13 permits one
+sweep per cause — the deducted tokens would have no lawful route out of member
+custody. And `S` aggregates the remainders of every uncovered charge in the
+round, so one deduction batch would have to carry several charge identifiers,
+which §11.2 forbids. One round, one deduction, one identifier, swept once.
 
 Three properties this placement buys, and they are why the deduction is here
 rather than anywhere else:
@@ -577,6 +597,7 @@ The causes, each with its own cause identifier:
 |---|---|
 | §11.3's tier joining fee | the tier activation |
 | §11.6's charge, penalty portion and fee portion alike | the charge decision |
+| §8.4's shortfall deduction for one round | `(network, round)` |
 | The pool's share of a §7 suspense resolution — the §5 deferred fee, or a full award | `(network, block_id, resolution_generation)` |
 | A §10 correction that moves member value to a pool account | the correction ID |
 
@@ -676,7 +697,8 @@ If a correction reduces a member balance:
    membership. What §8.4 does with an uncovered *charge* is the permitted
    case and is not an exception smuggled in here — it is bounded by the
    round's own earnings, computed by a stated formula, posted under the
-   originating charge's cause identifier, visible to every member it touches,
+   own stated cause identifier `(network, round)`, visible to every member it
+   touches,
    and never carried into a later round. A shortfall that reaches members
    without all five of those is the thing this rule forbids.
 
@@ -1761,9 +1783,11 @@ Before and after every batch, enforce:
     custody only at a finalized token event;
 13. one withdrawal intent spends one liability once, and one sweep per cause:
     `(network, round, leg)` for each leg of a reward-wallet sweep, and §8.6's
-    cause identifier — tier activation, charge decision, suspense resolution,
-    or correction ID — for an operating sweep. A §11.6 charge has exactly one
-    identifier however its credit lines split;
+    cause identifier — tier activation, charge decision, shortfall deduction,
+    suspense resolution, or correction ID — for an operating sweep. A §11.6
+    charge has exactly one identifier however its credit lines split, and
+    §8.4's deduction has its own, one per round, distinct from the charges
+    that produced it;
 14. one signed intent fixes chain, token, destination, amount, signer, and
     nonce;
 15. only a finalized exact token event completes a withdrawal or a sweep;

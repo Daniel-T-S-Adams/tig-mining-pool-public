@@ -35,17 +35,31 @@ before they are credited.**
 much as the rule is:
 
 ```text
-S[round]  = sum of uncovered remainders on benchmarks attributed
-            in this round
+S[round]  = sum of uncovered remainders on benchmarks whose
+            own round is this one
 E[m]      = member m's MEMBER_EARNED_PENDING for this round
 E[total]  = sum(E[m])
 
 share[m]  = S * E[m] / E[total], by §6's largest-remainder method
 ```
 
-Debited from each member's pending account, credited to the accounts §11.6's
-charge credits, under the originating charge's cause identifier. What remains
-settles into balances.
+Debited from each member's pending account and credited to the accounts
+§11.6's charge credits — penalty portion to the loss reserve, fee portion to
+failure charges. What remains settles into balances.
+
+**The deduction is its own §8.6 cause, one per round, keyed
+`(network, round)`.** It cannot borrow the originating charge's identifier:
+that one was consumed when the charge itself was swept, and §13 item 13
+permits one sweep per cause, so the deducted tokens would be stranded in
+member custody. `S` also aggregates several charges in a bad round, and one
+batch may carry only one identifier (§11.2). One round, one deduction, one
+sweep.
+
+**A benchmark's remainder belongs to its own round**, not to whichever round
+its qualifiers were attributed in. A benchmark can earn across a boundary but
+its charge is one amount, and the benchmark's own round is how everything else
+about it is keyed — §14.2's report selection, §11.6's per-benchmark charge,
+and §8.4's own settlement condition.
 
 Where `S` exceeds `E[total]` the round's earnings are exhausted and the
 remainder falls on the pool — §5's fee revenue for that round first, then
@@ -106,9 +120,12 @@ is the design's behaviour rather than a surprise.
   the excess has no route.
 - §10 rule 7 keeps its prohibition and gains the five properties that
   distinguish the permitted case: bounded by the round, computed by a stated
-  formula, posted under the originating charge's identifier, visible to every
+  formula, posted under its own stated cause identifier, visible to every
   member it touches, never carried forward. A shortfall lacking any of them is
   still forbidden.
+- §8.6's cause table, §13 item 13's enumeration and `architecture.md` §6's
+  operating-sweep row each gain the deduction as a cause keyed
+  `(network, round)`.
 - §11.2's "cannot pay another member or silently cover a pool error" is
   narrowed to what it was always for: an accounting *error* is never
   mutualised at all, going to `EXPENSE:ACCOUNTING_LOSS` or a member

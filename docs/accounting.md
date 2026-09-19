@@ -1036,6 +1036,13 @@ anything else — abandoned, unusable, solution-verification
 number: the failure charge *is* the fee the benchmark wasted, so a benchmark
 that cost more to start costs more to waste.
 
+The second branch is written with one `P` because a benchmark is usually
+charged once. Where reports arrive in stages it is charged in increments, each
+priced at the `P` live when *it* posts, so the total is the sum of those
+increments rather than a single multiplication — see "The count is cumulative"
+below. The two agree exactly whenever `penalty_amount` does not move between
+charges.
+
 **"Earned active bundles" is not the same as TIG's `Active`.**
 `tig_integration.md` §6 defines `Active` as membership in
 `block.data.active_ids.benchmark`, which a complete benchmark can reach with
@@ -1143,15 +1150,31 @@ further decides it. That is the change this section records: the evidence,
 attribution and appeal process this paragraph previously described has been
 removed, so the arbitration outcome is the outcome.
 
-**The table is cumulative; the pool charges the increment.** `R` is pooled
-across the benchmark (`tig_integration.md` §14.1), so the table gives what the
-benchmark owes *in total* once the arbitrations observed so far are counted —
-not what this arbitration owes on its own. A benchmark that survives one
-report is still reportable, and a second successful arbitration raises `R`; the
-pool then charges the difference between the new total and what it has already
-charged. Re-applying the table on each arbitration would charge the fee twice
-and re-charge the penalty already taken, exceed §11.4's reservation, which
-holds one fee, and violate §13 item 19.
+**The count is cumulative; each increment is priced when it posts.** `R` is
+pooled across the benchmark (`tig_integration.md` §14.1), and a benchmark that
+survives one report is still reportable, so a later successful arbitration
+raises `R`. What a charge takes is the *newly counted* nonces at the price
+live when that charge posts:
+
+```text
+counted_so_far = nonces already charged for this benchmark
+delta = min(R_total, B) - counted_so_far
+charge = P[charge block] * delta      + F on the first charge only
+```
+
+**The whole total is never recomputed at a later price.** Doing so would
+re-price nonces an earlier increment already charged, against §11.4's rule
+that a later change never reaches an open reservation and this section's own
+closing rule that a later policy does not change what can be charged for an
+earlier assignment. It would also make the increment *negative* whenever
+`penalty_amount` fell between charges — an amount nothing in §11.7's coverage
+inequality or §13 item 12 can fund.
+
+`delta` cannot be negative: nonces can be reported only once and an
+arbitration is terminal, so `min(R_total, B)` only rises. The fee is charged
+once because the benchmark wasted one fee, not one per report, and charging it
+again would exceed §11.4's reservation, which holds one, and violate §13 item
+19.
 
 **An increment is its own charge decision.** It posts its own batch with its
 own cause identifier, so §11.2's "one charge, one cause identifier" and §13

@@ -449,17 +449,32 @@ Credit  LIABILITY:MEMBER_BALANCE:<member>
 
 **When the batch may post.** Two conditions, and the later one governs:
 
-- the round's own slashing is complete — **every benchmark whose qualifiers
-  were attributed in that round** has a closed reporting window and an
-  observed terminal arbitration for every report against it, so every charge
-  against the round is known. The condition is per contributing benchmark and
-  keyed to that benchmark's own round, never to the earning round: a benchmark
-  started before a round boundary earns qualifiers attributed after it, and
-  `tig_integration.md` §14.2's `?round=` selects by the benchmark's round. It
-  is also satisfied by observation, never by the clock — §14.2's bound says
-  when an answer should be readable, and a round still unsettled past it is a
-  §13 item 16 discrepancy rather than a licence to credit. §11.7 owns both
-  points; and
+- the round's own slashing is complete. Two sets of benchmarks must be
+  resolved, each with a closed reporting window and an observed terminal
+  arbitration for every report against it:
+
+  - **every benchmark whose qualifiers were attributed in that round**, whose
+    charges could reduce what this round pays out; and
+  - **every benchmark whose own round is this one**, whether or not it earned
+    anything here, because §8.4's deduction keys an uncovered remainder to the
+    benchmark's own round and that remainder must be known before the round it
+    belongs to settles.
+
+  The second set is what ADR 0012 did not state. It waited only on
+  contributing benchmarks, which leaves a benchmark created in round `R` that
+  earned only after the boundary — or earned nothing at all — blocking
+  nothing, so `R` could settle before that benchmark's charge existed. §9
+  forbids reopening `R` and §13 item 22 forbids carrying the remainder
+  forward, so the charge would have had nowhere lawful to go. ADR 0014 records
+  the refinement; ADR 0012 stays as written.
+
+  Both sets are keyed to the benchmark's own round, never to an earning round:
+  a benchmark started before a round boundary earns qualifiers attributed
+  after it, and `tig_integration.md` §14.2's `?round=` selects by the
+  benchmark's round. The condition is satisfied by observation, never by the
+  clock — §14.2's bound says when an answer should be readable, and a round
+  still unsettled past it is a §13 item 16 discrepancy rather than a licence
+  to credit. §11.7 owns both points; and
 - the exact corresponding TIG payment is finalized and reconciled in the
   reward wallet, and §8.3a's member leg has completed.
 
@@ -492,9 +507,21 @@ S[round]  = sum of uncovered remainders on benchmarks whose
 E[m]      = member m's MEMBER_EARNED_PENDING for this round
 E[total]  = sum(E[m])
 
-each member's share = S * E[m] / E[total], by §6's largest-remainder
-                      method so the shares sum to exactly S
+spread    = min(S, E[total])
+share[m]  = spread * E[m] / E[total], by §6's largest-remainder
+            method so the shares sum to exactly spread
+            (E[total] = 0 gives spread = 0 and no shares)
+
+pool_absorbs = S - spread
 ```
+
+`spread` is capped at `E[total]` deliberately: an uncapped
+`S * E[m] / E[total]` exceeds `E[m]` for every member whenever `S` is larger
+than the round's earnings, which would drive pending balances negative, and it
+divides by zero on a round that earned nothing. Both are cases this section
+expects — a pool-wide incident produces exactly them — so the cap is part of
+the rule rather than an implementation detail. `pool_absorbs` is what §5's fee
+revenue for that round, and then operating funds, take up.
 
 Debited from each `MEMBER_EARNED_PENDING:<round>:<member>` and credited to the
 same accounts §11.6's charge credits — the penalty portion to
@@ -506,11 +533,17 @@ can be attributed across a round boundary — §8.4's settlement condition above
 exists because of exactly that — but its charge is one amount and is not split
 per round. It is borne by **the benchmark's own round**, the one it was
 created in, because that is how everything else about a benchmark is keyed:
-`tig_integration.md` §14.2 selects its reports by that round, §11.6 computes
-one charge per benchmark, and the settlement condition above is already keyed
-per contributing benchmark to its own round. A round cannot settle while a
-benchmark that earned in it is unresolved, so by the time round `R` settles,
-the charge on any round-`R` benchmark is known.
+`tig_integration.md` §14.2 selects its reports by that round and §11.6
+computes one charge per benchmark.
+
+The settlement condition above is what makes that keying safe, and it had to
+be extended to do so. Waiting only on benchmarks that *earned* in `R` would
+let `R` settle while a benchmark created in `R` — one that earned only after
+the boundary, or earned nothing at all — was still open, and its later
+remainder would have had no lawful home: §9 forbids reopening `R` and item 22
+forbids carrying it forward. The condition now also waits on every benchmark
+whose own round is `R`, so by the time `R` settles every charge keyed to `R`
+is known.
 
 **The deduction is its own §8.6 cause, keyed `(network, round)`.** It cannot
 reuse the originating charge's identifier for two reasons. That identifier was
@@ -1811,12 +1844,12 @@ Before and after every batch, enforce:
     round's other earners, so this figure is what the membership is currently
     underwriting. It must be visible before a charge lands, not reconstructed
     after one; and
-22. a §8.4 shortfall deduction is exact and bounded. Each member's share sums
-    with the others to exactly `S` under §6's largest-remainder method, no
-    share exceeds that member's `MEMBER_EARNED_PENDING` for the round, and
-    nothing is carried into a later round — where `S` exceeds the round's
-    earnings the remainder falls on §5's fee revenue for that round and then
-    on operating funds, never forward (§10 rule 7).
+22. a §8.4 shortfall deduction is exact and bounded. The shares sum to exactly
+    `min(S, E[total])` under §6's largest-remainder method, no share exceeds
+    that member's `MEMBER_EARNED_PENDING` for the round, and a round that
+    earned nothing takes no shares at all. Whatever `S` exceeds the round's
+    earnings falls on §5's fee revenue for that round and then on operating
+    funds — never on a later round (§10 rule 7).
 
 Daily reconciliation compares:
 

@@ -40,8 +40,14 @@ S[round]  = sum of uncovered remainders on benchmarks whose
 E[m]      = member m's MEMBER_EARNED_PENDING for this round
 E[total]  = sum(E[m])
 
-share[m]  = S * E[m] / E[total], by §6's largest-remainder method
+spread    = min(S, E[total])
+share[m]  = spread * E[m] / E[total], by §6's largest-remainder method
 ```
+
+The cap is part of the rule. An uncapped `S * E[m] / E[total]` exceeds every
+member's own earnings whenever `S` is larger than the round's, and divides by
+zero on a round that earned nothing — both of which this decision expects,
+since a pool-wide incident produces exactly them.
 
 Debited from each member's pending account and credited to the accounts
 §11.6's charge credits — penalty portion to the loss reserve, fee portion to
@@ -58,8 +64,15 @@ sweep.
 **A benchmark's remainder belongs to its own round**, not to whichever round
 its qualifiers were attributed in. A benchmark can earn across a boundary but
 its charge is one amount, and the benchmark's own round is how everything else
-about it is keyed — §14.2's report selection, §11.6's per-benchmark charge,
-and §8.4's own settlement condition.
+about it is keyed — §14.2's report selection and §11.6's per-benchmark charge.
+
+**This refines ADR 0012's settlement condition**, which waited only on
+benchmarks whose qualifiers were attributed in the round. That leaves a
+benchmark created in `R` which earned only after the boundary, or earned
+nothing, blocking nothing — so `R` could settle before its charge existed, and
+the remainder would have no lawful home, with §9 forbidding a reopen and this
+decision forbidding a carry-forward. §8.4 now also waits on every benchmark
+whose own round is `R`. ADR 0012 stays as written.
 
 Where `S` exceeds `E[total]` the round's earnings are exhausted and the
 remainder falls on the pool — §5's fee revenue for that round first, then

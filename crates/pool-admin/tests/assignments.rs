@@ -151,9 +151,10 @@ async fn ready(owner: &mut PgConnection, tag: u8) -> Ready {
             "INSERT INTO pool.workflow
                  (network, workflow_id, state, owner_kind, owner_id,
                   unverified_from_block, benchmark_id, block_started,
-                  confirmed_track_id, confirmed_settings, precommit_confirmed_block)
+                  confirmed_track_id, confirmed_settings, confirmed_num_nonces,
+                  precommit_confirmed_block)
              VALUES ('testnet', '{workflow}', 'PRECOMMIT_CONFIRMED', 'MEMBER', '{member}',
-                     100, '{benchmark}', 100, 'n_nodes=100', '{{}}'::jsonb, 101)"
+                     100, '{benchmark}', 100, 'n_nodes=100', '{{}}'::jsonb, 512, 101)"
         ),
     )
     .await
@@ -262,12 +263,179 @@ async fn an_assignment_names_the_benchmark_its_workflow_holds() {
         .await
         .expect_err("the assignment carries the workflow's benchmark");
     assert!(
-        format!("{wrong}").contains("the workflow holds"),
-        "expected the benchmark check, got: {wrong}"
+        format!("{wrong}").contains("confirmed facts"),
+        "expected the confirmed-facts check, got: {wrong}"
     );
 
     r.benchmark = real;
     publish(&mut controller, &r, 0x22).await.unwrap();
+}
+
+#[tokio::test]
+async fn an_assignment_carries_every_confirmed_fact_and_its_owner() {
+    // §16 invariant 4 is about *every* confirmed fact, not only the benchmark
+    // id: TIG selects the track and derives the nonce count, so publishing the
+    // pool's proposal for either publishes something TIG never confirmed. And
+    // `mining_system.md` §10 invariant 1 gives the benchmark exactly one member
+    // owner — the one the workflow already names.
+    let Some((db, mut owner)) = migrated("assign_facts", "pool_migration").await else {
+        return;
+    };
+    let r = ready(&mut owner, 0x0c).await;
+    let other = ready(&mut owner, 0x0d).await;
+    let mut controller = PgConnection::connect_with(&db.as_role("pool_controller"))
+        .await
+        .unwrap();
+
+    let sql_for = |column: &str, value: &str| {
+        format!(
+            "INSERT INTO pool.assignment
+                 (network, assignment_id, member_id, worker_id, slot_id, slot_generation,
+                  offer_id, workflow_id, benchmark_id, confirmed_track_id, compute_type,
+                  num_nonces, assignment_digest, identity,
+                  workflow_expiry_block, proof_reserve_blocks, package_due_before_block,
+                  ack_by)
+             VALUES ('testnet', gen_random_uuid(), '{member}'::uuid, '{worker}'::uuid,
+                     '{slot}'::uuid, 1, '{offer}'::uuid, '{workflow}', '{benchmark}',
+                     {track}, {compute}, {nonces},
+                     decode(repeat('cc', 32), 'hex'), '{{}}'::jsonb,
+                     220, 10, 210, now() + interval '60 seconds')",
+            member = if column == "member_id" {
+                value.to_string()
+            } else {
+                r.member.clone()
+            },
+            worker = r.worker,
+            slot = r.slot,
+            offer = r.offer,
+            workflow = r.workflow,
+            benchmark = r.benchmark,
+            track = if column == "track" {
+                format!("'{value}'")
+            } else {
+                "'n_nodes=100'".to_string()
+            },
+            compute = if column == "compute" {
+                format!("'{value}'")
+            } else {
+                "'aws_t4g'".to_string()
+            },
+            nonces = if column == "nonces" {
+                value.to_string()
+            } else {
+                "512".to_string()
+            },
+        )
+    };
+
+    let wrong_track = exec(&mut controller, sql_for("track", "n_nodes=999"))
+        .await
+        .expect_err("a track TIG did not select is not a confirmed fact");
+    assert!(
+        format!("{wrong_track}").contains("confirmed facts"),
+        "expected the confirmed-facts check, got: {wrong_track}"
+    );
+
+    let wrong_nonces = exec(&mut controller, sql_for("nonces", "4096"))
+        .await
+        .expect_err("a nonce count TIG did not derive is not a confirmed fact");
+    assert!(
+        format!("{wrong_nonces}").contains("confirmed facts"),
+        "expected the confirmed-facts check, got: {wrong_nonces}"
+    );
+
+    let wrong_owner = exec(&mut controller, sql_for("member_id", &other.member))
+        .await
+        .expect_err("the workflow's owner is the benchmark's owner");
+    assert!(
+        format!("{wrong_owner}").contains("owned by"),
+        "expected the ownership check, got: {wrong_owner}"
+    );
+
+    let wrong_compute = exec(&mut controller, sql_for("compute", "nvidia_a10g"))
+        .await
+        .expect_err("§7: the confirmed compute type equals the slot's");
+    assert!(
+        format!("{wrong_compute}").contains("the slot generation is"),
+        "expected the compute check, got: {wrong_compute}"
+    );
+
+    exec(&mut controller, sql_for("none", ""))
+        .await
+        .expect("the confirmed facts, unchanged, publish");
+}
+
+#[tokio::test]
+async fn an_assignment_occupies_the_slot_its_offer_reserved() {
+    // §16 invariant 1: "one open assignment occupies exactly one slot" — the
+    // one its offer reserved. Naming a *different slot of the same worker*
+    // leaves the reserved one occupied by nothing and the named one occupied
+    // twice, and the ownership references say nothing about it because both
+    // slots belong to the same worker.
+    let Some((db, mut owner)) = migrated("assign_slot", "pool_migration").await else {
+        return;
+    };
+    let r = ready(&mut owner, 0x0e).await;
+    let mut controller = PgConnection::connect_with(&db.as_role("pool_controller"))
+        .await
+        .unwrap();
+
+    // A second slot for the same worker, registered at generation 1.
+    let mut tx = sqlx::Connection::begin(&mut owner).await.unwrap();
+    let sibling: String = sqlx::query_scalar(
+        "INSERT INTO pool.slot (network, slot_id, worker_id, client_slot_key, generation)
+         VALUES ('testnet', gen_random_uuid(), $1::uuid, 'cpu-1', 1)
+         RETURNING slot_id::text",
+    )
+    .bind(&r.worker)
+    .fetch_one(&mut *tx)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO pool.slot_generation
+             (network, slot_id, generation, slot_registration_id, registration_sha256,
+              compute_kind, compute_type, cpu_arch, cpu_vendor, logical_cores,
+              agent_version, runtime_bundle_version,
+              available_image_manifest_digests, spec_digest)
+         VALUES ('testnet', $1::uuid, 1, gen_random_uuid(), $2,
+                 'CPU', 'aws_t4g', 'arm64', 'arm', 4, '0.1.0', '0.1.0',
+                 '[]'::jsonb, $3)",
+    )
+    .bind(&sibling)
+    .bind(SHA.as_slice())
+    .bind([0xef_u8; 32].as_slice())
+    .execute(&mut *tx)
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+
+    let mismatched = exec(
+        &mut controller,
+        format!(
+            "INSERT INTO pool.assignment
+                 (network, assignment_id, member_id, worker_id, slot_id, slot_generation,
+                  offer_id, workflow_id, benchmark_id, confirmed_track_id, compute_type,
+                  num_nonces, assignment_digest, identity,
+                  workflow_expiry_block, proof_reserve_blocks, package_due_before_block,
+                  ack_by)
+             VALUES ('testnet', gen_random_uuid(), '{member}'::uuid, '{worker}'::uuid,
+                     '{sibling}'::uuid, 1, '{offer}'::uuid, '{workflow}', '{benchmark}',
+                     'n_nodes=100', 'aws_t4g', 512,
+                     decode(repeat('ee', 32), 'hex'), '{{}}'::jsonb,
+                     220, 10, 210, now() + interval '60 seconds')",
+            member = r.member,
+            worker = r.worker,
+            offer = r.offer,
+            workflow = r.workflow,
+            benchmark = r.benchmark
+        ),
+    )
+    .await
+    .expect_err("an assignment occupies the slot its offer reserved");
+    assert!(
+        format!("{mismatched}").contains("the offer reserved"),
+        "expected the offer-slot check, got: {mismatched}"
+    );
 }
 
 #[tokio::test]

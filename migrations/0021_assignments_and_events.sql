@@ -119,6 +119,18 @@ CREATE TABLE pool.assignment (
     CONSTRAINT assignment_slot_belongs_to_its_worker
         FOREIGN KEY (network, worker_id, slot_id)
         REFERENCES pool.slot (network, worker_id, slot_id),
+    -- §16 invariant 5: the digest "binds the qualified slot generation". The
+    -- generation is therefore a fact about a row that must exist, not a number
+    -- copied into this one — `migrations/0019` created
+    -- `slot_identity_is_generation_scoped` for exactly this reference.
+    --
+    -- Defence in depth rather than an independently reachable rule: the trigger
+    -- below requires the assignment's slot and generation to equal its offer's,
+    -- and the offer already references a registered generation. No test here
+    -- can trip this without removing that check first.
+    CONSTRAINT assignment_names_a_registered_generation
+        FOREIGN KEY (network, slot_id, slot_generation)
+        REFERENCES pool.slot_generation (network, slot_id, generation),
     CONSTRAINT assignment_worker_belongs_to_its_member
         FOREIGN KEY (network, member_id, worker_id)
         REFERENCES pool.worker (network, member_id, worker_id),
@@ -252,15 +264,17 @@ RETURNS trigger
 LANGUAGE plpgsql
 AS $$
 DECLARE
-    workflow_state   text;
-    workflow_benchmark text;
-    offer_state      text;
+    w          record;
+    o          record;
+    registered record;
 BEGIN
-    SELECT w.state, w.benchmark_id INTO workflow_state, workflow_benchmark
-      FROM pool.workflow w
-     WHERE w.network = NEW.network AND w.workflow_id = NEW.workflow_id;
+    SELECT state, benchmark_id, owner_kind, owner_id,
+           confirmed_track_id, confirmed_num_nonces
+      INTO w
+      FROM pool.workflow
+     WHERE network = NEW.network AND workflow_id = NEW.workflow_id;
 
-    IF workflow_state IS NULL THEN
+    IF w IS NULL THEN
         RAISE EXCEPTION 'workflow % does not exist', NEW.workflow_id
             USING ERRCODE = 'raise_exception';
     END IF;
@@ -269,33 +283,85 @@ BEGIN
     -- behind it; the states before it do not, and the local terminal ones never
     -- will. Naming the states that *do* rather than the ones that do not is
     -- what keeps a later state from being admitted here by omission.
-    IF workflow_state NOT IN ('PRECOMMIT_CONFIRMED', 'BENCHMARK_SUBMITTED',
-                              'BENCHMARK_CONFIRMED', 'PROOF_SUBMITTED',
-                              'PROOF_CONFIRMED', 'VERIFIED')
+    IF w.state NOT IN ('PRECOMMIT_CONFIRMED', 'BENCHMARK_SUBMITTED',
+                       'BENCHMARK_CONFIRMED', 'PROOF_SUBMITTED',
+                       'PROOF_CONFIRMED', 'VERIFIED')
     THEN
         RAISE EXCEPTION
             'an assignment is published from a confirmed precommit, not from % (member_protocol.md §6 step 8)',
-            workflow_state
+            w.state
             USING ERRCODE = 'raise_exception';
     END IF;
 
-    IF workflow_benchmark IS DISTINCT FROM NEW.benchmark_id THEN
+    -- §16 invariant 4, in full: *every* confirmed fact, not only the benchmark
+    -- id. TIG selects the track and derives the nonce count, so publishing the
+    -- pool's proposal for either is publishing something TIG never confirmed —
+    -- and `mining_system.md` §10 invariants 3 and 4 say the member's work
+    -- starts from "its confirmed selected track" with "all settings used by the
+    -- member match the confirmed precommit".
+    IF w.benchmark_id IS DISTINCT FROM NEW.benchmark_id
+       OR w.confirmed_track_id IS DISTINCT FROM NEW.confirmed_track_id
+       OR w.confirmed_num_nonces IS DISTINCT FROM NEW.num_nonces
+    THEN
         RAISE EXCEPTION
-            'the assignment names benchmark %, the workflow holds % (member_protocol.md §16 invariant 4)',
-            NEW.benchmark_id, workflow_benchmark
+            'the assignment does not carry the workflow''s confirmed facts: benchmark % vs %, track % vs %, nonces % vs % (member_protocol.md §16 invariant 4)',
+            NEW.benchmark_id, w.benchmark_id,
+            NEW.confirmed_track_id, w.confirmed_track_id,
+            NEW.num_nonces, w.confirmed_num_nonces
             USING ERRCODE = 'raise_exception';
     END IF;
 
-    SELECT o.state INTO offer_state
-      FROM pool.capacity_offer o
-     WHERE o.network = NEW.network
-       AND o.worker_id = NEW.worker_id
-       AND o.offer_id = NEW.offer_id;
+    -- `mining_system.md` §10 invariant 1: one benchmark, exactly one member
+    -- owner. The workflow carries that owner, and an assignment published to
+    -- anybody else — or to a real member against a `POOL_BOOTSTRAP` workflow,
+    -- whose faults "can never be attributed or charged to a member" — would
+    -- make the chain E5 writes disagree with the row slice 1 wrote it into.
+    IF w.owner_kind <> 'MEMBER' OR w.owner_id IS DISTINCT FROM NEW.member_id::text THEN
+        RAISE EXCEPTION
+            'the workflow is owned by %:%, the assignment names member % (mining_system.md §10 invariant 1)',
+            w.owner_kind, w.owner_id, NEW.member_id
+            USING ERRCODE = 'raise_exception';
+    END IF;
 
-    IF offer_state IS DISTINCT FROM 'ADMITTED' THEN
+    SELECT state, slot_id, slot_generation INTO o
+      FROM pool.capacity_offer
+     WHERE network = NEW.network
+       AND worker_id = NEW.worker_id
+       AND offer_id = NEW.offer_id;
+
+    IF o.state IS DISTINCT FROM 'ADMITTED' THEN
         RAISE EXCEPTION
             'an assignment follows an admitted offer, not one in % (member_protocol.md §6)',
-            offer_state
+            o.state
+            USING ERRCODE = 'raise_exception';
+    END IF;
+
+    -- §16 invariant 1: "one open assignment occupies exactly one slot" — the
+    -- one its offer reserved. Without this the assignment could name a
+    -- different slot of the same worker, leaving the reserved one occupied by
+    -- nothing and the named one occupied twice.
+    IF o.slot_id IS DISTINCT FROM NEW.slot_id
+       OR o.slot_generation IS DISTINCT FROM NEW.slot_generation
+    THEN
+        RAISE EXCEPTION
+            'the assignment names slot %/gen %, the offer reserved %/gen % (member_protocol.md §16 invariant 1)',
+            NEW.slot_id, NEW.slot_generation, o.slot_id, o.slot_generation
+            USING ERRCODE = 'raise_exception';
+    END IF;
+
+    -- §7: "confirmed precommit `compute_type` must equal `compute.compute_type`".
+    -- The slot generation is where the member's compute facts are, and it is
+    -- what qualified.
+    SELECT compute_type INTO registered
+      FROM pool.slot_generation
+     WHERE network = NEW.network
+       AND slot_id = NEW.slot_id
+       AND generation = NEW.slot_generation;
+
+    IF registered.compute_type IS DISTINCT FROM NEW.compute_type THEN
+        RAISE EXCEPTION
+            'the assignment is for compute %, the slot generation is % (member_protocol.md §7)',
+            NEW.compute_type, registered.compute_type
             USING ERRCODE = 'raise_exception';
     END IF;
 

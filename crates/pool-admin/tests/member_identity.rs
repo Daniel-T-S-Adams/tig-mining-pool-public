@@ -114,11 +114,25 @@ async fn only_the_controller_suspends_an_account_and_it_creates_none() {
         .await
         .unwrap();
 
-    sqlx::query("UPDATE pool.member SET state = 'SUSPENDED' WHERE member_id = $1::uuid")
-        .bind(&member)
-        .execute(&mut controller)
-        .await
-        .expect("the controller applies the suspension an operator ordered");
+    // A bare state flip leaves no record of when, why or who, which is what
+    // `architecture.md` §13 invariant 6 asks a state change to leave.
+    let silent =
+        sqlx::query("UPDATE pool.member SET state = 'SUSPENDED' WHERE member_id = $1::uuid")
+            .bind(&member)
+            .execute(&mut controller)
+            .await;
+    assert!(silent.is_err(), "a suspension says when, why and who");
+
+    sqlx::query(
+        "UPDATE pool.member
+            SET state = 'SUSPENDED', suspended_at = now(),
+                suspension_reason = 'SECURITY', suspended_by = 'operator:daniel'
+          WHERE member_id = $1::uuid",
+    )
+    .bind(&member)
+    .execute(&mut controller)
+    .await
+    .expect("the controller applies the suspension an operator ordered");
 
     let created = sqlx::query(
         "INSERT INTO pool.member (network, member_id, wallet_address)
@@ -197,9 +211,10 @@ async fn the_multiplier_is_append_only_and_bounded() {
 
     sqlx::query(
         "INSERT INTO pool.member_collateral_multiplier
-             (network, member_id, version, bps, reason, set_by, effective_from)
+             (network, member_id, version, bps, reason, set_by,
+              recorded_at_height, effective_from_height)
          VALUES ('testnet', $1::uuid, 1, 5000, 'early member discount',
-                 'operator:daniel', now())",
+                 'operator:daniel', 1000, 1100)",
     )
     .bind(&member)
     .execute(&mut controller)
@@ -244,8 +259,9 @@ async fn the_multiplier_is_append_only_and_bounded() {
     for bad in [0_i32, 10_001, -1] {
         let r = sqlx::query(
             "INSERT INTO pool.member_collateral_multiplier
-                 (network, member_id, version, bps, reason, set_by, effective_from)
-             VALUES ('testnet', $1::uuid, 2, $2, 'out of range', 'operator:daniel', now())",
+                 (network, member_id, version, bps, reason, set_by,
+                  recorded_at_height, effective_from_height)
+             VALUES ('testnet', $1::uuid, 2, $2, 'out of range', 'operator:daniel', 1000, 1200)",
         )
         .bind(&member)
         .bind(bad)
@@ -260,8 +276,9 @@ async fn the_multiplier_is_append_only_and_bounded() {
     for (reason, actor) in [("   ", "operator:daniel"), ("a reason", "  ")] {
         let r = sqlx::query(
             "INSERT INTO pool.member_collateral_multiplier
-                 (network, member_id, version, bps, reason, set_by, effective_from)
-             VALUES ('testnet', $1::uuid, 2, 5000, $2, $3, now())",
+                 (network, member_id, version, bps, reason, set_by,
+                  recorded_at_height, effective_from_height)
+             VALUES ('testnet', $1::uuid, 2, 5000, $2, $3, 1000, 1200)",
         )
         .bind(&member)
         .bind(reason)
@@ -289,29 +306,40 @@ async fn multiplier_versions_advance_together_with_their_effective_times() {
         .await
         .unwrap();
 
-    let insert = |version: i64, offset: &str| {
+    let insert = |version: i64, recorded: i64, effective: i64| {
         format!(
             "INSERT INTO pool.member_collateral_multiplier
-                 (network, member_id, version, bps, reason, set_by, effective_from)
+                 (network, member_id, version, bps, reason, set_by,
+                  recorded_at_height, effective_from_height)
              VALUES ('testnet', '{member}'::uuid, {version}, 5000, 'r', 'operator:daniel',
-                     now() + interval '{offset}')"
+                     {recorded}, {effective})"
         )
     };
 
-    exec(&mut controller, insert(1, "0 seconds")).await.unwrap();
+    exec(&mut controller, insert(1, 1000, 1100)).await.unwrap();
 
-    let skipped = exec(&mut controller, insert(3, "1 hour")).await;
+    let skipped = exec(&mut controller, insert(3, 1100, 1200)).await;
     assert!(skipped.is_err(), "versions are consecutive");
 
-    let backdated = exec(&mut controller, insert(2, "-1 hour"))
+    let earlier = exec(&mut controller, insert(2, 1000, 1050))
         .await
         .expect_err("a later version cannot take effect earlier");
     assert!(
-        format!("{backdated}").contains("takes effect at or before"),
-        "expected the ordering trigger, got: {backdated}"
+        format!("{earlier}").contains("takes effect at or before"),
+        "expected the ordering trigger, got: {earlier}"
     );
 
-    exec(&mut controller, insert(2, "1 hour"))
+    // `accounting.md` §5, which ADR 0010 requires this to follow: a policy
+    // "cannot be edited, backdated, or selected using processing time". A
+    // version effective at or below the height it was recorded at would reach
+    // blocks already decided.
+    let backdated = exec(&mut controller, insert(2, 1200, 1200)).await;
+    assert!(
+        backdated.is_err(),
+        "a version is scheduled ahead, never applied backwards"
+    );
+
+    exec(&mut controller, insert(2, 1100, 1300))
         .await
         .expect("the next version, taking effect later");
 }
@@ -861,6 +889,223 @@ async fn a_key_is_never_rewritten_and_a_revocation_is_never_undone() {
 }
 
 #[tokio::test]
+async fn a_security_revocation_cannot_be_laundered_into_an_ordinary_one() {
+    // Two statements, each satisfying every CHECK: rewrite the reason on the
+    // still-revoked row, then reinstate. The guard that reads the reason has
+    // to be able to trust that the reason is the one that was recorded.
+    let Some((_db, mut api)) = migrated("member_launder", "pool_api").await else {
+        return;
+    };
+    let (_, worker, _) = enrolled(&mut api, ALICE, &KEY_A).await;
+
+    sqlx::query(
+        "UPDATE pool.worker
+            SET state = 'REVOKED', revoked_at = now(), revocation_reason = 'SECURITY'
+          WHERE worker_id = $1::uuid",
+    )
+    .bind(&worker)
+    .execute(&mut api)
+    .await
+    .unwrap();
+
+    let relabelled = sqlx::query(
+        "UPDATE pool.worker SET revocation_reason = 'MEMBER_REQUEST' WHERE worker_id = $1::uuid",
+    )
+    .bind(&worker)
+    .execute(&mut api)
+    .await
+    .expect_err("a standing revocation keeps the reason it was given");
+    assert!(
+        format!("{relabelled}").contains("fixed while it stands"),
+        "expected the revocation trigger, got: {relabelled}"
+    );
+
+    let redated = sqlx::query(
+        "UPDATE pool.worker SET revoked_at = now() - interval '1 day' WHERE worker_id = $1::uuid",
+    )
+    .bind(&worker)
+    .execute(&mut api)
+    .await;
+    assert!(redated.is_err(), "nor the time it was given");
+}
+
+#[tokio::test]
+async fn the_wallet_is_not_editable_by_anyone() {
+    // ADR 0011: "There is no payout-destination setting, and no operation that
+    // changes one." The wallet is the account and the destination at once, so
+    // an edit here is theft rather than a mistake — and the role that could
+    // make it may not exist yet, which is why this holds against the owner.
+    let Some((db, mut api)) = migrated("member_wallet_immutable", "pool_api").await else {
+        return;
+    };
+    let (member, _, _) = enrolled(&mut api, ALICE, &KEY_A).await;
+
+    let mut owner = PgConnection::connect_with(&db.as_role("pool_migration"))
+        .await
+        .unwrap();
+    let moved =
+        sqlx::query("UPDATE pool.member SET wallet_address = $2 WHERE member_id = $1::uuid")
+            .bind(&member)
+            .bind(BOB)
+            .execute(&mut owner)
+            .await
+            .expect_err("the destination does not move");
+    assert!(
+        format!("{moved}").contains("wallet is the account"),
+        "expected the member identity trigger, got: {moved}"
+    );
+}
+
+#[tokio::test]
+async fn an_expired_ticket_cannot_be_redeemed_or_re_attributed() {
+    // `security.md` §4.1 puts "lookup, expiry check, one-time consumption" in
+    // one transaction. The row refusing a late consumption is what makes the
+    // expiry a property of the ticket rather than of that transaction.
+    let Some((db, mut api)) = migrated("member_ticket_expiry", "pool_api").await else {
+        return;
+    };
+    let (member, worker, _) = enrolled(&mut api, ALICE, &KEY_A).await;
+    let mut owner = PgConnection::connect_with(&db.as_role("pool_migration"))
+        .await
+        .unwrap();
+
+    // Issued fifteen minutes ago, so it is inside its own CHECK and expired.
+    sqlx::query(
+        "INSERT INTO pool.enrollment_ticket
+             (network, ticket_hmac, member_id, purpose, created_at, expires_at)
+         VALUES ('testnet', $1, $2::uuid, 'WORKER_ENROLLMENT',
+                 now() - interval '20 minutes', now() - interval '5 minutes')",
+    )
+    .bind([0x31_u8; 32].as_slice())
+    .bind(&member)
+    .execute(&mut owner)
+    .await
+    .unwrap();
+
+    let late = sqlx::query(
+        "UPDATE pool.enrollment_ticket
+            SET consumed_at = now(), consumed_by_worker_id = $2::uuid
+          WHERE ticket_hmac = $1",
+    )
+    .bind([0x31_u8; 32].as_slice())
+    .bind(&worker)
+    .execute(&mut api)
+    .await;
+    assert!(late.is_err(), "an expired ticket is not redeemable");
+
+    // And a recovery ticket is consumed by the worker it names, then never
+    // re-attributed to another.
+    let (_, second_worker, _) = {
+        let w: String = sqlx::query_scalar(
+            "INSERT INTO pool.worker
+                 (network, worker_id, member_id, protocol_version,
+                  enrollment_request_id, enrollment_request_sha256)
+             VALUES ('testnet', gen_random_uuid(), $1::uuid, '0.1.0', gen_random_uuid(), $2)
+             RETURNING worker_id::text",
+        )
+        .bind(&member)
+        .bind(SHA.as_slice())
+        .fetch_one(&mut api)
+        .await
+        .unwrap();
+        ((), w, ())
+    };
+
+    sqlx::query(
+        "INSERT INTO pool.enrollment_ticket
+             (network, ticket_hmac, member_id, purpose, worker_id, expires_at)
+         VALUES ('testnet', $1, $2::uuid, 'WORKER_RECOVERY', $3::uuid,
+                 now() + interval '15 minutes')",
+    )
+    .bind([0x32_u8; 32].as_slice())
+    .bind(&member)
+    .bind(&worker)
+    .execute(&mut api)
+    .await
+    .unwrap();
+
+    let wrong_worker = sqlx::query(
+        "UPDATE pool.enrollment_ticket
+            SET consumed_at = now(), consumed_by_worker_id = $2::uuid
+          WHERE ticket_hmac = $1",
+    )
+    .bind([0x32_u8; 32].as_slice())
+    .bind(&second_worker)
+    .execute(&mut api)
+    .await;
+    assert!(
+        wrong_worker.is_err(),
+        "a recovery ticket is consumed by the worker it names"
+    );
+
+    sqlx::query(
+        "UPDATE pool.enrollment_ticket
+            SET consumed_at = now(), consumed_by_worker_id = $2::uuid
+          WHERE ticket_hmac = $1",
+    )
+    .bind([0x32_u8; 32].as_slice())
+    .bind(&worker)
+    .execute(&mut api)
+    .await
+    .unwrap();
+
+    let reattributed = sqlx::query(
+        "UPDATE pool.enrollment_ticket
+            SET consumed_by_worker_id = $2::uuid
+          WHERE ticket_hmac = $1",
+    )
+    .bind([0x32_u8; 32].as_slice())
+    .bind(&second_worker)
+    .execute(&mut api)
+    .await;
+    assert!(
+        reattributed.is_err(),
+        "a recorded consumption is not re-attributed"
+    );
+
+    // The same, for an *enrollment* ticket — which names no worker, so the
+    // CHECK above says nothing about it and the trigger is the only guard.
+    // Without this case, removing that half of the trigger changes nothing
+    // any test can see.
+    sqlx::query(
+        "INSERT INTO pool.enrollment_ticket
+             (network, ticket_hmac, member_id, purpose, expires_at)
+         VALUES ('testnet', $1, $2::uuid, 'WORKER_ENROLLMENT', now() + interval '15 minutes')",
+    )
+    .bind([0x33_u8; 32].as_slice())
+    .bind(&member)
+    .execute(&mut api)
+    .await
+    .unwrap();
+
+    sqlx::query(
+        "UPDATE pool.enrollment_ticket
+            SET consumed_at = now(), consumed_by_worker_id = $2::uuid
+          WHERE ticket_hmac = $1",
+    )
+    .bind([0x33_u8; 32].as_slice())
+    .bind(&worker)
+    .execute(&mut api)
+    .await
+    .unwrap();
+
+    let moved = sqlx::query(
+        "UPDATE pool.enrollment_ticket
+            SET consumed_by_worker_id = $2::uuid
+          WHERE ticket_hmac = $1",
+    )
+    .bind([0x33_u8; 32].as_slice())
+    .bind(&second_worker)
+    .execute(&mut api)
+    .await
+    .expect_err("an enrollment's consumption is not re-attributed either");
+    assert!(
+        format!("{moved}").contains("re-armed or re-attributed"),
+        "expected the consumption trigger, got: {moved}"
+    );
+}
+
+#[tokio::test]
 async fn a_rotation_grace_cannot_outlive_ten_minutes() {
     // §3.3 bounds the grace at ten minutes, and the column exists so the grace
     // a rotation promised survives a configuration change — which is the case
@@ -870,27 +1115,64 @@ async fn a_rotation_grace_cannot_outlive_ten_minutes() {
     };
     let (_, worker, _) = enrolled(&mut api, ALICE, &KEY_A).await;
 
-    let too_long = sqlx::query(
+    // The case the column exists for: a credential enrolled long ago, rotated
+    // today. Bounding the grace against `created_at` would make this
+    // impossible, which is what the first version of this migration did.
+    let old: String = sqlx::query_scalar(
         "INSERT INTO pool.worker_credential
-             (network, credential_id, worker_id, public_key, not_after)
-         VALUES ('testnet', gen_random_uuid(), $1::uuid, $2, now() + interval '1 hour')",
+             (network, credential_id, worker_id, public_key, created_at)
+         VALUES ('testnet', gen_random_uuid(), $1::uuid, $2, now() - interval '7 days')
+         RETURNING credential_id::text",
     )
     .bind(&worker)
     .bind(KEY_B.as_slice())
+    .fetch_one(&mut api)
+    .await
+    .unwrap();
+
+    let too_long = sqlx::query(
+        "UPDATE pool.worker_credential
+            SET grace_started_at = now(), not_after = now() + interval '11 minutes'
+          WHERE credential_id = $1::uuid",
+    )
+    .bind(&old)
     .execute(&mut api)
     .await;
     assert!(too_long.is_err(), "ten minutes is the longest grace");
 
     sqlx::query(
-        "INSERT INTO pool.worker_credential
-             (network, credential_id, worker_id, public_key, not_after)
-         VALUES ('testnet', gen_random_uuid(), $1::uuid, $2, now() + interval '9 minutes')",
+        "UPDATE pool.worker_credential
+            SET grace_started_at = now(), not_after = now() + interval '9 minutes'
+          WHERE credential_id = $1::uuid",
     )
-    .bind(&worker)
-    .bind(KEY_B.as_slice())
+    .bind(&old)
     .execute(&mut api)
     .await
-    .expect("a grace inside the bound is accepted");
+    .expect("a week-old credential can still be given a nine-minute grace");
+
+    let extended = sqlx::query(
+        "UPDATE pool.worker_credential
+            SET not_after = now() + interval '9 minutes'
+          WHERE credential_id = $1::uuid",
+    )
+    .bind(&old)
+    .execute(&mut api)
+    .await;
+    assert!(
+        extended.is_err(),
+        "a declared grace does not move; ten minutes becomes an hour one UPDATE at a time"
+    );
+
+    let half = sqlx::query(
+        "INSERT INTO pool.worker_credential
+             (network, credential_id, worker_id, public_key, not_after)
+         VALUES ('testnet', gen_random_uuid(), $1::uuid, $2, now() + interval '5 minutes')",
+    )
+    .bind(&worker)
+    .bind([0xd4_u8; 32].as_slice())
+    .execute(&mut api)
+    .await;
+    assert!(half.is_err(), "a grace records both of its ends");
 }
 
 #[tokio::test]

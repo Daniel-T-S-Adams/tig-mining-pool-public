@@ -55,6 +55,15 @@ CREATE TABLE pool.member (
     -- standing never releases exposure.
     state          text        NOT NULL DEFAULT 'ACTIVE',
 
+    -- A suspension says when, why and who, for the same reason a worker's
+    -- revocation does: `architecture.md` §13 invariant 6 wants an auditable
+    -- result, and `security.md` §4.3's explicit security suspension is a
+    -- decision someone has to be able to review and undo. A bare state flip
+    -- would leave none of that.
+    suspended_at      timestamptz,
+    suspension_reason text,
+    suspended_by      text,
+
     created_at     timestamptz NOT NULL DEFAULT now(),
 
     PRIMARY KEY (network, member_id),
@@ -64,8 +73,53 @@ CREATE TABLE pool.member (
     CONSTRAINT member_state_known
         CHECK (state IN ('ACTIVE', 'SUSPENDED')),
     CONSTRAINT member_wallet_is_lowercase_base_address
-        CHECK (wallet_address ~ '^0x[0-9a-f]{40}$')
+        CHECK (wallet_address ~ '^0x[0-9a-f]{40}$'),
+    CONSTRAINT member_suspension_is_recorded_or_absent
+        CHECK (
+            (state = 'ACTIVE'
+                AND suspended_at IS NULL
+                AND suspension_reason IS NULL
+                AND suspended_by IS NULL)
+            OR
+            (state = 'SUSPENDED'
+                AND suspended_at IS NOT NULL
+                AND suspension_reason IS NOT NULL
+                AND suspended_by IS NOT NULL)
+        ),
+    CONSTRAINT member_suspension_reason_known
+        CHECK (suspension_reason IS NULL
+               OR suspension_reason IN ('SECURITY', 'OPERATOR', 'MEMBER_REQUEST'))
 );
+
+-- ADR 0011: "There is no payout-destination setting, and no operation that
+-- changes one." The wallet is simultaneously the account identity and the
+-- withdrawal destination, which makes it the one column in this migration where
+-- an edit is theft rather than a mistake — so it is defended the way the worker
+-- binding is, against the table owner and against any UPDATE a later slice
+-- grants, not only against the role that exists today.
+CREATE OR REPLACE FUNCTION pool.member_identity_is_immutable()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF NEW.network IS DISTINCT FROM OLD.network
+       OR NEW.member_id IS DISTINCT FROM OLD.member_id
+       OR NEW.wallet_address IS DISTINCT FROM OLD.wallet_address
+       OR NEW.created_at IS DISTINCT FROM OLD.created_at
+    THEN
+        RAISE EXCEPTION
+            'the wallet is the account and its destination; neither changes (ADR 0011)'
+            USING ERRCODE = 'raise_exception';
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER member_identity_immutable
+    BEFORE UPDATE ON pool.member
+    FOR EACH ROW
+    EXECUTE FUNCTION pool.member_identity_is_immutable();
 
 -- One account per address per network. Network-scoped like every other row in
 -- this schema: the same person may hold the same wallet on testnet and mainnet,
@@ -111,11 +165,20 @@ CREATE TABLE pool.member_collateral_multiplier (
     -- exists, at which point this becomes its identifier.
     set_by     text        NOT NULL,
 
-    -- When it takes effect, which is not the same question as when it was
-    -- recorded. `accounting.md` §11.4 re-derives a reservation from "the
-    -- policy that was in force", so the policy in force at time T is the
-    -- highest version whose `effective_from` is at or before T.
-    effective_from timestamptz NOT NULL,
+    -- When it takes effect, on the axis `accounting.md` §5 uses for the fee
+    -- policy this is required to follow: a TIG height, not a wall clock. §5 is
+    -- explicit that a policy "cannot be edited, backdated, or selected using
+    -- processing time", and admission already reads its other inputs from the
+    -- decision snapshot's block — so the multiplier in force for a decision is
+    -- the highest version whose height is at or below that block's.
+    --
+    -- `recorded_at_height` is the pool's latest confirmed height when the
+    -- version was written, and the CHECK below makes every version take effect
+    -- strictly after it. That is what "not backdated" means with no wall clock
+    -- involved: a change is scheduled ahead, never applied to blocks already
+    -- decided.
+    recorded_at_height    bigint NOT NULL,
+    effective_from_height bigint NOT NULL,
 
     set_at     timestamptz NOT NULL DEFAULT now(),
 
@@ -129,6 +192,10 @@ CREATE TABLE pool.member_collateral_multiplier (
         CHECK (length(trim(reason)) > 0),
     CONSTRAINT member_multiplier_actor_not_blank
         CHECK (length(trim(set_by)) > 0),
+    CONSTRAINT member_multiplier_heights_are_positive
+        CHECK (recorded_at_height >= 0 AND effective_from_height >= 0),
+    CONSTRAINT member_multiplier_is_not_backdated
+        CHECK (effective_from_height > recorded_at_height),
     CONSTRAINT member_multiplier_has_a_member
         FOREIGN KEY (network, member_id)
         REFERENCES pool.member (network, member_id)
@@ -165,7 +232,7 @@ AS $$
 DECLARE
     previous record;
 BEGIN
-    SELECT version, effective_from INTO previous
+    SELECT version, effective_from_height INTO previous
       FROM pool.member_collateral_multiplier
      WHERE network = NEW.network AND member_id = NEW.member_id
      ORDER BY version DESC
@@ -182,7 +249,7 @@ BEGIN
             USING ERRCODE = 'raise_exception';
     END IF;
 
-    IF NEW.effective_from <= previous.effective_from THEN
+    IF NEW.effective_from_height <= previous.effective_from_height THEN
         RAISE EXCEPTION
             'member multiplier version % takes effect at or before version %',
             NEW.version, previous.version
@@ -305,6 +372,20 @@ BEGIN
             USING ERRCODE = 'raise_exception';
     END IF;
 
+    -- A recorded revocation is fixed while it stands. Without this the
+    -- security guard below is two statements away from useless: rewrite
+    -- `revocation_reason` to `MEMBER_REQUEST` on the still-REVOKED row, then
+    -- reinstate. Both statements satisfy every CHECK, and the second one would
+    -- see a reason that is no longer the one recorded.
+    IF OLD.state = 'REVOKED' AND NEW.state = 'REVOKED'
+       AND (NEW.revocation_reason IS DISTINCT FROM OLD.revocation_reason
+            OR NEW.revoked_at IS DISTINCT FROM OLD.revoked_at)
+    THEN
+        RAISE EXCEPTION
+            'a revocation''s reason and time are fixed while it stands (member_protocol.md §3.3)'
+            USING ERRCODE = 'raise_exception';
+    END IF;
+
     -- §3.3: "A worker revoked as a security action cannot be recovered by this
     -- path; only an explicit, audited pool decision reinstates it." That
     -- decision needs the operator-command path, which does not exist yet, so
@@ -344,11 +425,18 @@ CREATE TABLE pool.worker_credential (
 
     state         text        NOT NULL DEFAULT 'ACTIVE',
 
-    -- When this credential stops being accepted. Set on rotation to the end of
-    -- §3.3's grace period; NULL means "until revoked". Stored rather than
-    -- computed so the grace an enrollment was promised survives a change to the
-    -- configured grace.
-    not_after     timestamptz,
+    -- When this credential stops being accepted, and when that grace began.
+    -- Both are set by the rotation that starts the grace on the *old*
+    -- credential, and NULL means "until revoked".
+    --
+    -- Two columns because the ten-minute bound in §3.3 is measured from the
+    -- rotation, not from enrollment. Bounding `not_after` against `created_at`
+    -- — the obvious single-column form, and what this migration had first —
+    -- makes the column unusable for the case it exists for: a credential
+    -- enrolled a week ago can be rotated today, and no grace ending in the
+    -- future is within ten minutes of its creation.
+    grace_started_at timestamptz,
+    not_after        timestamptz,
 
     -- §3.3's rotation idempotency: "Repeating the same `rotation_id` and new
     -- public key returns the same result. A different key for the same rotation
@@ -373,11 +461,16 @@ CREATE TABLE pool.worker_credential (
         ),
     CONSTRAINT credential_public_key_is_ed25519_sized
         CHECK (length(public_key) = 32),
-    -- §3.3 bounds the rotation grace at ten minutes. The column exists so the
-    -- grace a rotation promised survives a configuration change — which is
-    -- exactly the case where an out-of-range value would otherwise persist.
+    -- §3.3 bounds the rotation grace at ten minutes, measured from when the
+    -- rotation declared it. Stored rather than computed so the grace a rotation
+    -- promised survives a change to the configured grace — which is exactly the
+    -- case where an out-of-range value would otherwise persist.
+    CONSTRAINT credential_grace_is_recorded_whole
+        CHECK ((not_after IS NULL) = (grace_started_at IS NULL)),
     CONSTRAINT credential_grace_is_bounded
-        CHECK (not_after IS NULL OR not_after <= created_at + interval '10 minutes'),
+        CHECK (not_after IS NULL
+               OR (not_after > grace_started_at
+                   AND not_after <= grace_started_at + interval '10 minutes')),
     CONSTRAINT credential_has_a_worker
         FOREIGN KEY (network, worker_id)
         REFERENCES pool.worker (network, worker_id)
@@ -414,6 +507,11 @@ BEGIN
        OR NEW.credential_id IS DISTINCT FROM OLD.credential_id
        OR NEW.rotation_id IS DISTINCT FROM OLD.rotation_id
        OR NEW.created_at IS DISTINCT FROM OLD.created_at
+       -- A grace is declared once. Moving either end afterwards is how ten
+       -- minutes becomes an hour one UPDATE at a time.
+       OR (OLD.grace_started_at IS NOT NULL
+           AND (NEW.grace_started_at IS DISTINCT FROM OLD.grace_started_at
+                OR NEW.not_after IS DISTINCT FROM OLD.not_after))
     THEN
         RAISE EXCEPTION
             'a credential''s key and owner are fixed; rotate by adding one (member_protocol.md §3.3)'
@@ -495,6 +593,20 @@ CREATE TABLE pool.enrollment_ticket (
     -- lifetime enforced only by whoever wrote the INSERT.
     CONSTRAINT ticket_lifetime_is_bounded
         CHECK (expires_at <= created_at + interval '15 minutes'),
+    -- And the expiry has to bound redemption, not just issuance. `security.md`
+    -- §4.1 puts "lookup, expiry check, one-time consumption" in one
+    -- transaction; the row refusing a late consumption is what makes the
+    -- expiry a property of the ticket rather than of that transaction.
+    CONSTRAINT ticket_is_consumed_before_it_expires
+        CHECK (consumed_at IS NULL OR consumed_at <= expires_at),
+    -- A recovery ticket is consumed by the worker it names, and by no other.
+    -- §3.3 binds it "to its exact `worker_id`", so a consumption recorded
+    -- against a different worker of the same member is a recovery of something
+    -- the ticket did not authorize.
+    CONSTRAINT ticket_recovery_is_consumed_by_its_own_worker
+        CHECK (purpose <> 'WORKER_RECOVERY'
+               OR consumed_by_worker_id IS NULL
+               OR consumed_by_worker_id = worker_id),
     CONSTRAINT ticket_has_a_member
         FOREIGN KEY (network, member_id)
         REFERENCES pool.member (network, member_id),
@@ -540,9 +652,12 @@ BEGIN
             USING ERRCODE = 'raise_exception';
     END IF;
 
-    IF OLD.consumed_at IS NOT NULL AND NEW.consumed_at IS NULL THEN
+    IF OLD.consumed_at IS NOT NULL
+       AND (NEW.consumed_at IS DISTINCT FROM OLD.consumed_at
+            OR NEW.consumed_by_worker_id IS DISTINCT FROM OLD.consumed_by_worker_id)
+    THEN
         RAISE EXCEPTION
-            'a consumed ticket is never re-armed (member_protocol.md §3.1: single use)'
+            'a consumed ticket is never re-armed or re-attributed (member_protocol.md §3.1: single use)'
             USING ERRCODE = 'raise_exception';
     END IF;
 
@@ -574,7 +689,8 @@ GRANT SELECT, INSERT ON pool.member TO pool_api;
 GRANT SELECT, INSERT ON pool.worker TO pool_api;
 GRANT UPDATE (state, revoked_at, revocation_reason) ON pool.worker TO pool_api;
 GRANT SELECT, INSERT ON pool.worker_credential TO pool_api;
-GRANT UPDATE (state, not_after, revoked_at) ON pool.worker_credential TO pool_api;
+GRANT UPDATE (state, grace_started_at, not_after, revoked_at)
+    ON pool.worker_credential TO pool_api;
 GRANT SELECT, INSERT ON pool.enrollment_ticket TO pool_api;
 GRANT UPDATE (consumed_at, consumed_by_worker_id) ON pool.enrollment_ticket TO pool_api;
 
@@ -587,9 +703,11 @@ GRANT SELECT ON pool.worker TO pool_controller;
 GRANT SELECT ON pool.worker_credential TO pool_controller;
 
 -- Suspension is an audited operator command applied by the controller (§6,
--- "Apply an administrative override"), so the one column the API may not change
--- is the one the controller may.
-GRANT UPDATE (state) ON pool.member TO pool_controller;
+-- "Apply an administrative override"), so the columns the API may not change
+-- are the ones the controller may — the state and the record of why it moved,
+-- which the CHECK above requires to travel together.
+GRANT UPDATE (state, suspended_at, suspension_reason, suspended_by)
+    ON pool.member TO pool_controller;
 
 -- The multiplier is the pool's decision, applied through the same operator
 -- path, and read by admission. Nothing else writes it and the API never sees

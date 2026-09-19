@@ -1229,12 +1229,22 @@ produced nothing is charged only the fee portion.
 loss reserve. §8.6 sweeps the whole batch out of member custody under the
 charge decision's single identifier, and §13 item 12 counts what is charged but not yet
 swept as a named margin term — both of which need this credit side to exist
-before they can be computed. V0 chargeable failures are an abandoned or
-unusable package, TIG solution-verification failure, a benchmark with zero
-bundles meeting TIG's minimum verification quality, and a benchmark with a
-successfully arbitrated report against it. The third is a capacity/economic
-failure, not an allegation of fraud; the fourth is the method-loss case and
-carries the penalty term as well as the fee. All four increment `f`. Slow but
+before they can be computed. **The table above decides which benchmarks are
+charged, and it is the authority.** Its branches are exhaustive by
+construction: a benchmark either earned active bundles and was reported, or
+earned them and was not, or did neither. Every benchmark reaching a terminal
+outcome lands in one of the three.
+
+The cases met most often in v0 are an abandoned or unusable package, TIG
+solution-verification failure, a benchmark with zero bundles meeting TIG's
+minimum verification quality, and a benchmark with a successfully arbitrated
+report against it. The third is a capacity/economic failure, not an allegation
+of fraud; the fourth is the method-loss case and carries the penalty term as
+well as the fee. That is a list of common instances and **not a closed set** —
+a benchmark that failed for a pool-side reason after durable acceptance
+appears in none of them and is charged all the same, under the table's third
+branch, because §11.6 charges without asking what caused the failure. Every
+charged benchmark increments `f`. Slow but
 eventually correct work is not charged; it is handled by the round
 `unverified_exposure > verified_exposure` tier-removal rule.
 

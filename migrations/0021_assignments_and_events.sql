@@ -63,8 +63,18 @@ CREATE TABLE pool.assignment (
     package_due_before_block bigint NOT NULL,
     ack_by                  timestamptz NOT NULL,
 
-    -- §9's member-visible ladder.
-    state text NOT NULL DEFAULT 'AVAILABLE',
+    -- §9's member-visible ladder, spelled as the wire contract spells it.
+    -- `schemas/member_protocol/v0.1.0/common.schema.json`'s `AssignmentState`
+    -- says `ASSIGNMENT_AVAILABLE`, not `AVAILABLE` — the latter is the *slot*'s
+    -- word, and using it here would have put a state on the wire that no
+    -- member agent can decode.
+    --
+    -- The enum also carries the pool-side TIG states (`BENCHMARK_SUBMITTED`
+    -- through `ACTIVE`) that a member can *read* after durable acceptance. This
+    -- column does not: §9 says those "do not occupy the slot", they live on
+    -- `pool.workflow`, and an assignment that could advance into them would be
+    -- a second copy of the workflow's state machine drifting from the first.
+    state text NOT NULL DEFAULT 'ASSIGNMENT_AVAILABLE',
 
     -- §15's classification, recorded and read by nobody in this slice. ADR 0013
     -- detached it from money: `accounting.md` §11.6 charges the owning member
@@ -81,7 +91,7 @@ CREATE TABLE pool.assignment (
     CONSTRAINT assignment_network_known
         CHECK (network IN ('testnet', 'mainnet')),
     CONSTRAINT assignment_state_known
-        CHECK (state IN ('AVAILABLE', 'ACKNOWLEDGED', 'COMPUTING', 'PACKAGING',
+        CHECK (state IN ('ASSIGNMENT_AVAILABLE', 'ACKNOWLEDGED', 'COMPUTING', 'PACKAGING',
                          'UPLOADING', 'PACKAGE_RECEIVED',
                          'PACKAGE_STRUCTURALLY_ACCEPTED',
                          'PACKAGE_DURABLY_ACCEPTED',
@@ -171,6 +181,21 @@ CREATE UNIQUE INDEX assignment_digest_is_unique
     ON pool.assignment (network, assignment_digest);
 
 CREATE INDEX assignment_by_slot ON pool.assignment (network, slot_id, state);
+
+-- §16 invariant 1's occupancy half: "one open assignment occupies exactly one
+-- slot". `migrations/0020` calls its own index "the offer half" and this is the
+-- other one — without it two open assignments could hold one slot, and the
+-- offer index would not notice because an offer closes when the work it led to
+-- ends rather than when the assignment does.
+--
+-- "Open" is everything before the receipt and the terminal branches: §12 makes
+-- `PACKAGE_DURABLY_ACCEPTED` the moment the slot is released, and §9 says the
+-- pool-side states after it do not occupy it.
+CREATE UNIQUE INDEX assignment_one_open_per_slot
+    ON pool.assignment (network, slot_id)
+    WHERE state IN ('ASSIGNMENT_AVAILABLE', 'ACKNOWLEDGED', 'COMPUTING',
+                    'PACKAGING', 'UPLOADING', 'PACKAGE_RECEIVED',
+                    'PACKAGE_STRUCTURALLY_ACCEPTED');
 CREATE INDEX assignment_by_member ON pool.assignment (network, member_id, state);
 
 -- What an assignment is does not change, and where it may go next.
@@ -226,7 +251,7 @@ BEGIN
 
         IF NOT (
             NEW.state IN ('CANCELLED', 'EXPIRED', 'FAILED')
-            OR (OLD.state = 'AVAILABLE'        AND NEW.state = 'ACKNOWLEDGED')
+            OR (OLD.state = 'ASSIGNMENT_AVAILABLE' AND NEW.state = 'ACKNOWLEDGED')
             OR (OLD.state = 'ACKNOWLEDGED'     AND NEW.state = 'COMPUTING')
             OR (OLD.state = 'COMPUTING'        AND NEW.state = 'PACKAGING')
             OR (OLD.state = 'PACKAGING'        AND NEW.state = 'UPLOADING')

@@ -546,6 +546,144 @@ async fn the_package_deadline_reserves_the_pools_blocks() {
 }
 
 #[tokio::test]
+async fn one_slot_holds_one_open_assignment_and_the_state_is_the_wire_contract() {
+    // §16 invariant 1's occupancy half. `migrations/0020` guards the offer
+    // side; this is the assignment side, and without it two open assignments
+    // could hold one slot — the offer index would not notice, because an offer
+    // closes when the work ends rather than when the assignment does.
+    //
+    // Also the spelling: `common.schema.json`'s `AssignmentState` says
+    // `ASSIGNMENT_AVAILABLE`. `AVAILABLE` is the *slot*'s word, and a state on
+    // the wire that no agent can decode is not a state.
+    let Some((db, mut owner)) = migrated("assign_occupancy", "pool_migration").await else {
+        return;
+    };
+    let r = ready(&mut owner, 0x10).await;
+    let mut controller = PgConnection::connect_with(&db.as_role("pool_controller"))
+        .await
+        .unwrap();
+    let id = publish(&mut controller, &r, 0xa0).await.unwrap();
+
+    let state: String =
+        sqlx::query_scalar("SELECT state FROM pool.assignment WHERE assignment_id = $1::uuid")
+            .bind(&id)
+            .fetch_one(&mut controller)
+            .await
+            .unwrap();
+    assert_eq!(
+        state, "ASSIGNMENT_AVAILABLE",
+        "the member-visible state is the one the schema pins"
+    );
+
+    // A second workflow and offer for the same slot: the slot is still busy,
+    // so a second open assignment for it is two claims on one slot.
+    let second = second_admission(&mut owner, &r, 0x10).await;
+    let twice = exec(
+        &mut controller,
+        format!(
+            "INSERT INTO pool.assignment
+                 (network, assignment_id, member_id, worker_id, slot_id, slot_generation,
+                  offer_id, workflow_id, benchmark_id, confirmed_track_id, compute_type,
+                  num_nonces, assignment_digest, identity,
+                  workflow_expiry_block, proof_reserve_blocks, package_due_before_block,
+                  ack_by)
+             VALUES ('testnet', gen_random_uuid(), '{member}'::uuid, '{worker}'::uuid,
+                     '{slot}'::uuid, 1, '{offer}'::uuid, '{workflow}', '{benchmark}',
+                     'n_nodes=100', 'aws_t4g', 512,
+                     decode(repeat('a1', 32), 'hex'), '{{}}'::jsonb,
+                     220, 10, 210, now() + interval '60 seconds')",
+            member = r.member,
+            worker = r.worker,
+            slot = r.slot,
+            offer = second.offer,
+            workflow = second.workflow,
+            benchmark = second.benchmark
+        ),
+    )
+    .await;
+    assert!(
+        twice.is_err(),
+        "one slot holds one open assignment (§16 invariant 1)"
+    );
+}
+
+/// A second admitted offer and confirmed workflow for the *same* slot, so a
+/// second assignment can be attempted against it.
+async fn second_admission(owner: &mut PgConnection, r: &Ready, tag: u8) -> Ready {
+    // The first offer closes, which is what `migrations/0020` lets an admitted
+    // one do — and is exactly the gap: an offer closes when the work it led to
+    // ends, so a slot can take a new offer while the previous assignment is
+    // still open. The offer index will not notice; the assignment index must.
+    exec(
+        owner,
+        format!(
+            "UPDATE pool.capacity_offer SET state = 'CLOSED' WHERE offer_id = '{}'::uuid",
+            r.offer
+        ),
+    )
+    .await
+    .unwrap();
+
+    let offer: String = sqlx::query_scalar(
+        "INSERT INTO pool.capacity_offer
+             (network, worker_id, offer_id, slot_id, slot_generation, spec_digest,
+              state, offer_sha256)
+         VALUES ('testnet', $1::uuid, gen_random_uuid(), $2::uuid, 1, $3, 'RECEIVED', $4)
+         RETURNING offer_id::text",
+    )
+    .bind(&r.worker)
+    .bind(&r.slot)
+    .bind([tag; 32].as_slice())
+    .bind(SHA.as_slice())
+    .fetch_one(&mut *owner)
+    .await
+    .unwrap();
+    for state in ["PENDING", "ADMITTED"] {
+        let lease = if state == "PENDING" {
+            ", lease_expires_at = now() + interval '90 seconds'"
+        } else {
+            ""
+        };
+        exec(
+            owner,
+            format!(
+                "UPDATE pool.capacity_offer SET state = '{state}'{lease}
+                  WHERE offer_id = '{offer}'::uuid"
+            ),
+        )
+        .await
+        .unwrap();
+    }
+
+    let workflow = format!("wf-{tag:02x}-second");
+    let benchmark = format!("bench-{tag:02x}-second");
+    exec(
+        owner,
+        format!(
+            "INSERT INTO pool.workflow
+                 (network, workflow_id, state, owner_kind, owner_id,
+                  unverified_from_block, benchmark_id, block_started,
+                  confirmed_track_id, confirmed_settings, confirmed_num_nonces,
+                  precommit_confirmed_block)
+             VALUES ('testnet', '{workflow}', 'PRECOMMIT_CONFIRMED', 'MEMBER', '{}',
+                     100, '{benchmark}', 100, 'n_nodes=100', '{{}}'::jsonb, 512, 101)",
+            r.member
+        ),
+    )
+    .await
+    .unwrap();
+
+    Ready {
+        member: r.member.clone(),
+        worker: r.worker.clone(),
+        slot: r.slot.clone(),
+        offer,
+        workflow,
+        benchmark,
+    }
+}
+
+#[tokio::test]
 async fn an_assignment_climbs_its_ladder_and_stops_at_the_receipt() {
     // §9's ladder, and §12's receipt: `PACKAGE_DURABLY_ACCEPTED` releases the
     // slot and the retention obligation, and the pool-side TIG states after it

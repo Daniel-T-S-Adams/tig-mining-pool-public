@@ -58,7 +58,7 @@ The last of these stopped being hypothetical. `accounting.md` §8.4 spreads a
 charge the member's own reservation does not cover across the other members
 who earned in that round (ADR 0014), which is a member-on-member loss channel
 the design did not previously have. The leverage is stated in §2.3's table and
-`member_attack_model.md` M20, and the control is the multiplier policy rather
+`member_attack_model.md` M23, and the control is the multiplier policy rather
 than anything in this document: the channel only opens below `10_000` bps.
 
 Also assume ordinary process crashes, lost responses, database or object-store

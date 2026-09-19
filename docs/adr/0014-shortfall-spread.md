@@ -194,7 +194,7 @@ pool chose.
 `security.md` §2.1 already assumed a member would "try to cause another member
 to be charged with its failure". This decision is what makes that possible,
 and both threat models record it — §2.3's table and
-`member_attack_model.md` M20, which also notes it amplifies M18's coordinated
+`member_attack_model.md` M23, which also notes it amplifies M18's coordinated
 accounts.
 
 **Carry the remainder into the next round.** Rejected as the thing §10 rule 7

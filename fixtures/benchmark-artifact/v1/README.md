@@ -147,10 +147,20 @@ Recorded honestly rather than invented:
    pairwise fold exercises promotion at two levels; TIG confirmed the
    sampled-nonce proofs and activated both benchmarks, which requires every
    branch over the promoted tree to resolve to the committed root.
-5. **Published chargeable reason codes.** `member_protocol.md` §15 says only
-   *published* chargeable tier-failure reason codes increment `f`; that list
-   does not exist yet. `chargeable_tier_failure` values in `expected.json`
-   assume the structural member faults above are on it.
+5. **Published chargeable reason codes — the gate is gone (ADR 0013).**
+   `member_protocol.md` §15 used to say only *published* chargeable
+   tier-failure reason codes increment `f`, and this question recorded that
+   the list did not exist yet. ADR 0013 removed that gate: every chargeable
+   failure increments `f` whatever reason code it carries, because a charge no
+   longer depends on cause.
+
+   These cases are unaffected in substance. `chargeable_tier_failure` values
+   in `expected.json` assert the structural member-fault classification, which
+   is unchanged; what has gone is the published-list condition they were
+   waiting on, so read them as asserting the classification alone. `v1` stays
+   immutable and needs no correction for this — unlike
+   `fixtures/collateral-tier/v1`, whose open question 0a records cases that
+   are now wrong rather than merely differently gated.
 6. **`min_verification_quality = 40`** and the sampled nonce set `{1, 4, 6}`
    are fixture inventions standing in for TIG-published values.
 7. **Bundle-average rounding** (`average_quality_by_bundle`) is not pinned by

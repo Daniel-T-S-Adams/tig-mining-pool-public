@@ -1220,8 +1220,8 @@ unusable package, TIG solution-verification failure, a benchmark with zero
 bundles meeting TIG's minimum verification quality, and a benchmark with a
 successfully arbitrated report against it. The third is a capacity/economic
 failure, not an allegation of fraud; the fourth is the method-loss case and
-carries the penalty term as well as the fee. All four increment `f`. Slow but eventually
-correct work is not charged; it is handled by the round
+carries the penalty term as well as the fee. All four increment `f`. Slow but
+eventually correct work is not charged; it is handled by the round
 `unverified_exposure > verified_exposure` tier-removal rule.
 
 For tier `k`, if the round's chargeable failure count `f > k`, remove the tier

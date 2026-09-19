@@ -1090,9 +1090,17 @@ against a benchmark can still arrive until the end of round
 that unit as rounds while its value stays live configuration.
 
 On observing a report against a member-owned benchmark, the pool freezes that
-benchmark's reserved method amount, holding it against the reported outcome
-instead of releasing it when the benchmark would otherwise stop being able to
-generate a penalty.
+benchmark's **whole reservation** — the scaled method portion and the fee
+portion together — holding it against the reported outcome instead of
+releasing it when the benchmark would otherwise stop being able to generate a
+penalty.
+
+Both portions, because a successfully arbitrated report is charged
+`P * min(R, B) + F`. Freezing only the method portion would leave §11.2's
+bound — a charge reaches only encumbered balance — under-charging by exactly
+one fee, which is the same gap §11.4 closes by holding `F` to terminality
+rather than releasing it at verification. The freeze and the reserve now cover
+the same thing.
 
 **When the arbitration should be readable.** `tig_integration.md` §14.2
 records that an arbitration for a benchmark from round `R` is published by the
@@ -1159,8 +1167,8 @@ charged nothing at all — the fee term applies only where the benchmark
 produced nothing, which is the table's third branch.
 
 Settling a report is not the same as releasing the reservation. The freeze
-lifts, but the method portion goes on being held under §11.4's ordinary
-condition — until the benchmark can no longer generate a
+lifts, but the reservation goes on being held under §11.4's ordinary
+condition — both portions, until the benchmark can no longer generate a
 method-verification penalty and *every* report and arbitration against it is
 terminal. A benchmark that survives one report is still reportable, and a
 second report may already be open, so releasing collateral on the first
@@ -1203,9 +1211,11 @@ loss reserve. §8.6 sweeps the whole batch out of member custody under the
 charge decision's single identifier, and §13 item 12 counts what is charged but not yet
 swept as a named margin term — both of which need this credit side to exist
 before they can be computed. V0 chargeable failures are an abandoned or
-unusable package, TIG solution-verification failure, and a benchmark with zero
-bundles meeting TIG's minimum verification quality. The last outcome is a
-capacity/economic failure, not an allegation of fraud. Slow but eventually
+unusable package, TIG solution-verification failure, a benchmark with zero
+bundles meeting TIG's minimum verification quality, and a benchmark with a
+successfully arbitrated report against it. The third is a capacity/economic
+failure, not an allegation of fraud; the fourth is the method-loss case and
+carries the penalty term as well as the fee. All four increment `f`. Slow but eventually
 correct work is not charged; it is handled by the round
 `unverified_exposure > verified_exposure` tier-removal rule.
 

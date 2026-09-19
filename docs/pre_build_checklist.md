@@ -484,10 +484,17 @@ Measure and record (all consolidated in
 - [x] throughput lost to each invalid-work path and whether the proposed
   failure charge `X` makes repeated abuse uneconomic; and
   — PR #30 and [spike report §5.9](protocol_spike_report.md), which
-  parameterized the answer on `X` as an open policy value. **ADR 0013 closed
-  it**: the charge is the benchmark's own precommit fee, which is far above
-  the ~0.001–0.01 TIG the spike found sufficient, so §5.9's conclusion holds
-  at the settled value rather than a hypothetical one.
+  parameterized the answer on `X` as an open policy value and measured a
+  ≥2000× margin at its `X = 2 TIG` stand-in.
+  — **ADR 0013 closed `X` and §5.9's conclusion does not survive it.** The
+  charge is now the benchmark's own precommit fee, and §5.9 measured the
+  pool's direct cash loss per failure as *that same fee* — 0.001 TIG at spike
+  scale. The margin is therefore ~1×, not ≥2000×: a member who wastes a
+  benchmark reimburses the pool exactly and pays nothing beyond it, so the
+  charge makes abuse cash-neutral rather than uneconomic. Deterrence now rests
+  entirely on the tier mechanism — `f > k` removal plus non-refundable `J[k]`
+  re-entry — which is why `J[k]` being unset is load-bearing rather than
+  cosmetic. **This item is reopened**, and issue #56 carries it.
 - [x] storage and bandwidth projections at the intended initial pool size.
   — [spike report §6](protocol_spike_report.md)
 

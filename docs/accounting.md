@@ -987,10 +987,14 @@ What §11.4 does not do is enlarge an existing reservation after the fact —
 neither recognition path into the balance, §11.2's transfer or §8.4's
 settlement, retroactively increases one.
 
-So a price rise produces a charge larger than the encumbered amount, exactly
-as a multiplier below `10_000` bps does. Where that excess comes from is not
-settled here: §10 rule 7 forbids charging other members or a future block for
-a shortfall, and issue #56 owns that rule.
+So a price rise makes the evidenced amount larger than what is encumbered,
+exactly as a multiplier below `10_000` bps does. **The posted batch is still
+bounded by the encumbrance**: §11.2 and §11.7 both hold, so a charge debits
+only encumbered balance and can never reach value the member was free to
+withdraw. The excess is not a larger debit against the balance; it is an
+amount the reservation does not cover, and where it comes from is not settled
+here. §10 rule 7 forbids charging other members or a future block for a
+shortfall, and issue #56 owns that rule.
 
 Should either premise fail, this is the section to revisit, and the
 mechanism to add is a buffer or an additional-collateral call — never a
@@ -1050,11 +1054,13 @@ be discovered:
   covers the charge exactly, which is why §11.4 holds the fee portion to
   terminality rather than releasing it at verification.
 
-  **What happens to the excess is not yet specified.** §10 rule 7 currently
-  forbids the obvious answer by name — "never charge other members or a future
-  block silently for the shortfall" — and issue #56 owns that rule and the
-  decision replacing it. Until then this section states the liability without
-  stating its recovery, and no member is exposed to the gap because nothing
+  **What happens to the excess is not yet specified**, and the posted batch
+  does not reach for it: §11.2 and §11.7 bound a charge to encumbered balance,
+  so the debit stops at the reservation whatever the evidenced amount. §10
+  rule 7 forbids the obvious recovery by name — "never charge other members or
+  a future block silently for the shortfall" — and issue #56 owns that rule
+  and the decision replacing it. Until then this section states the liability
+  without stating its recovery, and no member is exposed because nothing
   charges anyone before slice 8.
 - **There is no in-system appeal.** The evidence, attribution and appeal
   process this section previously required has nothing left to decide. A

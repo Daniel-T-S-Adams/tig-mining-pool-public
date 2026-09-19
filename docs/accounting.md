@@ -1499,10 +1499,12 @@ round, and that subtlety survives the simplification because it was never
 about maturity. A benchmark's lifespan is measured in blocks while a round is
 far longer, so a benchmark started before a round boundary earns qualifiers
 attributed after it. `tig_integration.md` §14.2's `?round=` selects by the
-*benchmark's* round, so a round's earnings are settleable only when every
-benchmark whose qualifiers were attributed in that round has a closed
-reporting window and terminal reports — not when the earning round's own
-window closes.
+*benchmark's* round, so a round's earnings are settleable only when two sets
+of benchmarks have a closed reporting window and terminal reports: every one
+whose qualifiers were attributed in that round, and every one whose own round
+it is. §8.4 states the condition and why it needs both — the first set bounds
+what the round pays out, the second bounds what §8.4's deduction must carry.
+Neither is the earning round's own window closing.
 
 The bound is not a schedule. `tig_integration.md` §14.2 says when the answer
 should be readable; a round still unsettled past it is an alertable
@@ -1606,10 +1608,14 @@ Two separate gates, because ADR 0008 separated the two events.
 - every block batch in the round is posted and no unresolved payout suspense
   remains for that round;
 - the complete round is reconciled to TIG's round data;
-- **every charge against that round is settled** — each benchmark whose
-  qualifiers were attributed in it has a closed reporting window and terminal
-  reports (§8.4), so nothing credited can still be reached by a penalty
-  against its own round;
+- **every charge against that round is settled** — both of §8.4's sets have a
+  closed reporting window and terminal reports: every benchmark whose
+  qualifiers were attributed in the round, and every benchmark whose own round
+  it is. The second set is required because §8.4 keys an uncovered remainder
+  to the benchmark's own round, and a benchmark created in the round that
+  earned only after the boundary, or earned nothing, is in no other set. With
+  both, nothing credited can still be reached by a charge keyed to this
+  round;
 - the exact corresponding TIG payment is finalized and reconciled in the
   reward wallet (§8.3); and
 - that round's §8.3a **member leg** has completed from its own finalized token
@@ -1866,10 +1872,11 @@ Daily reconciliation compares:
   funds, and each member's rolling seven-day withdrawn total against ADR
   0009's weekly cap, so an automated path that has stopped binding is seen;
 - each settled round's shortfall deduction (§8.4) against the charges that
-  produced it: the shares must sum to `S`, `S` must equal the uncovered
-  remainders of that round's own benchmarks, and any part that fell on the
-  pool must appear against fee revenue or operating funds rather than
-  unexplained; and
+  produced it: the shares must sum to `min(S, E[total])`, `S` must equal the
+  uncovered remainders of that round's own benchmarks, and `S - min(S,
+  E[total])` must appear against that round's fee revenue or operating funds
+  rather than unexplained. A round whose shares sum to `S` when `S` exceeds
+  its earnings has dropped the cap and driven pending balances negative; and
 - ledger cached balances versus a journal rebuild.
 
 ## 14. Owner decisions required

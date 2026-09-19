@@ -183,6 +183,147 @@ async fn a_reconfiguration_names_the_current_generation_and_increments_it() {
 }
 
 #[tokio::test]
+async fn the_generation_pointer_moves_under_the_same_rules_as_the_row() {
+    // The half this schema first left open: §2's "atomically increments the
+    // generation" and "forbidden while an offer, assignment, or upload is
+    // open" were enforced on the generation INSERT and not on the `pool.slot`
+    // UPDATE that points at it. A slot could be moved to any generation at any
+    // time — including while RESERVED, which leaves it at a generation its
+    // admitted offer was never qualified under.
+    let Some((db, mut api)) = migrated("slot_pointer", "pool_api").await else {
+        return;
+    };
+    let w = worker(&mut api).await;
+    let slot = registered(&mut api, &w, "cpu-0", 0x01).await;
+    generation(&mut api, &slot, 2, Some(1), 0x02).await.unwrap();
+    generation(&mut api, &slot, 3, Some(1), 0x03)
+        .await
+        .unwrap_err();
+
+    let jumped = exec(
+        &mut api,
+        format!("UPDATE pool.slot SET generation = 3 WHERE slot_id = '{slot}'::uuid"),
+    )
+    .await
+    .expect_err("a slot moves to the next generation, not past one");
+    assert!(
+        format!("{jumped}").contains("not from"),
+        "expected the pointer guard, got: {jumped}"
+    );
+
+    let mut controller = PgConnection::connect_with(&db.as_role("pool_controller"))
+        .await
+        .unwrap();
+    exec(
+        &mut controller,
+        format!("UPDATE pool.slot SET state = 'RESERVED' WHERE slot_id = '{slot}'::uuid"),
+    )
+    .await
+    .unwrap();
+
+    let while_working = exec(
+        &mut api,
+        format!("UPDATE pool.slot SET generation = 2 WHERE slot_id = '{slot}'::uuid"),
+    )
+    .await
+    .expect_err("a reserved slot does not change generation");
+    assert!(
+        format!("{while_working}").contains("forbidden while the slot is"),
+        "expected the pointer guard, got: {while_working}"
+    );
+
+    exec(
+        &mut controller,
+        format!("UPDATE pool.slot SET state = 'AVAILABLE' WHERE slot_id = '{slot}'::uuid"),
+    )
+    .await
+    .unwrap();
+    exec(
+        &mut api,
+        format!("UPDATE pool.slot SET generation = 2 WHERE slot_id = '{slot}'::uuid"),
+    )
+    .await
+    .expect("an available slot moves to the generation it registered");
+}
+
+#[tokio::test]
+async fn a_qualification_task_lives_fifteen_minutes() {
+    // §6: "Tasks expire after 15 minutes", bounded by the row rather than by
+    // whoever writes the INSERT — the same rule `migrations/0018` enforces for
+    // a ticket.
+    let Some((_db, mut api)) = migrated("slot_task_life", "pool_api").await else {
+        return;
+    };
+    let w = worker(&mut api).await;
+    let slot = registered(&mut api, &w, "cpu-0", 0x01).await;
+
+    let issue = |expires: &str| {
+        format!(
+            "INSERT INTO pool.slot_qualification
+                 (network, qualification_id, slot_id, generation, spec_digest,
+                  fixture_id, task_expires_at)
+             VALUES ('testnet', gen_random_uuid(), '{slot}'::uuid, 1,
+                     decode(repeat('01', 32), 'hex'), 'fx-1', now() + interval '{expires}')"
+        )
+    };
+
+    assert!(
+        exec(&mut api, issue("1 hour")).await.is_err(),
+        "fifteen minutes is the life of a task"
+    );
+    assert!(
+        exec(&mut api, issue("-1 minute")).await.is_err(),
+        "and a task that has already expired was never issuable"
+    );
+    exec(&mut api, issue("14 minutes"))
+        .await
+        .expect("a task inside the bound is issued");
+
+    // And a decision arrives from a result submitted before the deadline. The
+    // exception is the decision that is *about* the deadline.
+    let expiring: String = sqlx::query_scalar(
+        "INSERT INTO pool.slot_qualification
+             (network, qualification_id, slot_id, generation, spec_digest,
+              fixture_id, created_at, task_expires_at)
+         VALUES ('testnet', gen_random_uuid(), $1::uuid, 1, $2, 'fx-1',
+                 now() - interval '30 minutes', now() - interval '20 minutes')
+         RETURNING qualification_id::text",
+    )
+    .bind(&slot)
+    .bind([0x01_u8; 32].as_slice())
+    .fetch_one(&mut api)
+    .await
+    .unwrap();
+
+    let late_pass = exec(
+        &mut api,
+        format!(
+            "UPDATE pool.slot_qualification
+                SET state = 'QUALIFIED', decided_at = now(),
+                    qualification_result_id = gen_random_uuid(),
+                    result_sha256 = decode(repeat('7e', 32), 'hex')
+              WHERE qualification_id = '{expiring}'::uuid"
+        ),
+    )
+    .await;
+    assert!(
+        late_pass.is_err(),
+        "a task that expired is not passed twenty minutes later"
+    );
+
+    exec(
+        &mut api,
+        format!(
+            "UPDATE pool.slot_qualification
+                SET state = 'FAILED', decided_at = now(), failure_reason = 'EXPIRED'
+              WHERE qualification_id = '{expiring}'::uuid"
+        ),
+    )
+    .await
+    .expect("the one decision that is about the deadline may be recorded after it");
+}
+
+#[tokio::test]
 async fn two_generations_cannot_claim_one_spec_digest() {
     // §6 binds the digest to `[worker_id, slot_id, slot_generation, compute,
     // runtime_inventory]`, so two generations sharing one is a contradiction:

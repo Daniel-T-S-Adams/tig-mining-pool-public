@@ -357,6 +357,24 @@ CREATE TABLE pool.slot_qualification (
                AND (result_sha256 IS NULL OR length(result_sha256) = 32)),
     CONSTRAINT qualification_fixture_not_blank
         CHECK (length(trim(fixture_id)) > 0),
+    -- §6: "Tasks expire after 15 minutes." Bounded here rather than left to
+    -- whoever writes the INSERT, exactly as `migrations/0018` bounds §3.1's
+    -- identical fifteen minutes for a ticket.
+    CONSTRAINT qualification_task_lifetime_is_bounded
+        CHECK (task_expires_at > created_at
+               AND task_expires_at <= created_at + interval '15 minutes'),
+    -- And a decision comes from a result submitted before the task expired.
+    -- `EXPIRED` is the exception it names: that decision is *about* the
+    -- deadline, so it is the one that may be recorded after it.
+    -- `COALESCE`, not a bare comparison: a CHECK passes when its expression is
+    -- TRUE *or NULL*, so `failure_reason = 'EXPIRED'` on a QUALIFIED row —
+    -- where the reason is NULL — made the whole disjunction NULL and let a
+    -- task be passed after it expired. Three-valued logic turns an omitted
+    -- value into permission.
+    CONSTRAINT qualification_is_decided_before_it_expires
+        CHECK (decided_at IS NULL
+               OR decided_at <= task_expires_at
+               OR COALESCE(failure_reason, '') = 'EXPIRED'),
     -- The generation is the thing being qualified, so it must exist. §16
     -- invariant 2 is that a slot offers only with "a successful qualification
     -- for its exact current generation".
@@ -477,9 +495,28 @@ BEGIN
             USING ERRCODE = 'raise_exception';
     END IF;
 
-    IF NEW.generation < OLD.generation THEN
-        RAISE EXCEPTION 'a slot generation never goes backwards'
-            USING ERRCODE = 'raise_exception';
+    -- The pointer half of a reconfiguration, guarded the same way the row half
+    -- is. §2 has a registration "atomically increment the generation" and
+    -- forbids reconfiguration "while an offer, assignment, or upload is open" —
+    -- and both rules were enforced only on the `pool.slot_generation` INSERT,
+    -- so this UPDATE could move the slot to any generation, at any time,
+    -- including while it was RESERVED. A slot at a generation its admitted
+    -- offer was not qualified under is §16 invariant 2 broken by a single
+    -- statement.
+    IF NEW.generation IS DISTINCT FROM OLD.generation THEN
+        IF NEW.generation <> OLD.generation + 1 THEN
+            RAISE EXCEPTION
+                'a slot moves to the next generation, not from % to % (member_protocol.md §2)',
+                OLD.generation, NEW.generation
+                USING ERRCODE = 'raise_exception';
+        END IF;
+
+        IF OLD.state <> 'AVAILABLE' OR NEW.state <> 'AVAILABLE' THEN
+            RAISE EXCEPTION
+                'reconfiguration is forbidden while the slot is % (member_protocol.md §2)',
+                CASE WHEN OLD.state <> 'AVAILABLE' THEN OLD.state ELSE NEW.state END
+                USING ERRCODE = 'raise_exception';
+        END IF;
     END IF;
 
     IF NEW.state <> OLD.state THEN

@@ -314,8 +314,9 @@ LIABILITY:MEMBER_WITHDRAWAL_PENDING:<member_id>:<generation>
 LIABILITY:PAYOUT_SUSPENSE:<block_id>
 REVENUE:POOL_FEE
 REVENUE:TIER_JOINING_FEES
-REVENUE:FAILURE_CHARGES                        §11.6's chargeable `X`
-EQUITY:SECURITY_LOSS_RESERVE               finalized slashes; restricted use
+REVENUE:FAILURE_CHARGES                    §11.6's charge, fee portion
+EQUITY:SECURITY_LOSS_RESERVE               §11.6's charge, penalty portion;
+                                           restricted use
 EXPENSE:ACCOUNTING_LOSS                    explicit approved correction only
 ```
 
@@ -531,18 +532,23 @@ The causes, each with its own cause identifier:
 | Cause | Identifier |
 |---|---|
 | §11.3's tier joining fee | the tier activation |
-| §11.6's chargeable failure charge `X` | the charge decision |
-| A finalized slash (§11.2) | the finalized slash |
+| §11.6's charge, penalty portion and fee portion alike | the charge decision |
 | The pool's share of a §7 suspense resolution — the §5 deferred fee, or a full award | `(network, block_id, resolution_generation)` |
 | A §10 correction that moves member value to a pool account | the correction ID |
 
-`sweep_cause_id` in §9 is whichever of these applies. The
-`X` charge is listed separately from a slash on purpose: §11.6 and
-`mining_system.md` §8 both refuse to describe a chargeable tier failure as
-fraud, and sweeping it under a slash's identifier would record it as one. Its
-credit side is `REVENUE:FAILURE_CHARGES` (§8), distinct from the pool fee and
-from the loss reserve, so §13 item 12's margin term for un-swept charges is
-computable from the ledger rather than inferred.
+`sweep_cause_id` in §9 is whichever of these applies. **A charge and a slash
+are no longer two causes**, because under §11.6 they are no longer two events:
+one table produces one batch, whose penalty portion credits the loss reserve
+and whose fee portion credits `REVENUE:FAILURE_CHARGES`. Listing both a charge
+decision and a finalized slash would put two identifiers on one batch, and
+§13 item 13 allows one sweep per cause precisely so a retry after an ambiguous
+broadcast cannot sweep the same member-custody value twice under the other
+name.
+
+The two credit accounts stay distinct so §13 item 12's margin term for
+un-swept charges is computable from the ledger rather than inferred, and so
+the pool's recorded revenue never includes TIG value it lost. What does not
+follow from the split is a second cause.
 
 These are the **only** transfers out of member custody other than a member
 withdrawal, and their destination is allow-listed to operating custody. There
@@ -687,26 +693,44 @@ a reconciled round. Neither may record the other kind of value.
 
 The balance remains completely separate from delegation and from pool
 operating funds. They cannot pay another member or silently
-cover a pool error. A proposed slash first freezes the disputed amount without
-moving the member liability, notifies the member, and records the evidence and
-appeal deadline. **The notification half of that has no delivery channel**:
-ADR 0011 makes the member's wallet the account, so the pool holds no email,
-phone or address. Issue #56 owns the fix. Nothing charges a member before
-slice 8, so no member is exposed while it stands open. A final slash is a new audited journal batch authorized only
-by the published member-fault policy, with benchmark evidence, amount, policy
-version, actor, and appeal result:
+cover a pool error. A proposed charge first freezes the evidenced amount
+without moving the member liability, and records the evidence and the outcome
+it rests on. There is no notice to deliver and no appeal deadline to run:
+§11.6 makes a charge independent of fault, so there is nothing for the member
+to contest in-system, and ADR 0011 leaves the pool no channel to notify them
+on in any case. A member who believes a charge was wrong contacts the pool
+out of band. A final charge is a new audited journal batch, with benchmark
+evidence, amount, policy version and actor:
 
 ```text
 Debit   LIABILITY:MEMBER_BALANCE:<member>
-Credit  EQUITY:SECURITY_LOSS_RESERVE
+Credit  EQUITY:SECURITY_LOSS_RESERVE        the penalty portion
+Credit  REVENUE:FAILURE_CHARGES             the fee portion
 ```
 
-A slash reaches only encumbered balance: the frozen amount established by
+**One charge, one cause identifier, two credit lines.** §11.6's table produces
+a single amount with two components, and they replace different things: the
+penalty portion replaces TIG value the pool lost, which is what the loss
+reserve records, and the fee portion reimburses an outlay the pool made, which
+is what `REVENUE:FAILURE_CHARGES` records. Splitting the credit keeps both
+accounts meaning what they meant.
+
+What must not split is the **cause**. §8.6 sweeps under one identifier — the
+charge decision — for the whole batch, because §13 item 13 allows one sweep
+per cause and a retry must not be able to sweep the same value twice. Treating
+one charge as two causes would also make §13 item 12's charged-but-unswept
+margin uncomputable from the ledger. Either component may be zero: a benchmark
+that produced nothing is charged only the fee portion.
+
+A charge reaches only encumbered balance: the frozen amount established by
 §11.6 against a specific reservation. It can never take unencumbered balance,
 which is the member's to withdraw.
 
-The reserve may reimburse documented member-caused TIG fees, penalties, or
-accounting losses. It is not ordinary pool-fee revenue, cannot fund member
+The reserve may reimburse documented TIG fees, penalties, or accounting
+losses arising from a member-owned benchmark, whatever caused them — §11.6
+charges without attributing a cause, so restricting the reserve to
+*member-caused* losses would leave a pool-caused penalty funding a reserve
+with no authority to absorb it. It is not ordinary pool-fee revenue, cannot fund member
 payouts, and cannot be distributed to an operator merely because a slash
 occurred. Any later use is another approved, auditable batch.
 
@@ -750,7 +774,7 @@ Tier removal creates no refund. A removed member may immediately buy a tier by
 paying its then-current `J[k]` again; there is no cooldown or tier-admission
 queue. Every purchase has a new idempotent fee batch and membership period.
 Rejoining does not release or reset outstanding benchmarks, reservations,
-fines, appeals, pending withdrawals, or method-verification exposure.
+fines, pending withdrawals, or method-verification exposure.
 
 ### 11.4 Dynamic per-assignment collateral
 
@@ -764,7 +788,6 @@ For decision snapshot `s` and proposed track settings `t`, define:
 B[t]       = proposed num_bundles for track t
 P[s]       = live config.reports.penalty_amount at snapshot s
 F[s,t]     = exact precommit fee implied by live challenge config and B[t]
-X[policy]  = charge reserved for one chargeable failed benchmark
 M_bps[m]   = member m's collateral multiplier in basis points,
              integer, 1..=10_000, default 10_000 (ADR 0010)
 
@@ -774,7 +797,7 @@ scaled_method_reserve[m,s,t] =
     ceil(method_reserve[s,t] * M_bps[m] / 10_000)
 
 assignment_reserve[m,s,t] =
-    scaled_method_reserve[m,s,t] + F[s,t] + X[policy]
+    scaled_method_reserve[m,s,t] + F[s,t]
 
 precommit_reserve = max(assignment_reserve[m,s,t] for every proposed track t)
 ```
@@ -812,10 +835,17 @@ members; a reserve rounds up because a remainder left outside it is exposure
 the pool carries uncollateralized. The scaled reserve is therefore never one
 atom short of the policy.
 
+**The fee appears once, not twice.** This reserve previously carried a separate
+`X[policy]` term for the failure charge alongside `F`. §11.6 now derives that
+charge from the benchmark's own fee, so the two were the same money described
+twice: a member would have held two fees to begin work while never being able
+to lose more than one. One `F` does both jobs — it is the fee the pool fronts,
+and it is what the member owes if they waste it.
+
 `M_bps[m]` is set by the pool, never by the member, and is versioned policy in
 the same append-only form as §5's fee policy. It scales the method reserve
-**only**: `F` is an outlay the pool certainly makes and `X` is a charge it has
-already decided to levy, so neither is a risk that trust can discount. The
+**only**: `F` is an outlay the pool certainly makes, so it is not a risk that
+trust can discount. The
 value is read when the assignment reserve is computed and fixed into that
 reservation; a later change never reaches an open reservation, in either
 direction. ADR 0010 records the decision, what the uncovered
@@ -829,7 +859,7 @@ TIG confirms the selected track and exact `fee_paid`, the reservation may be
 reduced to that track's exact requirement, never increased by silently applying
 a later pool policy.
 
-For illustration only, if `P = 10 TIG` and the fee and `X` are omitted,
+For illustration only, if `P = 10 TIG` and the fee term is omitted,
 the method reserve is `40 TIG` for 4 bundles, `100 TIG` for 10 bundles, and `250
 TIG` for 25 bundles. The implementation always reads `P`, fees, bundle counts,
 and applicable configuration from the block-consistent decision snapshot; none
@@ -856,12 +886,19 @@ to exclude and no draw order to apply — a distinction ADR 0008 needed and
 ADR 0012's settlement timing removes.
 
 One reservation remains attached to one member-owned benchmark even after the
-member's compute slot is released. Its method portion remains reserved until
-the benchmark can no longer generate a method-verification penalty and every
-report/arbitration is terminal. Its `X` portion releases when TIG verifies the
-benchmark without a chargeable tier failure, or is frozen and charged when a
-member-attributable failure is established. This prevents the same TIG from
-collateralizing several simultaneous risks.
+member's compute slot is released, and **both of its portions are held to the
+same condition**: until the benchmark can no longer generate a
+method-verification penalty and every report and arbitration against it is
+terminal. This prevents the same TIG from collateralizing several
+simultaneous risks.
+
+The fee portion `F` is held that long deliberately, and not only until TIG
+verifies the benchmark. §11.6 charges `P * min(R, B) + F` on a successfully
+reported benchmark, so releasing `F` at verification would leave a reservation
+of `P * B` facing a charge of `P * B + F` — short by a fee even at
+`10_000` bps, where nothing is supposed to be short. Holding both portions to
+terminality is what makes the reserve exactly cover the charge at full
+multiplier.
 
 **When that should be observable.** `tig_integration.md` §14.2 records that an
 arbitration for a benchmark from round `R` is published by the end of round
@@ -946,11 +983,21 @@ knowingly rather than derived from them:
   property of the protocol, and nothing in the pinned source guarantees it.
 
 If `penalty_amount` rose with less notice than the horizon of the benchmarks
-then open, the pool absorbs the difference between what was reserved and what
-is charged. It is not recoverable from the member: the reservation is that
-member's whole committed exposure, and §11.4 never increases a reservation
-after the fact — neither recognition path into the balance, §11.2's transfer
-or §8.4's settlement, enlarges one that already exists.
+then open, the charge exceeds what was reserved. The member still owes it:
+under ADR 0013 the reservation is a floor on what they must hold to begin
+work, not a cap on what they owe, and §11.6 charges the evidenced amount.
+What §11.4 does not do is enlarge an existing reservation after the fact —
+neither recognition path into the balance, §11.2's transfer or §8.4's
+settlement, retroactively increases one.
+
+So a price rise makes the evidenced amount larger than what is encumbered,
+exactly as a multiplier below `10_000` bps does. **The posted batch is still
+bounded by the encumbrance**: §11.2 and §11.7 both hold, so a charge debits
+only encumbered balance and can never reach value the member was free to
+withdraw. The excess is not a larger debit against the balance; it is an
+amount the reservation does not cover, and where it comes from is not settled
+here. §10 rule 7 forbids charging other members or a future block for a
+shortfall, and issue #56 owns that rule.
 
 Should either premise fail, this is the section to revisit, and the
 mechanism to add is a buffer or an additional-collateral call — never a
@@ -958,17 +1005,90 @@ retroactive slash.
 
 ### 11.6 Failure charges, method losses, and tier effects
 
-The settled boundaries are:
+**A charge does not depend on fault.** The member who owned the benchmark is
+charged whether the cause was the member, the pool, TIG, or was never
+established. This replaces the fault-attribution boundaries this section
+previously set, under which `POOL`, `TIG` and `UNRESOLVED` attribution each
+slashed zero.
 
-- for method verification/report penalties caused by member-produced data,
-  slash the exact TIG penalty attributed to that benchmark after the evidence
-  and appeal process, up to its reserved method amount;
-- for TIG-verified work that merely earns no qualifiers, charge zero;
-- for zero bundles meeting TIG's minimum verification quality, charge `X`
-  under the tier policy without describing the outcome as fraud;
-- for `POOL`, `TIG`, or `UNRESOLVED` fault attribution, slash zero; and
-- multiple failing benchmarks use their own reservations and batches; one
-  benchmark never consumes another benchmark's reserve silently.
+The charge is the pool's whole loss on that benchmark. It has two parts and
+they come from different places: `tig_integration.md` §14.1's penalty, which
+TIG takes from the pool, and the precommit fee, which the pool spent itself.
+Neither this table nor §14.1 should be read as saying TIG charges a fee — it
+does not.
+
+```text
+the benchmark earned active bundles, and no report against it
+  was successfully arbitrated                              ->  charge 0
+
+the benchmark earned active bundles, and R nonces were
+  successfully arbitrated against it                       ->  charge
+                                                    P * min(R, B) + F
+
+anything else — abandoned, unusable, solution-verification
+  failure, or zero bundles meeting TIG's minimum
+  verification quality                                     ->  charge F
+```
+
+`P` is the live `reports.penalty_amount` at the charge block, `R` and `B` are
+`tig_integration.md` §14.1's distinct arbitrated nonces and bundle count, and
+`F` is that benchmark's own precommit fee. There is no separate `X` policy
+number: the failure charge *is* the fee the benchmark wasted, so a benchmark
+that cost more to start costs more to waste.
+
+The second branch is written with one `P` because a benchmark is usually
+charged once. Where reports arrive in stages it is charged in increments, each
+priced at the `P` live when *it* posts, so the total is the sum of those
+increments rather than a single multiplication — see "The count is cumulative"
+below. The two agree exactly whenever `penalty_amount` does not move between
+charges.
+
+**"Earned active bundles" is not the same as TIG's `Active`.**
+`tig_integration.md` §6 defines `Active` as membership in
+`block.data.active_ids.benchmark`, which a complete benchmark can reach with
+`num_active_bundles = 0`. That benchmark produced nothing the pool can earn
+from, and the list below already counts it as a chargeable failure — so the
+first branch turns on the benchmark having at least one active bundle, not on
+its appearance in the active set. Keying the table on `Active` alone would
+charge nothing for work that returned nothing.
+
+Three consequences of charging without attribution, stated rather than left to
+be discovered:
+
+- **The member owes the full penalty, not the multiplier-scaled part.**
+  ADR 0010's multiplier sets what a member must hold to begin work, not a cap
+  on what they owe. A charge exceeds the reservation in two cases: a
+  multiplier below `10_000` bps, which is deliberate, and a `penalty_amount`
+  rise between the snapshot and the charge block, which §11.5 records the
+  owner choosing to carry. At `10_000` bps with an unchanged price the reserve
+  covers the charge exactly, which is why §11.4 holds the fee portion to
+  terminality rather than releasing it at verification.
+
+  **What happens to the excess is not yet specified**, and the posted batch
+  does not reach for it: §11.2 and §11.7 bound a charge to encumbered balance,
+  so the debit stops at the reservation whatever the evidenced amount. §10
+  rule 7 forbids the obvious recovery by name — "never charge other members or
+  a future block silently for the shortfall" — and issue #56 owns that rule
+  and the decision replacing it. Until then this section states the liability
+  without stating its recovery, and no member is exposed because nothing
+  charges anyone before slice 8.
+- **There is no in-system appeal.** The evidence, attribution and appeal
+  process this section previously required has nothing left to decide. A
+  member who believes they were charged wrongly contacts the pool out of band;
+  a pool investigation that agrees reverses it through §10's correction path.
+  The remedy exists and is deliberately not codified for v0.
+- **`mining_system.md` §10 invariant 7 still holds and is not contradicted.**
+  Artifact loss, corruption, proof construction and proof availability remain
+  the pool's *responsibilities* after durable acceptance. What changes is that
+  the charge no longer follows that responsibility: the pool still owes the
+  member correct handling, and still bears the reputational and operational
+  cost of failing, but the collateral charge is levied regardless. Those are
+  different things and the invariant is about the first.
+
+Two boundaries are unchanged. TIG-verified work that merely earns no
+qualifiers is charged zero — a benchmark that did its job and did not win is
+not a failure. And multiple failing benchmarks use their own reservations and
+batches; one benchmark never consumes another's reserve silently.
 
 **Freeze on report, resolve on arbitration.** A method report is an
 accusation, not a finding: `ArbitrationDetails` resolves to
@@ -980,9 +1100,17 @@ against a benchmark can still arrive until the end of round
 that unit as rounds while its value stays live configuration.
 
 On observing a report against a member-owned benchmark, the pool freezes that
-benchmark's reserved method amount, holding it against the reported outcome
-instead of releasing it when the benchmark would otherwise stop being able to
-generate a penalty.
+benchmark's **whole reservation** — the scaled method portion and the fee
+portion together — holding it against the reported outcome instead of
+releasing it when the benchmark would otherwise stop being able to generate a
+penalty.
+
+Both portions, because a successfully arbitrated report is charged
+`P * min(R, B) + F`. Freezing only the method portion would leave §11.2's
+bound — a charge reaches only encumbered balance — under-charging by exactly
+one fee, which is the same gap §11.4 closes by holding `F` to terminality
+rather than releasing it at verification. The freeze and the reserve now cover
+the same thing.
 
 **When the arbitration should be readable.** `tig_integration.md` §14.2
 records that an arbitration for a benchmark from round `R` is published by the
@@ -1003,8 +1131,8 @@ liquidity and is visible and correctable; releasing early costs the pool money
 and is neither.
 
 The bound also covers **arbitration publication only**. It says nothing about
-the pool's own attribution and appeal process, which §11.6 and
-`mining_system.md` §8 govern, and nothing about when TIG applies a penalty —
+when the pool acts on a published outcome, which §11.6 governs, and nothing
+about when TIG applies a penalty —
 `tig_integration.md` §14.1 cannot exclude a charge block later than the
 arbitration block.
 
@@ -1017,22 +1145,69 @@ exactly what it was before the report. The freeze does not slash, and does not
 act on the member: no suspension, no effect on admission, and no reach beyond
 the reported benchmark's own reservation.
 
-**A `NONREPRODUCIBLE` arbitration does not by itself slash anything.** It is
-the trigger for the ordinary evidence, attribution and appeal process, and the
-outcome of that process decides. The bullets above still govern: a slash
-follows only where the penalty was "caused by member-produced data", and
-`POOL`, `TIG` or `UNRESOLVED` fault attribution slashes zero. A benchmark can
-arbitrate `NONREPRODUCIBLE` for a pool-side reason — `mining_system.md` §8
-names pool-constructed wrong proofs, packages the pool corrupted after durable
-acceptance, and work whose origin was never established — and charging a
-member's deposit for those would invert the rule this section exists to state.
-On `REPRODUCIBLE` or `INCONCLUSIVE`, and on any adverse arbitration not
-attributed to the member, that report is settled and the member is charged
-nothing for it.
+**A `NONREPRODUCIBLE` arbitration is what charges the member**, and nothing
+further decides it. That is the change this section records: the evidence,
+attribution and appeal process this paragraph previously described has been
+removed, so the arbitration outcome is the outcome.
+
+**The count is cumulative; each increment is priced when it posts.** `R` is
+pooled across the benchmark (`tig_integration.md` §14.1), and a benchmark that
+survives one report is still reportable, so a later successful arbitration
+raises `R`. What a charge takes is the *newly counted* nonces at the price
+live when that charge posts:
+
+```text
+counted_so_far = nonces already charged for this benchmark
+delta = min(R_total, B) - counted_so_far
+charge = P[charge block] * delta      + F on the first charge only
+```
+
+**The whole total is never recomputed at a later price.** Doing so would
+re-price nonces an earlier increment already charged, against §11.4's rule
+that a later change never reaches an open reservation and this section's own
+closing rule that a later policy does not change what can be charged for an
+earlier assignment. It would also make the increment *negative* whenever
+`penalty_amount` fell between charges — an amount nothing in §11.7's coverage
+inequality or §13 item 12 can fund.
+
+`delta` cannot be negative: nonces can be reported only once and an
+arbitration is terminal, so `min(R_total, B)` only rises. The fee is charged
+once because the benchmark wasted one fee, not one per report, and charging it
+again would exceed §11.4's reservation, which holds one, and violate §13 item
+19.
+
+**An increment is its own charge decision.** It posts its own batch with its
+own cause identifier, so §11.2's "one charge, one cause identifier" and §13
+item 13's one-sweep-per-cause both hold: what they forbid is two identifiers
+for one batch, not two batches for one benchmark. Each decision is idempotent
+on its own identifier, and the amount is derived from the total observed `R`
+minus what prior decisions on that benchmark already charged — so a retry
+recomputes the same increment rather than adding a second one.
+
+A benchmark can arbitrate `NONREPRODUCIBLE` for a pool-side reason —
+`mining_system.md` §8 names pool-constructed wrong proofs, packages the pool
+corrupted after durable acceptance, and work whose origin was never
+established — and the member is charged for those too. That is the owner's
+decision, and its cost is real: a member can lose collateral for a failure
+they could not have prevented and, after durable acceptance, could not even
+have observed. The remedy is the out-of-band contact above, not a protocol
+state.
+
+On `REPRODUCIBLE` or `INCONCLUSIVE` the member is charged nothing **for that
+report**: those arbitrations levy no penalty, so they add nothing to `R` and
+nothing to the charge.
+
+Whether the benchmark is charged at all is the table's question, not this
+paragraph's. A benchmark that earned active bundles and ends with no
+successfully arbitrated report is charged nothing — branch one. One that ends
+with at least one is charged `P * min(R, B) + F`, the fee included — branch
+two. The fee is not reserved for benchmarks that produced nothing; branch
+three is simply the case where the fee is *all* there is, because no penalty
+term exists without an arbitrated report.
 
 Settling a report is not the same as releasing the reservation. The freeze
-lifts, but the method portion goes on being held under §11.4's ordinary
-condition — until the benchmark can no longer generate a
+lifts, but the reservation goes on being held under §11.4's ordinary
+condition — both portions, until the benchmark can no longer generate a
 method-verification penalty and *every* report and arbitration against it is
 terminal. A benchmark that survives one report is still reportable, and a
 second report may already be open, so releasing collateral on the first
@@ -1048,37 +1223,73 @@ honestly-behaving member exactly where they started — no lost capacity, no
 charge — while each false report still costs its filer a fee. That is judged
 sufficient and no further countermeasure is specified.
 
-A member-level response would not have that property, and is ruled out
-elsewhere: `mining_system.md` §8 holds that an unresolved incident penalizes
-nobody. Bounding a member's total exposure across concurrent work is §11.4's
+A member-level response would not have that property. It is also the wrong
+instrument: this freeze is about not releasing cover while an accusation is
+open, which is a question about the benchmark, not about the member — and
+under §11.6 an unresolved cause no longer changes whether a charge lands, so a
+member-level suspension would be reaching for a judgement the design stopped
+making. Bounding a member's total exposure across concurrent work is §11.4's
 job, through `reserved_exposure`, and does not need this rule to reach further
 than one benchmark.
 
-For every chargeable tier failure attributed to a member, freeze and then
-charge exactly `X` under the assignment's policy version:
+For every chargeable failure, freeze and then charge that benchmark's own
+amount under the table above — the fee alone where it never went active, the
+penalty plus the fee where it was successfully reported:
 
 ```text
 Debit   LIABILITY:MEMBER_BALANCE:<member>
-Credit  REVENUE:FAILURE_CHARGES
+Credit  EQUITY:SECURITY_LOSS_RESERVE        the penalty portion
+Credit  REVENUE:FAILURE_CHARGES             the fee portion
 ```
 
+This is the same batch §11.2 describes, posted here in the section that
+computes it. The split is not cosmetic: crediting the penalty portion to
+revenue would overstate what the pool earned and leave the loss reserve empty
+of the loss it exists to record. Either line may be zero — a benchmark that
+produced nothing is charged only the fee portion.
+
 `REVENUE:FAILURE_CHARGES` is its own account, not the pool fee and not the
-loss reserve. §8.6 sweeps its tokens out of member custody under the charge
-decision's own identifier, and §13 item 12 counts what is charged but not yet
+loss reserve. §8.6 sweeps the whole batch out of member custody under the
+charge decision's single identifier, and §13 item 12 counts what is charged but not yet
 swept as a named margin term — both of which need this credit side to exist
-before they can be computed. V0 chargeable tier
-failures are an abandoned or unusable package, TIG solution-verification
-failure, and a benchmark with zero bundles meeting TIG's minimum verification
-quality. The last outcome is a capacity/economic failure, not an allegation of
-fraud. Slow but eventually correct work is not charged `X`; it is handled by
-the round `unverified_exposure > verified_exposure` tier-removal rule.
+before they can be computed. **The table above decides which benchmarks are
+charged, and it is the authority.** Its branches are exhaustive by
+construction: a benchmark either earned active bundles and was reported, or
+earned them and was not, or did neither. Every benchmark reaching a terminal
+outcome lands in one of the three.
+
+The cases met most often in v0 are an abandoned or unusable package, TIG
+solution-verification failure, a benchmark with zero bundles meeting TIG's
+minimum verification quality, and a benchmark with a successfully arbitrated
+report against it. The third is a capacity/economic failure, not an allegation
+of fraud; the fourth is the method-loss case and carries the penalty term as
+well as the fee. That is a list of common instances and **not a closed set** —
+a benchmark that failed for a pool-side reason after durable acceptance
+appears in none of them and is charged all the same, under the table's third
+branch, because §11.6 charges without asking what caused the failure. Every
+charged benchmark increments `f`. Slow but
+eventually correct work is not charged; it is handled by the round
+`unverified_exposure > verified_exposure` tier-removal rule.
 
 For tier `k`, if the round's chargeable failure count `f > k`, remove the tier
-at round close after recording the ordinary `f * X` charges. Method-report
-losses use the separate bundle-scaled rule above and are not charged `X` a
-second time unless an independently evidenced tier-failure outcome also
-occurred. `POOL`, `TIG`, compatibility, and `UNRESOLVED` outcomes charge zero
-and do not increment `f`.
+at round close after recording each failure's own charge. The sum is no longer
+`f` times a constant: a benchmark that cost more to start costs more to waste,
+so a member who wastes one large assignment can owe more than one who wastes
+several small ones.
+
+**Every failure counts, whatever caused it.** `POOL`, `TIG`, compatibility and
+`UNRESOLVED` outcomes previously charged zero and did not increment `f`. They
+now do both, because a charge no longer depends on fault and the tier count
+follows the charge.
+
+The cost of that is worth naming, because pool-caused failures are
+*correlated* in a way member-caused ones are not: one proof-construction bug
+or one artifact-store incident can fail many members' benchmarks in the same
+round, and that round closes with every affected member above their tier's `k`
+demoted and charged. Tier removal has no reversal path of its own and
+repurchase costs `J[k]` again, so unwinding a mass demotion caused by one pool
+incident runs through §10's correction path. An operator who finds that shape
+of incident should expect to use it.
 
 After a charge or removal, the ordinary admission formula prevents more work
 unless enough finalized, unreserved collateral remains for every existing
@@ -1086,25 +1297,41 @@ exposure and the next assignment. A newly paid tier fee never bypasses that
 gate. The complete evidence and outcome inventory is in
 [member_attack_model.md](member_attack_model.md).
 
-A proposed `X` charge freezes only the evidenced amount and notifies the member;
-it does not by itself create a first-failure ban. The reduced eligible
-collateral may still prevent further admission. A proposed method-loss slash
-may additionally impose the separate method/security suspension. Both provide
-a seven-day appeal. An undisputed proposal becomes final after that deadline
-**only once the pool has a delivery channel for the notice**. It has none
-today, so as things stand no appeal deadline begins and no proposal becomes
-final by deadline alone; a charge still requires a decision someone made.
+A proposed failure charge freezes only the evidenced amount; it does not by
+itself create a first-failure ban. The reduced eligible collateral may still
+prevent further admission. A proposed method-loss charge may additionally
+impose the separate method/security suspension.
 
-**Why that clause is here (issue #56).**
-ADR 0011 makes the member's wallet the account, so the pool has no email,
-phone or address to send it to — and a seven-day forfeiture deadline in front
-of a notice the member cannot receive is not an appeal. This PR records the
-gap rather than repairing it: the repair changes what a charge depends on,
-which is a larger decision than the one that created the gap. Nothing charges
-a member before slice 8, so no member is exposed while it stands open.
-A dispute remains frozen until a reviewer who did not make the original fault
-decision records a reasoned result. Pool/TIG fault or insufficient evidence
-releases the freeze; custody is not evidence of member fault.
+**There is no appeal deadline, because there is no in-system appeal.** A
+charge becomes final on the evidence that produced it — an observed terminal
+arbitration, or a benchmark that never went active — not on a clock a member
+failed to beat. The seven-day window this section previously ran, and the
+second-reviewer rule behind it, existed to decide *fault*, which §11.6 no
+longer makes relevant.
+
+A member who believes a charge was wrong contacts the pool out of band. A
+pool investigation that agrees reverses it through §10's correction path,
+which is an audited batch with a stated reason like any other correction. The
+remedy exists; it is deliberately not a protocol state, and the member terms
+required by `pre_build_checklist.md` §9 must say so plainly, because a member
+who expects an appeals process and finds an email address should learn that
+before they deposit rather than after a charge.
+
+**That reversal is not yet fundable, and issue #56 owns the fix.** §10 details
+what a correction does when it *reduces* a member balance and says nothing
+about increasing one. Once a charge is swept under §8.6 the tokens are in
+operating custody, and §8.6 states there is "no transfer in the other
+direction and no internal rebalancing at all" — so a correction restoring the
+balance would raise the member liability without raising the custody backing
+it, breaching §11.7's coverage inequality and stopping reconciliation under
+§13 item 16.
+
+Two shapes resolve it and both are the owner's: hold a charged amount in
+member custody for a period before sweeping it, which makes a reversal pure
+bookkeeping inside one pot, or admit a funded transfer from operating custody
+back to member custody under `security.md` §3.4's authorization. Until one is chosen the
+remedy above is a promise the ledger cannot execute, which matters because it
+is the only recourse a member has. Nothing charges anyone before slice 8.
 
 A withdrawal request immediately removes its whole amount from admission
 collateral and encumbers the same amount against withdrawal. Those are one
@@ -1113,8 +1340,8 @@ ADR 0012, so anything a request reserves is capacity it was contributing.
 
 It is payable only after all affected reservations are released,
 the last relevant benchmark is no longer reportable, every report/arbitration
-is terminal, and one additional TIG round has passed. A pending appeal keeps
-only the disputed amount locked.
+is terminal, and one additional TIG round has passed. A frozen charge keeps
+only the evidenced amount locked.
 
 Under ADR 0008 there is one outbound member path, and what a withdrawal may
 never include is encumbered balance. There is no draw order and no fast path:
@@ -1218,7 +1445,7 @@ ASSET:TIG_MEMBER_CUSTODY  >=  sum(balance[m])
 Coverage rather than equality. The pot also holds, briefly and by name: a
 round's member share swept under §8.3a but not yet settled by §8.4, unresolved
 §8.2 suspense proceeds swept with it, and value that became the pool's — a
-tier fee, an `X` charge, a finalized slash, a correction — awaiting §8.6's
+tier fee, a §11.6 charge, a correction — awaiting §8.6's
 sweep. §13 item 12 enumerates the same terms, and daily reconciliation
 accounts for each rather than treating it as a mismatch.
 
@@ -1472,8 +1699,9 @@ Before and after every batch, enforce:
     custody only at a finalized token event;
 13. one withdrawal intent spends one liability once, and one sweep per cause:
     `(network, round, leg)` for each leg of a reward-wallet sweep, and §8.6's
-    cause identifier — tier activation, `X` charge decision, finalized slash,
-    suspense resolution, or correction ID — for an operating sweep;
+    cause identifier — tier activation, charge decision, suspense resolution,
+    or correction ID — for an operating sweep. A §11.6 charge has exactly one
+    identifier however its credit lines split;
 14. one signed intent fixes chain, token, destination, amount, signer, and
     nonce;
 15. only a finalized exact token event completes a withdrawal or a sweep;
@@ -1481,8 +1709,8 @@ Before and after every batch, enforce:
     compensating guess;
 17. a tier activation and its non-refundable fee post atomically;
 18. tier removal or repurchase never releases existing financial exposure;
-19. the same outcome cannot consume `X` or a method reserve twice under one
-    policy reason;
+19. the same outcome cannot consume a failure charge or a method reserve
+    twice under one policy reason;
 20. no value enters `LIABILITY:MEMBER_BALANCE` before it is settled — a
     deposit on finalized recognition (§11.2), a round only once its own
     reports and arbitrations are terminal and its TIG payment has landed
@@ -1492,10 +1720,10 @@ Before and after every batch, enforce:
     rather than by a flag on it; and
 21. aggregate uncovered method exposure — the sum of
     `method_reserve - scaled_method_reserve` over every open reservation — is
-    reported, not merely derivable. A multiplier below `10_000` bps is the
-    pool choosing to stand behind a member (§11.4, ADR 0010); the amount it
-    stands behind must be visible before a slash lands, not reconstructed
-    after one.
+    reported, not merely derivable. Below `10_000` bps the member owes more
+    than they hold (§11.5, §11.6), so this is the amount the pool would have
+    to collect by a route that does not yet exist (issue #56) or absorb. It
+    must be visible before a charge lands, not reconstructed after one.
 
 Daily reconciliation compares:
 
@@ -1552,20 +1780,32 @@ The owner has confirmed:
    (§12.2, ADR 0011). This supersedes the earlier confirmation that a changed
    payout address is held for 48 hours with out-of-band notification: there is
    no address change to hold, and the pool holds no contact channel to notify.
-   It also leaves the slash and `X`-charge notices in §11.2 and §11.6 with no
-   channel to be delivered on — **a known gap, tracked in issue #56**, not
-   something this PR resolves. Nothing charges a member before slice 8, so no
-   member is exposed while it stands open.
+   It also left the slash and charge notices in §11.2 and §11.6 with no
+   channel to be delivered on. Decision 11 below closes that by removing the
+   notices and the appeal they gated, rather than by finding them a channel.
+
+11. **a charge does not depend on fault, and there is no in-system appeal**
+    (2026-09-17). The member who owned the benchmark is charged whether the
+    cause was the member, the pool, TIG, or was never established, and every
+    failure counts toward tier removal. A member who believes a charge was
+    wrong contacts the pool out of band; a pool investigation that agrees
+    reverses it under §10 (§11.2, §11.6, `mining_system.md` §8); and
+12. **the failure charge is derived, not chosen** (2026-09-18). It is the
+    benchmark's own precommit fee where the benchmark never went active, and
+    `P * min(R, B)` plus that fee where it was successfully reported. The
+    `X[policy]` number this section previously listed as unset no longer
+    exists, and §11.4's reserve carries the fee once rather than twice
+    (§11.6, ADR 0013).
 
 The remaining decision is:
 
-1. numerical `X` — the charge reserved for one chargeable failed benchmark. It
-   is a term of §11.4's assignment reserve, so a member's exact collateral
-   requirement is determined only once it has a value. `mining_system.md` §11
-   carries it, with `J[k]` and `internal_pool_unverified_limit`, among the
-   values required before full product implementation. The threats and
-   unresolved evidence/consequence choices behind the malicious-work side are
-   enumerated in [member_attack_model.md](member_attack_model.md).
+1. numerical `J[k]` — the non-refundable joining fee for tier `k` (§11.3).
+   `mining_system.md` §11 carries it with `internal_pool_unverified_limit`
+   among the values required before full product implementation. It is pool
+   pricing rather than a gap in any formula: §11.4's reserve is computable
+   without it. The threats and unresolved consequence choices behind the
+   malicious-work side are enumerated in
+   [member_attack_model.md](member_attack_model.md).
 
 Decisions 6 and 7 lift this section's former prohibition: an implementation
 may accept member collateral under §11.4 and may present it as settled policy.

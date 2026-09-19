@@ -539,23 +539,32 @@ max(
     ceil( live reports.penalty_amount * proposed num_bundles[track]
           * member collateral multiplier bps / 10_000 )
     + exact proposed TIG fee[track]
-    + configured per-benchmark failure charge X
     for every proposed track
 )
 ```
 
+There is no separate per-benchmark failure charge in this reserve. ADR 0013
+derives that charge from the benchmark's own precommit fee, so the fee term
+above covers it; carrying both would reserve the same money twice. The slice-1
+implementation still has a third term set to zero, which computes the same
+amount; issue #61 removes it.
+
 The multiplier is the pool-set per-member value in integer basis points,
 default `10_000` and never above it, and it scales the method-penalty term
-only — the TIG fee is an outlay the pool certainly makes and `X` is a charge
-it has already decided to levy, so trust discounts neither. It is fixed into
-the reservation when the reservation is made and a later change never reaches
-an open one. [accounting.md](accounting.md) §11.4 owns the term and ADR 0010
+only — the TIG fee is an outlay the pool certainly makes, so trust does not
+discount it. It is fixed into the reservation when the reservation is made and
+a later change never reaches an open one. [accounting.md](accounting.md) §11.4 owns the term and ADR 0010
 the decision.
 
 **This is a floor against the scaled reserve, not against the full exposure.**
 Below `10_000` bps the reservation is deliberately smaller than the maximum
-penalty TIG can levy, and the difference is pool risk rather than member
-collateral — `accounting.md` §13 item 21 requires the aggregate to be
+penalty TIG can levy. The member still owes the unscaled amount —
+`accounting.md` §11.6 charges the evidenced penalty, and the multiplier sets
+what they must hold to start rather than a cap on what they owe — so the
+difference is uncollateralized member liability, not a smaller liability. How
+the pool collects it is unsettled (issue #56); until it is, the difference
+sits as pool risk in practice, and `accounting.md` §13 item 21 requires the
+aggregate to be
 reported for that reason.
 
 TIG selects the track only after precommit, which is why admission uses the
@@ -916,18 +925,39 @@ different completion deadline for each machine. The technical package deadline
 needed to stop work before TIG expiry remains a protocol-safety boundary, not
 the ordinary tier-performance metric.
 
-For tier `k`, let `f` be the number of chargeable failed benchmarks attributed
-to the member during the round. Each failure charges the versioned amount `X`
-from reserved security collateral. If `f > k`, the member's tier membership is
-removed at round close in addition to the `f * X` charge. A benchmark with no
-bundles meeting TIG's minimum verification quality counts as a chargeable
-failure for this tier policy even though it is not described as fraud.
+For tier `k`, let `f` be the number of chargeable failed benchmarks owned by
+the member during the round. Each failure charges that benchmark's own amount
+from reserved security collateral — the sum is not `f` times a constant, and
+`accounting.md` §11.6 owns how each is calculated. If `f > k`, the member's
+tier membership is removed at round close in addition to those charges. A
+benchmark with no bundles meeting TIG's minimum verification quality counts as
+a chargeable failure for this tier policy even though it is not described as
+fraud.
 
-Method-verification fraud remains separate: the pool reserves the live
-bundle-scaled TIG exposure and, when member attribution is established, charges
-the exact TIG loss under the method-penalty policy. Pool, TIG, compatibility,
-or unresolved incidents are neither tier failures nor chargeable member
-failures.
+**Cause does not enter either count.** Pool, TIG, compatibility and unresolved
+incidents were previously neither tier failures nor chargeable member
+failures. They are now both: `accounting.md` §11.6 charges a member
+independently of fault, and `f` counts every chargeable failure the member
+owned. The word "attributed" has gone from this rule because nothing is being
+attributed — ownership is the whole test, and §10 invariant 1 already makes
+ownership exact.
+
+That is the owner's decision and it has a cost this document should state:
+pool-caused failures arrive together. One proof-construction defect can fail
+many members' benchmarks in a single round, and that round closes with every
+affected member past their `k` demoted and charged. Nothing here reverses a
+demotion — repurchase costs `J[k]` again — so unwinding one runs through
+`accounting.md` §10's correction path.
+
+Method-verification loss remains a separate *calculation*, not a separate
+question of blame: the pool reserves the live bundle-scaled TIG exposure and
+charges the evidenced loss under §11.6's table.
+
+It is not separate for `f`. A benchmark with a successfully arbitrated report
+against it is one of §11.6's four chargeable failures and counts toward
+`f > k` removal like the others. The previous rule excluded it — method loss
+used its own path and did not consume a tier failure — and that exclusion goes
+with the attribution it rested on.
 
 Removal means `tier = NONE`, concurrency zero, and no new precommits. The
 member can immediately purchase any allowed tier by paying `J[k]` again; there
@@ -961,11 +991,13 @@ The system must distinguish the following outcomes.
 - another confirmed member-side fault prevents the benchmark from completing.
 
 The incomplete, abandoned, solution-invalid, and similar pre-verification
-outcomes are chargeable tier failures only after the fault-attribution rules in
-[member_attack_model.md](member_attack_model.md) classify them as `MEMBER`.
-Method non-reproducibility uses the separate bundle-scaled method-loss rule and
-does not also consume `X` unless an independently evidenced tier failure
-occurred.
+outcomes are chargeable failures of the owning member. They no longer wait on
+a `MEMBER` classification: `accounting.md` §11.6 charges independently of
+cause, so [member_attack_model.md](member_attack_model.md)'s fault
+classification remains useful for understanding and operating the pool, and is
+no longer a gate on whether a charge happens. Method non-reproducibility is
+charged by the same table under its own bundle-scaled term rather than as a
+second flat charge.
 
 ### Outcomes that are not member fraud
 
@@ -988,10 +1020,16 @@ does not relabel the outcome as fraud. Ordinary non-qualifying work that TIG
 does verify is not a tier failure merely because it earns no qualifier.
 
 After durable package acceptance, availability of the member or deletion of
-the member's local artifacts cannot be treated as a member failure. If the
-origin of corruption or failure is not established, the system records an
-unresolved operational outcome rather than automatically penalizing the
-member.
+the member's local artifacts is not something the member is expected to
+maintain — §9 releases both obligations at that point, and the pool must never
+ask for either again.
+
+It does not follow that such a benchmark is free for the member. Under
+`accounting.md` §11.6 a charge no longer turns on whose failure it was, so a
+benchmark that fails after durable acceptance is charged to its owner like any
+other. The same holds where the origin of a corruption is never established:
+the system still records an unresolved operational outcome for the operator's
+purposes, and that record no longer decides whether a charge happens.
 
 The database records the outcome and reason for every member-owned benchmark,
 the per-round `U`/`V` aggregate, every chargeable failure, the tier decision,
@@ -1069,7 +1107,12 @@ Implementation must preserve these invariants:
 6. Durable acceptance means the pool can complete the benchmark without the
    member reconnecting.
 7. Once durable acceptance is acknowledged, artifact loss, corruption, proof
-   construction, and proof availability are pool responsibilities.
+   construction, and proof availability are pool responsibilities. This is a
+   statement about duty, not about money: `accounting.md` §11.6 charges the
+   owning member for a failed benchmark whatever caused it, so the pool owing
+   the member correct handling and the member being charged when the pool
+   fails at it are both true. The invariant governs what the pool must do,
+   never who pays.
 8. Every pool-constructed proof uses the retained package whose Merkle root was
    submitted for that benchmark.
 9. A member compute slot becomes available at durable package acceptance and
@@ -1124,8 +1167,11 @@ settled in [architecture.md](architecture.md).
 
 ### Required before full product implementation
 
-- numerical values for `J[k]`, `X`, and
-  `internal_pool_unverified_limit`/recovery headroom, all as versioned policy;
+- numerical values for `J[k]` and
+  `internal_pool_unverified_limit`/recovery headroom, all as versioned policy.
+  `X` is no longer among them: the failure charge is derived from the
+  benchmark's own precommit fee and penalty rather than chosen
+  (`accounting.md` §11.6, ADR 0013);
 - review the technical package deadline and global capacity headroom using
   spike measurements without replacing the settled tier rule;
 - the **trust-label mechanism** is no longer open: it landed on 2026-09-16 as

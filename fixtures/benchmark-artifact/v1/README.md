@@ -147,10 +147,31 @@ Recorded honestly rather than invented:
    pairwise fold exercises promotion at two levels; TIG confirmed the
    sampled-nonce proofs and activated both benchmarks, which requires every
    branch over the promoted tree to resolve to the committed root.
-5. **Published chargeable reason codes.** `member_protocol.md` §15 says only
-   *published* chargeable tier-failure reason codes increment `f`; that list
-   does not exist yet. `chargeable_tier_failure` values in `expected.json`
-   assume the structural member faults above are on it.
+5. **Published chargeable reason codes — the gate is gone (ADR 0013).**
+   `member_protocol.md` §15 used to say only *published* chargeable
+   tier-failure reason codes increment `f`, and this question recorded that
+   the list did not exist yet. ADR 0013 removed that gate: every chargeable
+   failure increments `f` whatever reason code it carries, because a charge no
+   longer depends on cause.
+
+   **One case is now wrong, not merely differently gated.**
+   `expected.json`'s `method-non-reproducible` asserts
+   `chargeable_tier_failure: false` with `method_loss_rule: true`, citing the
+   rule that a method-verification outcome "does not increment `f` unless
+   another chargeable failure also occurred". `accounting.md` §11.6 now counts
+   a successfully arbitrated report among its four chargeable failures and
+   `mining_system.md` §8 counts it toward `f > k`, so that assertion would
+   under-count `f` on the tier-removal path. It is invalid as an oracle for
+   the tier count and the correction goes in a `v2` (issue #56).
+
+   The `pool-lost-after-receipt` scenario needs the same reading: it is still
+   a pool failure and is now charged to its owner anyway (§11.6,
+   `member_protocol.md` §12).
+
+   Every other `chargeable_tier_failure` value here asserts the structural
+   member-fault classification, which is unchanged — what has gone is the
+   published-list condition they were waiting on, so read those as asserting
+   the classification alone.
 6. **`min_verification_quality = 40`** and the sampled nonce set `{1, 4, 6}`
    are fixture inventions standing in for TIG-published values.
 7. **Bundle-average rounding** (`average_quality_by_bundle`) is not pinned by

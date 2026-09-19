@@ -725,8 +725,20 @@ the slot again.
 
 If processing fails before durable acceptance, status returns a stable typed
 reason. The member retains its package and may retry or create a corrected
-generation. If the pool loses an artifact after issuing the receipt, it is a
-pool failure and cannot be charged to the member.
+generation.
+
+If the pool loses an artifact after issuing the receipt, it is a **pool
+failure** — `mining_system.md` §10 invariant 7 puts artifact retention, proof
+construction and proof availability on the pool from durable acceptance
+onward, and the member is never asked to keep or re-supply anything.
+
+**It is charged to the member all the same.** `accounting.md` §11.6 charges
+the owning member for a failed benchmark whatever caused it, so a benchmark
+the pool broke after acceptance is charged like any other. This document said
+the opposite until ADR 0013; it is stated here rather than left implicit
+because this is the member-facing contract, and a member reading it should not
+have to infer from an accounting document that the reassurance was withdrawn.
+The remedy is to contact the pool (§11.6); there is no in-system appeal.
 
 ## 13. Retry, timeout, and clock rules
 
@@ -775,9 +787,11 @@ schema mismatch is incompatible input, not a value to coerce.
 ## 15. Failure attribution and trust effects
 
 Every terminal outcome records one of `MEMBER`, `POOL`, `TIG`, or `UNRESOLVED`
-plus a machine reason and evidence. Only published chargeable tier-failure
-reason codes increment `f`; a `MEMBER` method-verification outcome instead uses
-the separate method-loss rule unless another chargeable failure also occurred.
+plus a machine reason and evidence. That classification is operational
+reporting: under `accounting.md` §11.6 it no longer decides whether a charge
+happens or how large it is. Every chargeable failure increments `f` whichever
+code it carries, and a method-verification outcome is charged by §11.6's table
+under its own term rather than as a second flat charge.
 The explicit zero-verification-quality capacity rule below may increment `f`
 without alleging fraud. V0 has no general mining trust score.
 
@@ -786,9 +800,9 @@ without alleging fraud. V0 has no general mining trust score.
 | Package bytes match the declared checksum but its identity, coverage, structure, leaf hashes, or Merkle root are wrong | `MEMBER` |
 | Wrong binary/runtime used, missing or duplicate nonce, or TIG confirms non-reproducible/fraudulent member output | `MEMBER` |
 | Member cancels after precommit or misses the package block deadline while pool and TIG services were available | `MEMBER` |
-| Complete benchmark has zero bundles meeting TIG's minimum verification quality | No fraud attribution; chargeable tier failure unless a pool/TIG/compatibility incident applies |
+| Complete benchmark has zero bundles meeting TIG's minimum verification quality | No fraud attribution; chargeable tier failure, including where a pool/TIG/compatibility incident caused it (`accounting.md` §11.6) |
 | TIG verifies the benchmark but its bundles earn no qualifiers | No failure |
-| Pool stops an otherwise valid complete benchmark for a pool/TIG reason | No member failure |
+| Pool stops an otherwise valid complete benchmark for a pool/TIG reason | No member *fault*; still a chargeable failure of its owner (`accounting.md` §11.6 charges regardless of cause) |
 | Slot fails or times out during pre-assignment qualification | No mining-trust effect; slot remains ineligible |
 | Authentication failure, duplicate request, stale request timestamp, lost heartbeat, or transient member network error by itself | No trust effect |
 | Pool issued an assignment inconsistent with confirmed TIG data | `POOL` |
@@ -838,7 +852,7 @@ statistics.
 
 This protocol deliberately does not choose the **worker**-recovery HTTP route
 and schema (the recovery proof itself is specified in section 3.3), deposit
-custody details, numerical `J[k]`/`X`/global-headroom values, relational
+custody details, numerical `J[k]`/global-headroom values, relational
 schema, artifact-store product, deployment topology, or production retention
 capacity.
 

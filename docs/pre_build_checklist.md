@@ -263,6 +263,10 @@ Outputs: [security.md](security.md), [accounting.md](accounting.md), and
 - [x] Settle the dynamic bundle-scaled method reserve and separate per-failure
   reserve shape, fault-attribution/appeal boundary, and collateral return
   rule.
+  — **Superseded by ADR 0013.** The fault-attribution and appeal boundary no
+  longer exists: `accounting.md` §11.6 charges the owning member regardless of
+  cause, with an out-of-band remedy rather than an in-system appeal. The
+  reserve shape and collateral return rule stand.
 - [x] Define flat tier `k` as exactly `k` concurrent unverified benchmarks,
   with end-of-round removal for `U > V` or chargeable failures `f > k`.
 - [x] Define non-refundable paid tier entry/re-entry, immediate rejoining with
@@ -271,8 +275,11 @@ Outputs: [security.md](security.md), [accounting.md](accounting.md), and
 - [x] Define the renewable FIFO compute-availability queue used only when
   `internal_pool_unverified_limit` is full, including stale-offer expiry and
   fresh checks before precommit.
-- [ ] Choose the versioned numerical tier fee schedule `J[k]`, per-failure
-  charge `X`, and internal-limit recovery headroom.
+- [ ] Choose the versioned numerical tier fee schedule `J[k]` and
+  internal-limit recovery headroom.
+  — **Narrowed by ADR 0013.** The per-failure charge is no longer a number to
+  choose: `accounting.md` §11.6 derives it from the benchmark's own precommit
+  fee and penalty.
 - [x] Define when credits are automatically paid, whether a minimum applies,
   and the payout cadence.
   — **Superseded by ADR 0008.** Settlement into a member's balance stays
@@ -340,6 +347,9 @@ credentials.
   outstanding exposure across re-entry, dormancy, round `U > V`, per-failure
   `X`, and the `f > k` removal boundary.
   — PR #21 (`tier.json`)
+  — **Partly superseded by ADR 0013**; the `X` and non-chargeable-outcome
+  cases no longer match the design. `fixtures/collateral-tier/v1/README.md`
+  open question 0a records which assertions survive.
 - [x] Create availability-queue cases covering FIFO ties, more than one member
   and slot, stale/cancelled offers, ready-check replay/expiry, tier removal,
   newly opened global capacity, and a fresh atomic limit failure at promotion.
@@ -473,8 +483,18 @@ Measure and record (all consolidated in
   — PR #30 and [spike report §5.8](protocol_spike_report.md)
 - [x] throughput lost to each invalid-work path and whether the proposed
   failure charge `X` makes repeated abuse uneconomic; and
-  — PR #30 and [spike report §5.9](protocol_spike_report.md) (parameterized
-  on the still-open policy value `X`)
+  — PR #30 and [spike report §5.9](protocol_spike_report.md), which
+  parameterized the answer on `X` as an open policy value and measured a
+  ≥2000× margin at its `X = 2 TIG` stand-in.
+  — **ADR 0013 closed `X` and §5.9's conclusion does not survive it.** The
+  charge is now the benchmark's own precommit fee, and §5.9 measured the
+  pool's direct cash loss per failure as *that same fee* — 0.001 TIG at spike
+  scale. The margin is therefore ~1×, not ≥2000×: a member who wastes a
+  benchmark reimburses the pool exactly and pays nothing beyond it, so the
+  charge makes abuse cash-neutral rather than uneconomic. Deterrence now rests
+  entirely on the tier mechanism — `f > k` removal plus non-refundable `J[k]`
+  re-entry — which is why `J[k]` being unset is load-bearing rather than
+  cosmetic. **This item is reopened**, and issue #56 carries it.
 - [x] storage and bandwidth projections at the intended initial pool size.
   — [spike report §6](protocol_spike_report.md)
 

@@ -124,7 +124,13 @@ exposure to this.
 What bounds it is **the pool's multiplier policy**, which is the pool's choice
 and not the members'. A member at `10_000` bps leaves no remainder to spread;
 every basis point below that is a slice of risk moved from one member onto the
-rest. §13 item 21 exists so the aggregate is visible before a charge lands
+rest, at a leverage of `(10_000 - M_bps) / M_bps`.
+
+That leverage is granted to exactly the members the pool trusts most, since
+they are the only ones given a discount. It is the uncomfortable shape of this
+decision and is recorded rather than smoothed: a discount is an expression of
+confidence, and here it is also the thing that lets a member impose a loss on
+others. §13 item 21 exists so the aggregate is visible before a charge lands
 rather than reconstructed after one, and it should be read as a measure of how
 much the membership is currently underwriting on the pool's judgement.
 
@@ -173,11 +179,23 @@ benchmark and the pool's own funds are not the first place to look for it.
 **Recover it from the charged member's other balance.** Reach past the
 reservation into their deposits. The owner considered and declined this: it is
 cleaner for the round to settle as one netting step than for a charge to walk a
-waterfall through balances, pending withdrawals and reservations. The cost is
-that a member holding a large unreserved balance can leave a shortfall for
-others while keeping it — bounded in practice because bad work earns nothing,
-so there is no profit in it, only the ability to impose a loss at one's own
-expense.
+waterfall through balances, pending withdrawals and reservations.
+
+The cost of declining it is larger than "no profit in it", which is how an
+earlier draft of this ADR dismissed it. A member holding a large unreserved
+balance can leave a shortfall for others while keeping that balance, and the
+leverage is `(10_000 - M_bps) / M_bps`: they forfeit their reservation to
+impose that multiple on innocent earners — 1:1 at `5_000` bps, 9:1 at
+`1_000`, 99:1 at `100`. It is not *profitable*, since failed work earns
+nothing, so the motive is griefing or competitive damage rather than gain. But
+"unprofitable" is not "bounded", and the bound here is only the multiplier the
+pool chose.
+
+`security.md` §2.1 already assumed a member would "try to cause another member
+to be charged with its failure". This decision is what makes that possible,
+and both threat models record it — §2.3's table and
+`member_attack_model.md` M20, which also notes it amplifies M18's coordinated
+accounts.
 
 **Carry the remainder into the next round.** Rejected as the thing §10 rule 7
 exists to forbid: a shortfall that outlives its round stops being attributable

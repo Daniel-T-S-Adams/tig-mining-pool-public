@@ -54,6 +54,13 @@ Assume that a member may deliberately:
 - return semantically false work that is structurally well formed; or
 - try to cause another member to be charged with its failure.
 
+The last of these stopped being hypothetical. `accounting.md` §8.4 spreads a
+charge the member's own reservation does not cover across the other members
+who earned in that round (ADR 0014), which is a member-on-member loss channel
+the design did not previously have. The leverage is stated in §2.3's table and
+`member_attack_model.md` M20, and the control is the multiplier policy rather
+than anything in this document: the channel only opens below `10_000` bps.
+
 Also assume ordinary process crashes, lost responses, database or object-store
 outages, TIG API ambiguity, an operator mistake, and compromised public API or
 artifact-parser processes. A PostgreSQL administrator, host root compromise,
@@ -90,6 +97,7 @@ execution is non-reproducible.
 | Submit work with zero bundles meeting TIG verification quality | Capacity and fee loss without protocol fraud | The reserved precommit fee charged back and tier failure count. Correlated pool/config failures are **no longer exempt** — `accounting.md` §11.6 charges regardless of cause, so the correlation check exists to detect the incident, not to excuse the charge |
 | Submit TIG-verified work that earns no qualifiers | Pool may simply earn less | No charge; orchestration and qualification tuning |
 | Exploit a TIG penalty/configuration change | Previously sufficient collateral becomes insufficient | Per-block config monitoring, compatibility stop, explicit residual-risk policy |
+| Deliberately fail a benchmark to impose a loss on other members | Innocent earners in that round lose `(10_000 - M_bps)/10_000` of the penalty, pro-rata | Only the multiplier opens this: at `10_000` bps nothing spreads. Leverage is `(10_000 - M_bps) / M_bps` — the attacker burns their reservation to impose that multiple on others, so a member at `1_000` bps imposes nine times what they lose. The pool grants it by choosing a multiplier, so the control is the policy, not a runtime check (`accounting.md` §8.4, ADR 0014) |
 
 Collateral covers measurable financial exposure but does not restore lost time,
 write-rate budget, verification capacity, or challenge balance. Public admission

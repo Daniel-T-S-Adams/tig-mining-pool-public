@@ -560,10 +560,25 @@ rather than anywhere else:
   §13 items 2 and 4 remain exactly true of them, because fee plus member
   allocations still equals proceeds at the block. The deduction is a later
   event against a pending liability, not a revision of an earlier one.
-- **The member who was charged pays twice over.** Their collateral goes first
-  under §11.6, and their own earnings are in `E[m]` like everyone else's, so
-  they bear their pro-rata share of what their own benchmark left uncovered
-  on top of losing the reservation.
+- **The charged member is not exempt, but is not guaranteed to pay either.**
+  Their collateral goes first under §11.6, and their own earnings are in
+  `E[m]` on the same terms as everyone else's, so where they earned in the
+  round they bear a share of what their own benchmark left uncovered.
+
+  Where they did not, they bear none of it. A shortfall needs the penalty
+  term — a benchmark charged only its fee is covered by its reservation — so
+  it comes from a benchmark that went active and was successfully reported.
+  That benchmark's owner can still have no attributed qualifiers in its own
+  round: its bundles may not have qualified, or may have qualified after the
+  round boundary, which is the straddle the settlement condition above exists
+  for. `E[m]` is then zero, `share[m]` is zero, and the whole remainder falls
+  on members who earned alongside them.
+
+  This is a consequence of spreading pro-rata by earnings rather than a
+  separate rule, and it is stated because it is the case where the design is
+  least defensible to the members paying: the one member whose benchmark
+  caused the loss can be the one member who contributes nothing to covering
+  it.
 - **Nobody is made negative.** The spread is bounded by `E[total]`: a share
   can never exceed what that member earned in the round. Where `S` exceeds
   `E[total]`, the round's earnings are exhausted and the remainder falls on

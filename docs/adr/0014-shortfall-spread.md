@@ -87,12 +87,26 @@ a pending liability when the figure is finally known — which is only true
 because ADR 0012 made the credit wait for the round's own slashing. That ADR
 was taken for a different reason; this decision depends on it.
 
-Two consequences follow and are worth stating as guarantees. No posted batch
-is reopened, so §13 items 2 and 4 remain exactly true of every block: fee plus
-member allocations still equals proceeds there. And the charged member pays
-twice over — their collateral first under §11.6, then their own pro-rata share
-of what their benchmark left uncovered, because their earnings sit in `E[m]`
-like everyone else's.
+One consequence is a guarantee: no posted batch is reopened, so §13 items 2
+and 4 remain exactly true of every block — fee plus member allocations still
+equals proceeds there.
+
+The second is not, and saying so is the point. The charged member's earnings
+sit in `E[m]` on the same terms as everyone else's, so where they earned in
+the round they bear a share of what their own benchmark left uncovered, on top
+of losing the reservation. **Where they did not earn in that round they bear
+none of it.** A shortfall requires the penalty term, so it comes from a
+benchmark that went active and was reported — and that benchmark's owner can
+still have no attributed qualifiers in its own round, because its bundles did
+not qualify or qualified after the boundary. `E[m]` is zero and the whole
+remainder falls on the members who earned alongside them.
+
+That is the worst case this decision has, and it is not a rare one: the
+straddle it describes is the same case the settlement condition above had to
+be extended for. It follows from spreading pro-rata by earnings and is not
+separately fixable without changing that rule — taking the charged member's
+share from a round they *did* earn in would mean a charge reaching across
+rounds, which §10 rule 7 forbids for good reason.
 
 Worked example, the owner's own: after slashing, Ben is owed 100 TIG and Jim
 10, with 11 TIG uncovered. `E[total]` is 110, so Ben bears 10 and Jim 1,

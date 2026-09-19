@@ -480,6 +480,50 @@ The credit is unencumbered, immediately withdrawable, and **immediately
 collateral-eligible**. It does not create a transfer intent — under ADR 0008
 settlement no longer starts a payout.
 
+**Uncovered charges are deducted here, before the credit.** §11.6 charges a
+member the evidenced amount, and §11.2 bounds the posted debit to their
+encumbered balance, so a charge larger than the reservation leaves a
+remainder the member owes and the pool has not collected. That remainder is
+taken from this round's earnings before they reach anyone's balance:
+
+```text
+S[round]  = sum of uncovered remainders on benchmarks
+            attributed in this round
+E[m]      = member m's MEMBER_EARNED_PENDING for this round
+E[total]  = sum(E[m])
+
+each member's share = S * E[m] / E[total], by §6's largest-remainder
+                      method so the shares sum to exactly S
+```
+
+Debited from each `MEMBER_EARNED_PENDING:<round>:<member>` and credited to the
+same accounts §11.6's charge credits, under the originating charge's cause
+identifier. What remains settles into balances as above.
+
+Three properties this placement buys, and they are why the deduction is here
+rather than anywhere else:
+
+- **No posted batch is reopened.** The per-block batches of §6 are untouched;
+  §13 items 2 and 4 remain exactly true of them, because fee plus member
+  allocations still equals proceeds at the block. The deduction is a later
+  event against a pending liability, not a revision of an earlier one.
+- **The member who was charged pays twice over.** Their collateral goes first
+  under §11.6, and their own earnings are in `E[m]` like everyone else's, so
+  they bear their pro-rata share of what their own benchmark left uncovered
+  on top of losing the reservation.
+- **Nobody is made negative.** The spread is bounded by `E[total]`: a share
+  can never exceed what that member earned in the round. Where `S` exceeds
+  `E[total]`, the round's earnings are exhausted and the remainder falls on
+  the pool — §5's fee revenue for that round first, then operating funds. It
+  is never carried into a later round, which is what §10 rule 7 forbids.
+
+**This is a deliberate mutualisation and members must be told.** A member's
+earnings can be reduced by another member's failed benchmark, including one
+that failed for a reason neither of them caused. Nothing in a member's own
+conduct bounds their exposure to it; what bounds it is the pool's multiplier
+policy, since a member at `10_000` bps leaves no remainder to spread. The
+member terms required by `pre_build_checklist.md` §9 must say so plainly.
+
 This is a distinct recognition path from §11.2's inbound deposit, with
 different evidence: the reconciled round rather than a finalized transfer
 event. Neither path may record the other kind of value.
@@ -625,7 +669,16 @@ If a correction reduces a member balance:
 6. if the member has already been paid too much, record an explicit member
    receivable/negative future-earnings balance, stop new withdrawal intents
    and work, notify the member, and require an operator resolution; and
-7. never charge other members or a future block silently for the shortfall.
+7. never charge other members or a future block **silently** for the
+   shortfall. The adverb is the rule. An accounting error's shortfall is
+   never mutualised at all: it goes to `EXPENSE:ACCOUNTING_LOSS` under the
+   paragraph below, or to the member receivable in rule 6, and never to the
+   membership. What §8.4 does with an uncovered *charge* is the permitted
+   case and is not an exception smuggled in here — it is bounded by the
+   round's own earnings, computed by a stated formula, posted under the
+   originating charge's cause identifier, visible to every member it touches,
+   and never carried into a later round. A shortfall that reaches members
+   without all five of those is the thing this rule forbids.
 
 Writing off a shortfall to `EXPENSE:ACCOUNTING_LOSS` requires an explicit
 approved correction and does not relabel it as mining expense or payout dust.
@@ -692,8 +745,17 @@ recognized only from the transfer event above, and a settled earning only from
 a reconciled round. Neither may record the other kind of value.
 
 The balance remains completely separate from delegation and from pool
-operating funds. They cannot pay another member or silently
-cover a pool error. A proposed charge first freezes the evidenced amount
+operating funds, and cannot pay another member.
+
+They also cannot cover a pool **accounting** error — §10 rule 7 keeps that off
+the membership entirely, sending it to `EXPENSE:ACCOUNTING_LOSS` or a member
+receivable. A pool-caused *benchmark* failure is a different thing and is
+charged to its owner under §11.6 whatever caused it, with any uncovered
+remainder deducted from the round at §8.4. The distinction is between a
+mistake in the books and a benchmark that failed, not between whose fault the
+failure was.
+
+A proposed charge first freezes the evidenced amount
 without moving the member liability, and records the evidence and the outcome
 it rests on. There is no notice to deliver and no appeal deadline to run:
 §11.6 makes a charge independent of fault, so there is nothing for the member
@@ -995,9 +1057,9 @@ exactly as a multiplier below `10_000` bps does. **The posted batch is still
 bounded by the encumbrance**: §11.2 and §11.7 both hold, so a charge debits
 only encumbered balance and can never reach value the member was free to
 withdraw. The excess is not a larger debit against the balance; it is an
-amount the reservation does not cover, and where it comes from is not settled
-here. §10 rule 7 forbids charging other members or a future block for a
-shortfall, and issue #56 owns that rule.
+amount the reservation does not cover, and where it comes from is §8.4's to
+say, not this section's: it is deducted from the round's earnings before they
+are credited, under §10 rule 7's permitted case and ADR 0014.
 
 Should either premise fail, this is the section to revisit, and the
 mechanism to add is a buffer or an additional-collateral call — never a
@@ -1064,14 +1126,14 @@ be discovered:
   covers the charge exactly, which is why §11.4 holds the fee portion to
   terminality rather than releasing it at verification.
 
-  **What happens to the excess is not yet specified**, and the posted batch
-  does not reach for it: §11.2 and §11.7 bound a charge to encumbered balance,
-  so the debit stops at the reservation whatever the evidenced amount. §10
-  rule 7 forbids the obvious recovery by name — "never charge other members or
-  a future block silently for the shortfall" — and issue #56 owns that rule
-  and the decision replacing it. Until then this section states the liability
-  without stating its recovery, and no member is exposed because nothing
-  charges anyone before slice 8.
+  **The excess is recovered from the round, not from the member's balance.**
+  The posted batch does not reach further: §11.2 and §11.7 bound a charge to
+  encumbered balance, so the debit stops at the reservation whatever the
+  evidenced amount. What the reservation does not cover is deducted at §8.4
+  from the round's earnings before they are credited, shared pro-rata across
+  the members who earned in it — the charged member included. §10 rule 7
+  permits that and forbids a silent version of it; ADR 0014 records the
+  decision and what it costs the members who did nothing wrong.
 - **There is no in-system appeal.** The evidence, attribution and appeal
   process this section previously required has nothing left to decide. A
   member who believes they were charged wrongly contacts the pool out of band;
@@ -1721,9 +1783,16 @@ Before and after every batch, enforce:
 21. aggregate uncovered method exposure — the sum of
     `method_reserve - scaled_method_reserve` over every open reservation — is
     reported, not merely derivable. Below `10_000` bps the member owes more
-    than they hold (§11.5, §11.6), so this is the amount the pool would have
-    to collect by a route that does not yet exist (issue #56) or absorb. It
-    must be visible before a charge lands, not reconstructed after one.
+    than they hold (§11.5, §11.6), and §8.4 recovers the difference from the
+    round's other earners, so this figure is what the membership is currently
+    underwriting. It must be visible before a charge lands, not reconstructed
+    after one; and
+22. a §8.4 shortfall deduction is exact and bounded. Each member's share sums
+    with the others to exactly `S` under §6's largest-remainder method, no
+    share exceeds that member's `MEMBER_EARNED_PENDING` for the round, and
+    nothing is carried into a later round — where `S` exceeds the round's
+    earnings the remainder falls on §5's fee revenue for that round and then
+    on operating funds, never forward (§10 rule 7).
 
 Daily reconciliation compares:
 
@@ -1739,7 +1808,11 @@ Daily reconciliation compares:
 - aggregate uncovered method exposure (§13 item 21) against the pool's own
   funds, and each member's rolling seven-day withdrawn total against ADR
   0009's weekly cap, so an automated path that has stopped binding is seen;
-  and
+- each settled round's shortfall deduction (§8.4) against the charges that
+  produced it: the shares must sum to `S`, `S` must equal the uncovered
+  remainders of that round's own benchmarks, and any part that fell on the
+  pool must appear against fee revenue or operating funds rather than
+  unexplained; and
 - ledger cached balances versus a journal rebuild.
 
 ## 14. Owner decisions required
@@ -1795,7 +1868,15 @@ The owner has confirmed:
     `P * min(R, B)` plus that fee where it was successfully reported. The
     `X[policy]` number this section previously listed as unset no longer
     exists, and §11.4's reserve carries the fee once rather than twice
-    (§11.6, ADR 0013).
+    (§11.6, ADR 0013); and
+13. **an uncovered charge is spread across the round's earners**
+    (2026-09-19). What a member's reservation does not cover is deducted at
+    §8.4 from that round's earnings before they are credited, pro-rata to what
+    each member earned, the charged member included. Where the round's
+    earnings do not cover it the remainder falls on §5's fee revenue for that
+    round and then on operating funds, never on a later round. A member's
+    earnings can therefore be reduced by another member's failed benchmark,
+    which the member terms must state plainly (§8.4, §10 rule 7, ADR 0014).
 
 The remaining decision is:
 

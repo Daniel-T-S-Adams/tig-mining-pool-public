@@ -17,3 +17,4 @@ status is authoritative for implementation; the mining rules remain in
 - [ADR 0011: The connected wallet is the member account and the payout destination](0011-wallet-is-the-member-account.md)
 - [ADR 0012: A round is credited only after its own slashing is settled](0012-settle-after-slashing.md)
 - [ADR 0013: A charge does not depend on fault, and its amount is derived](0013-charge-without-fault.md)
+- [ADR 0014: An uncovered charge is spread across the round's earners](0014-shortfall-spread.md)

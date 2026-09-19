@@ -1265,6 +1265,22 @@ required by `pre_build_checklist.md` §9 must say so plainly, because a member
 who expects an appeals process and finds an email address should learn that
 before they deposit rather than after a charge.
 
+**That reversal is not yet fundable, and issue #56 owns the fix.** §10 details
+what a correction does when it *reduces* a member balance and says nothing
+about increasing one. Once a charge is swept under §8.6 the tokens are in
+operating custody, and §8.6 states there is "no transfer in the other
+direction and no internal rebalancing at all" — so a correction restoring the
+balance would raise the member liability without raising the custody backing
+it, breaching §11.7's coverage inequality and stopping reconciliation under
+§13 item 16.
+
+Two shapes resolve it and both are the owner's: hold a charged amount in
+member custody for a period before sweeping it, which makes a reversal pure
+bookkeeping inside one pot, or admit a funded transfer from operating custody
+back to member custody under §3.4's authorization. Until one is chosen the
+remedy above is a promise the ledger cannot execute, which matters because it
+is the only recourse a member has. Nothing charges anyone before slice 8.
+
 A withdrawal request immediately removes its whole amount from admission
 collateral and encumbers the same amount against withdrawal. Those are one
 figure, not two: every part of the balance is collateral-eligible under

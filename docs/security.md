@@ -618,5 +618,8 @@ produce the fail-closed states and alerts specified in the architecture.
     bypass a fresh atomic admission check.
 17. Tier removal or repurchase cannot erase a benchmark, financial exposure,
     failure record, or security evidence.
-16. One semantic failure stops further exposure before it becomes an automatic
-    slash, and correlated failures are investigated as a compatibility incident.
+16. One semantic failure stops further exposure, and correlated failures are
+    investigated as a compatibility incident. Neither prevents the charge:
+    `accounting.md` §11.6 charges regardless of cause, so the investigation
+    exists to detect the incident and decide whether to reverse it, not to
+    decide whether it is levied.

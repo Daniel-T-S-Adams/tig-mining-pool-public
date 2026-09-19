@@ -154,13 +154,24 @@ Recorded honestly rather than invented:
    failure increments `f` whatever reason code it carries, because a charge no
    longer depends on cause.
 
-   These cases are unaffected in substance. `chargeable_tier_failure` values
-   in `expected.json` assert the structural member-fault classification, which
-   is unchanged; what has gone is the published-list condition they were
-   waiting on, so read them as asserting the classification alone. `v1` stays
-   immutable and needs no correction for this — unlike
-   `fixtures/collateral-tier/v1`, whose open question 0a records cases that
-   are now wrong rather than merely differently gated.
+   **One case is now wrong, not merely differently gated.**
+   `expected.json`'s `method-non-reproducible` asserts
+   `chargeable_tier_failure: false` with `method_loss_rule: true`, citing the
+   rule that a method-verification outcome "does not increment `f` unless
+   another chargeable failure also occurred". `accounting.md` §11.6 now counts
+   a successfully arbitrated report among its four chargeable failures and
+   `mining_system.md` §8 counts it toward `f > k`, so that assertion would
+   under-count `f` on the tier-removal path. It is invalid as an oracle for
+   the tier count and the correction goes in a `v2` (issue #56).
+
+   The `pool-lost-after-receipt` scenario needs the same reading: it is still
+   a pool failure and is now charged to its owner anyway (§11.6,
+   `member_protocol.md` §12).
+
+   Every other `chargeable_tier_failure` value here asserts the structural
+   member-fault classification, which is unchanged — what has gone is the
+   published-list condition they were waiting on, so read those as asserting
+   the classification alone.
 6. **`min_verification_quality = 40`** and the sampled nonce set `{1, 4, 6}`
    are fixture inventions standing in for TIG-published values.
 7. **Bundle-average rounding** (`average_quality_by_bundle`) is not pinned by

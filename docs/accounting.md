@@ -726,8 +726,11 @@ A charge reaches only encumbered balance: the frozen amount established by
 §11.6 against a specific reservation. It can never take unencumbered balance,
 which is the member's to withdraw.
 
-The reserve may reimburse documented member-caused TIG fees, penalties, or
-accounting losses. It is not ordinary pool-fee revenue, cannot fund member
+The reserve may reimburse documented TIG fees, penalties, or accounting
+losses arising from a member-owned benchmark, whatever caused them — §11.6
+charges without attributing a cause, so restricting the reserve to
+*member-caused* losses would leave a pool-caused penalty funding a reserve
+with no authority to absorb it. It is not ordinary pool-fee revenue, cannot fund member
 payouts, and cannot be distributed to an operator merely because a slash
 occurred. Any later use is another approved, auditable batch.
 
@@ -1150,6 +1153,14 @@ charged. Re-applying the table on each arbitration would charge the fee twice
 and re-charge the penalty already taken, exceed §11.4's reservation, which
 holds one fee, and violate §13 item 19.
 
+**An increment is its own charge decision.** It posts its own batch with its
+own cause identifier, so §11.2's "one charge, one cause identifier" and §13
+item 13's one-sweep-per-cause both hold: what they forbid is two identifiers
+for one batch, not two batches for one benchmark. Each decision is idempotent
+on its own identifier, and the amount is derived from the total observed `R`
+minus what prior decisions on that benchmark already charged — so a retry
+recomputes the same increment rather than adding a second one.
+
 A benchmark can arbitrate `NONREPRODUCIBLE` for a pool-side reason —
 `mining_system.md` §8 names pool-constructed wrong proofs, packages the pool
 corrupted after durable acceptance, and work whose origin was never
@@ -1189,9 +1200,12 @@ honestly-behaving member exactly where they started — no lost capacity, no
 charge — while each false report still costs its filer a fee. That is judged
 sufficient and no further countermeasure is specified.
 
-A member-level response would not have that property, and is ruled out
-elsewhere: `mining_system.md` §8 holds that an unresolved incident penalizes
-nobody. Bounding a member's total exposure across concurrent work is §11.4's
+A member-level response would not have that property. It is also the wrong
+instrument: this freeze is about not releasing cover while an accusation is
+open, which is a question about the benchmark, not about the member — and
+under §11.6 an unresolved cause no longer changes whether a charge lands, so a
+member-level suspension would be reaching for a judgement the design stopped
+making. Bounding a member's total exposure across concurrent work is §11.4's
 job, through `reserved_exposure`, and does not need this rule to reach further
 than one benchmark.
 

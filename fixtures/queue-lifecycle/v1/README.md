@@ -120,7 +120,17 @@ treats these fixtures as normative.
    (`mining_system.md` §11). The fixture numbers are placeholders only.
    `X` is no longer among them: ADR 0013 abolished it as a policy value, so a
    case asserting a flat per-failure charge tests a rule that no longer
-   exists. `v1` is immutable; the correction goes in a `v2` (issue #56).
+   exists.
+
+   **Two cases assert the fault exemption itself and are invalid, not merely
+   unnumbered.** `lifecycle.json`'s `expired_workflow_pool_side_stall` asserts
+   `chargeable_failures = f -> f` on the reasoning that "pool/TIG/unresolved
+   incidents are neither tier failures nor chargeable member failures", and
+   the case asserting a benchmark "does not also consume `X` unless an
+   independently evidenced tier failure occurred" rests on the same rule.
+   `accounting.md` §11.6 and `mining_system.md` §8 both now charge regardless
+   of cause and count every chargeable failure toward `f`, so those two would
+   under-count. `v1` is immutable; the corrections go in a `v2` (issue #56).
 2. **Ready-check expiry window** — no document assigns the ready check its own
    numeric deadline; `member_protocol.md` §6 says only that expiry of "the
    ready check or ordinary offer lease" removes the offer. The fixtures bound

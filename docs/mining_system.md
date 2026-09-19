@@ -558,8 +558,12 @@ the decision.
 
 **This is a floor against the scaled reserve, not against the full exposure.**
 Below `10_000` bps the reservation is deliberately smaller than the maximum
-penalty TIG can levy, and the difference is pool risk rather than member
-collateral — `accounting.md` §13 item 21 requires the aggregate to be
+penalty TIG can levy. The member still owes the unscaled amount —
+`accounting.md` §11.6 charges the evidenced penalty, and the multiplier sets
+what they must hold to start rather than a cap on what they owe — so the
+difference is uncollateralized member liability, not a smaller liability. How
+the pool collects it is unsettled (issue #56); until it is, the difference
+sits as pool risk in practice, and `accounting.md` §13 item 21 requires the aggregate to be
 reported for that reason.
 
 TIG selects the track only after precommit, which is why admission uses the
@@ -944,9 +948,15 @@ affected member past their `k` demoted and charged. Nothing here reverses a
 demotion — repurchase costs `J[k]` again — so unwinding one runs through
 `accounting.md` §10's correction path.
 
-Method-verification loss remains a separate calculation, not a separate
+Method-verification loss remains a separate *calculation*, not a separate
 question of blame: the pool reserves the live bundle-scaled TIG exposure and
 charges the evidenced loss under §11.6's table.
+
+It is not separate for `f`. A benchmark with a successfully arbitrated report
+against it is one of §11.6's four chargeable failures and counts toward
+`f > k` removal like the others. The previous rule excluded it — method loss
+used its own path and did not consume a tier failure — and that exclusion goes
+with the attribution it rested on.
 
 Removal means `tier = NONE`, concurrency zero, and no new precommits. The
 member can immediately purchase any allowed tier by paying `J[k]` again; there

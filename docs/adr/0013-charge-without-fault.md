@@ -76,6 +76,16 @@ because no attribution is made. A member who believes a charge was wrong
 contacts the pool out of band; a pool investigation that agrees reverses it
 through §10's correction path, as an audited batch with a stated reason.
 
+**That reversal is not currently fundable, and this ADR does not fund it.**
+Once §8.6 sweeps a charge, the tokens are in operating custody and §8.6 admits
+no transfer back, so restoring the member's balance would breach §11.7's
+coverage and stop reconciliation under §13 item 16. The same gap applies to
+unwinding a mass demotion, since §11.3 says tier removal creates no refund.
+Issue #56 carries the two shapes that close it — hold a charge in member
+custody before sweeping, or admit a funded transfer back under `security.md`
+§3.4. Recorded here because this ADR names the remedy, and a decision record
+that names a remedy without its constraint is the more misleading half.
+
 **Every failure counts toward tier removal.** `f` in `mining_system.md` §8
 counts every chargeable failure the member owned, and each contributes its own
 amount rather than a multiple of a constant.

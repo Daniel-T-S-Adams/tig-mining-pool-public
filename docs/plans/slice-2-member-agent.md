@@ -59,18 +59,29 @@ Deferred with the step that owns them, not dropped:
   otherwise hold N concurrent unverified benchmarks bounded only by the
   pool-wide limit — which `member_protocol.md` §6 forbids ("absence of an
   applicable policy produces `NO_ACTION`, never unlimited work") and
-  `security.md` §11 invariant 15 keeps distinct from the global limit. D14 below
+  `security.md` §11 invariant 15 keeps distinct from the global limit. D11 below
   is the compensating bound slice 2 enforces, from configuration instead of from
   a tier. Slice 2 also keeps the per-slot rule: one open assignment occupies
   exactly one slot (`member_protocol.md` §16 invariant 1).
-- **The member account, its login, and the website** → **step 7**. Enrollment
-  and recovery tickets are created in slice 2 by an audited `pool-admin` command
-  that calls a private Pool API admin route, rather than by a member-facing
-  account page: `member_protocol.md` §3.1 puts account login outside this
-  protocol, and §17 leaves the recovery route to a later document. The route,
-  not a shared secret file, is what keeps the ticket HMAC key in the one process
-  `security.md` §4.1 gives it to; `pool-admin` never becomes a second holder of
-  a Pool API secret.
+
+  Two things changed here after this plan was written. ADR 0010 added a
+  per-member collateral multiplier to §11.4's reserve, and ADR 0013 removed the
+  separate failure-charge term `X` from it — the charge is now derived from the
+  benchmark's own fee, and it no longer depends on fault at all. D10, D13 and F6
+  carry those.
+- **The member website** → **step 7**. The *account* is no longer deferred with
+  it. ADR 0011 chose the login mechanism after this plan was written: a member
+  signs in by proving control of a Base address, and that address **is** the
+  member account (`member_protocol.md` §3.1, §17; `accounting.md` §12.2). So
+  slice 2 implements the proof rather than an interim stand-in — B8 and B9 below
+  — and what waits for step 7 is the user interface that calls it. An earlier
+  draft of this plan had `pool-admin` mint enrollment tickets; that would now be
+  building something to throw away.
+
+  There is **no account recovery**, by design rather than by deferral: the
+  account is the wallet, so a member who loses it loses the authority that
+  issues worker-recovery tickets (ADR 0011, `member_protocol.md` §3.3). Only the
+  *worker*-recovery HTTP route stays deferred (§17).
 - **Metrics and alert tests** → **step 5**, with slice 1's I2 and I4.
 - **GPU work.** v0 defines GPU slots (`member_protocol.md` §6) and the schema
   accepts them, but the pool serves `cpu` today and TIG's live testnet offers no
@@ -163,11 +174,25 @@ Each criterion is a property with a test, not a task. Where a criterion says
   erasing no state and reassigning no benchmark (§3.3, `security.md` §4.1).
 - B6. Recovery attaches a new key to an existing worker and revokes every older
   credential, under §3.3's `TIG-POOL-RECOVERY-V1` proof and a 15-minute
-  `WORKER_RECOVERY` ticket, preserving ownership. In slice 2 the ticket is
-  created by an audited `pool-admin` command (§2 above). A worker revoked as a
-  security action is not recoverable by this path.
+  `WORKER_RECOVERY` ticket, preserving ownership. The ticket is authorized by
+  the member's wallet signature (B8), not by an operator command. A worker
+  revoked as a security action is not recoverable by this path, and the account
+  behind it cannot be recovered at all (ADR 0011).
 - B7. Authentication failures, duplicate requests, and stale timestamps have no
   mining-trust effect (`member_protocol.md` §15).
+- B8. **The member account is a Base address, proved by signature.** A member
+  authenticates with a domain-separated EIP-191 or EIP-712 signature carrying
+  pool domain, chain ID, address, a one-time nonce, purpose, and expiry, and the
+  pool validates the exact domain so a signature cannot be replayed against
+  another pool or chain (ADR 0011, `accounting.md` §12.2). Tests: a signature
+  for another domain, another chain id, an expired one, and a reused nonce are
+  each refused; a valid one authenticates exactly the address that signed it.
+- B9. **That signature is what authorizes an enrollment or worker-recovery
+  ticket.** The `member_id` remains pool-issued and opaque as
+  `member_protocol.md` §2 requires; the address is unique per member and is the
+  only thing a session proves. The ticket HMAC key stays in the Pool API alone
+  (`security.md` §4.1), so no other process holds it. Slice 2 supplies no
+  address-change operation, because ADR 0011 leaves nothing for one to do.
 
 ### C. Slots and qualification
 
@@ -234,9 +259,24 @@ Each criterion is a property with a test, not a task. Where a criterion says
   and failure to reserve cancels the pending offer **without** a TIG write (§6
   final paragraph). In slice 2 "reserve" means what slice 1's D2c means: the
   `accounting.md` §11.4 amount is computed and durably recorded with the
-  decision, and nothing is posted. The check against a member's *eligible
-  collateral* arrives with steps 6–8, because there is no balance to check
-  against until then.
+  decision, and nothing is posted.
+
+  The amount is §11.4's **current** expression, which changed after this plan
+  was written: `ceil(P[s] * B[t] * M_bps[m] / 10_000) + F[s,t]`, maximised over
+  the proposed tracks. There is no `X` term — ADR 0013 derives the failure
+  charge from the benchmark's own fee, so the fee appears once rather than
+  twice. Slice 1 ships `precommit_failure_charge_atoms` set to zero, which makes
+  the arithmetic already equal; issue #61 removes the term, and slice 2 must not
+  reintroduce it.
+
+  **What is deferred, and what that costs.** §11.4's admission gate —
+  `eligible_collateral[m] - reserved_exposure[m] >= precommit_reserve` — needs a
+  balance, and balances need the deposit path in step 8. So slice 2 records the
+  reservation and does not check it against a member's collateral, which means
+  a slice-2 member does work that nothing of theirs backs. That is safe only
+  because slice 2 is testnet, where the pool's exposure is testnet TIG; the gate
+  must land before any deposit is accepted or any mainnet work is decided, and
+  `pre_build_checklist.md` §9's launch gates are where that is checked.
 - D11. **The per-member concurrency bound, without tiers.** A member's
   concurrent unverified benchmarks are capped by a required configuration value
   standing in for `tier_number`, enforced in the same serialized transaction as
@@ -252,6 +292,17 @@ Each criterion is a property with a test, not a task. Where a criterion says
   more than `max(0, limit - member_unverified)` queued or reserved offers, and a
   slot may have only one (`member_protocol.md` §6), with `limit` from D11 until
   tiers supply it.
+- D13. **The collateral multiplier is a member fact the reservation fixes.**
+  The member row carries `M_bps`, an integer in `1..=10_000` defaulting to
+  `10_000`, set by the pool and never by the member, versioned in the same
+  append-only form as the fee policy (ADR 0010, `accounting.md` §11.4).
+  Admission reads it from the snapshot's member row and writes the value it
+  used into the reservation, so a later change reaches no open reservation in
+  either direction. Rounding is **up**, toward the pool, so a scaled reserve is
+  never an atom short. Tests: the default reserves exactly the unscaled amount;
+  `5_000` halves the method term and leaves `F` untouched; a change after
+  admission does not move an existing reservation; and `0` or `10_001` is
+  refused.
 
 ### E. The confirmed assignment
 
@@ -300,6 +351,16 @@ Each criterion is a property with a test, not a task. Where a criterion says
   or member attributed (§8).
 - F5. Missing heartbeats and transient network failures are operational signals,
   never trust penalties (§8, §16 invariant 13).
+- F6. **A terminal outcome is classified, and that classification decides
+  nothing financial.** Slice 2 records one of `MEMBER`, `POOL`, `TIG` or
+  `UNRESOLVED` with its machine reason and evidence, as `member_protocol.md` §15
+  requires. Under ADR 0013 that record is operational reporting: `accounting.md`
+  §11.6 charges the owning member whatever the cause, and there is no in-system
+  appeal for the classification to feed. Slice 2 posts no charge at all —
+  charges are steps 6–8 — so the criterion is that the classification is
+  recorded and that nothing in slice 2 reads it to decide money. Test: a
+  `POOL`-attributed terminal outcome and a `MEMBER`-attributed one leave
+  identical financial state.
 
 ### G. Upload sessions and quarantine
 
@@ -504,15 +565,17 @@ Each is one PR unless it grows past what one review can hold.
    artifacts; the `pool_api` and `artifact_worker` roles (L1, L2, L3).
 2. **`pool-api` skeleton and request authentication** — A1–A5, A8; the
    `pool-identity` verification path moved behind PostgreSQL.
-3. **Enrollment, rotation, revocation** — B1–B7, plus the `pool-admin` ticket
-   command.
+3. **The member account, enrollment, rotation, revocation** — B1–B9. The wallet
+   signature (B8) comes first in this PR, because it is what authorizes a ticket
+   to exist at all.
 4. **Idempotency and abuse controls** — A6, A7.
 5. **Slots and qualification** — C1–C8.
-6. **Offers and admission** — D1–D4, D9, D10 (the serialized transaction slice 1
-   built, entered from a real offer).
-7. **The queue** — D5–D8.
-8. **Assignment publication** — E1–E5.
-9. **Heartbeats, events, cancellation** — F1–F5.
+6. **Offers and admission** — D1–D4, D9, D10, D11, D13 (the serialized
+   transaction slice 1 built, entered from a real offer and carrying the member
+   bound and the multiplier).
+7. **The queue** — D5–D8, D12.
+8. **Assignment publication** — E1–E6.
+9. **Heartbeats, events, cancellation** — F1–F6.
 10. **Upload sessions and quarantine** — G1–G7.
 11. **`artifact-worker`: bounded parsing and structural acceptance** — H1–H10.
 12. **Publication, durable acceptance, receipt, slot release** — I1–I7.
@@ -551,6 +614,16 @@ Steps 1–4 are the foundation everything else needs. After step 5, steps 6–9 
   the spike report carry numbers from the repository they were written in — the
   note in `plans/slice-1-gateway.md` §9 says which is which — so the GPU gap that
   checklist calls "issue #35" is issue #54 here.
+- **The funding model moved under this plan.** ADRs 0009–0014 landed after it
+  was written: the member account became a wallet (0011), the method reserve
+  gained a per-member multiplier (0010), the separate failure-charge term was
+  removed (0013), and settlement, shortfall and withdrawal-cap rules changed
+  around them. The criteria above were rewritten against the current
+  `accounting.md` §11.4 and §11.6 rather than the versions this plan was drafted
+  from. The carried risk is the reverse: a slice-2 PR written from memory of the
+  old model would reintroduce `X` or an appeal path. Issue #61 removes the
+  shipped `X` term, and D10 says explicitly that slice 2 must not reintroduce
+  it.
 - **`proof_reserve_blocks = 10` is a spike constant** (`member_protocol.md` §7).
   Slice 2 measures real package upload and acceptance timings on the live run;
   replacing the constant with a reviewed value is step 3's or step 5's, and this

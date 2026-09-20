@@ -81,6 +81,7 @@ fn not_authenticated() -> ApiError {
         message: "that ticket does not enrol a worker".to_owned(),
         retryable: false,
         request_id: None,
+        enrollment_request_id: None,
     }
 }
 
@@ -92,6 +93,7 @@ fn incompatible_protocol() -> ApiError {
         message: "this server speaks no version or package format you offered".to_owned(),
         retryable: false,
         request_id: None,
+        enrollment_request_id: None,
     }
 }
 
@@ -103,6 +105,7 @@ fn idempotency_conflict() -> ApiError {
         message: "that enrollment_request_id was used for a different request".to_owned(),
         retryable: false,
         request_id: None,
+        enrollment_request_id: None,
     }
 }
 
@@ -113,6 +116,7 @@ fn unavailable() -> ApiError {
         message: "the pool could not complete this request".to_owned(),
         retryable: true,
         request_id: None,
+        enrollment_request_id: None,
     }
 }
 
@@ -131,17 +135,22 @@ async fn enroll(
             message: "the request body is not the shape this route accepts".to_owned(),
             retryable: false,
             request_id: None,
+            enrollment_request_id: None,
         }
         .into_response_at(&server_time);
     };
 
     match enrol_worker(&state, &request, &server_time).await {
         Ok((status, response)) => (status, Json(response)).into_response(),
-        // §3.2's echo is `request_id`, which this route has no header for;
-        // `enrollment_request_id` is the identifier an enrolling agent has,
-        // and §3.2 names it for exactly this case.
+        // §3.2: "an error echoes `request_id` when the request carried the
+        // standard signed header, or `enrollment_request_id` for a decoded
+        // enrollment attempt". This route has no signed header, so it is the
+        // second — and they are different keys in the pinned `ErrorResponse`,
+        // not one field with two meanings. Echoing under `request_id` was
+        // this route's first version, and no agent would have found its
+        // attempt there.
         Err(e) => e
-            .echoing(&request.enrollment_request_id)
+            .echoing_enrollment(&request.enrollment_request_id)
             .into_response_at(&server_time),
     }
 }
@@ -497,6 +506,7 @@ fn canonical_uuid(value: &str) -> Result<String, ApiError> {
             message: "enrollment_request_id is not a canonical uuid".to_owned(),
             retryable: false,
             request_id: None,
+            enrollment_request_id: None,
         })
     }
 }
@@ -699,6 +709,83 @@ mod tests {
         assert_eq!(expired.status, unknown.status);
         assert_eq!(expired.message, unknown.message);
         assert_eq!(expired.error_code, "NOT_AUTHENTICATED");
+    }
+
+    #[tokio::test]
+    async fn a_refusal_names_the_enrollment_attempt_it_refused() {
+        // §3.2: "an error echoes `request_id` when the request carried the
+        // standard signed header, or `enrollment_request_id` for a decoded
+        // enrollment attempt". This route has no signed header, so an agent
+        // matching a failure to the attempt that caused it looks for the
+        // second — and it is a different key, not the first under another
+        // name.
+        let Some((_db, state)) = migrated("enroll_echo").await else {
+            return;
+        };
+
+        // Through the route, not by calling `echoing_enrollment` here. The
+        // echo is attached at the handler boundary, so a test that attaches
+        // it itself is a mirror: the first version of this test did exactly
+        // that and passed with the route echoing under the wrong key, and
+        // with it echoing nothing at all.
+        let request = enrol_request("never-issued", &agent_key(0xa1), REQUEST_ID);
+        let body = serde_json::json!({
+            "enrollment_request_id": request.enrollment_request_id,
+            "enrollment_ticket": request.enrollment_ticket,
+            "worker_name": request.worker_name,
+            "ed25519_public_key": request.ed25519_public_key,
+            "ed25519_key_proof": request.ed25519_key_proof,
+            "supported_protocol_versions": request.supported_protocol_versions,
+            "supported_package_formats": request.supported_package_formats,
+            "member_agent_version": request.member_agent_version,
+        })
+        .to_string();
+
+        let (status, refused) = post_json(&state, "/member/v0/enroll", &body).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(refused["error_code"], "NOT_AUTHENTICATED");
+        assert_eq!(refused["enrollment_request_id"], REQUEST_ID);
+        assert!(
+            refused.get("request_id").is_none(),
+            "not under the signed-request key: {refused:#}"
+        );
+    }
+
+    /// The real router, assembled as `run` assembles it, so a test sees what
+    /// an agent would.
+    async fn post_json(
+        state: &AccountState,
+        path: &str,
+        body: &str,
+    ) -> (StatusCode, serde_json::Value) {
+        use tower::ServiceExt as _;
+
+        let limit = pool_config::LARGEST_CONFORMING_CONTROL_BODY_BYTES;
+        let api = pool_config::MemberApiConfig {
+            listen: "127.0.0.1:0".to_owned(),
+            ticket_hmac_key_file: std::path::PathBuf::from("/dev/null"),
+            pool_domain: "test.bench-pool.invalid".to_owned(),
+            login_chain_id: 84_532,
+            max_control_body_bytes: limit,
+        };
+        let router = crate::service::app_with(
+            &api,
+            crate::service::AppState { now },
+            routes(state.clone(), limit),
+        );
+
+        let request = axum::http::Request::post(path)
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(body.to_owned()))
+            .expect("a well-formed request");
+        let response = router.oneshot(request).await.expect("the router answers");
+        let status = response.status();
+        let bytes = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .expect("a readable body")
+            .to_bytes();
+        let value = serde_json::from_slice(&bytes).expect("a JSON body");
+        (status, value)
     }
 
     #[tokio::test]

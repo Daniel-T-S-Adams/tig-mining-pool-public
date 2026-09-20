@@ -219,6 +219,25 @@ fn an_error_conforms_with_and_without_the_echoed_request_id() {
     let echoed = serde_json::to_value(&echoed).expect("serializable");
     support::assert_conforms("common.schema.json#ErrorResponse", &echoed);
     assert_eq!(echoed["request_id"], request_id);
+    assert!(
+        echoed.get("enrollment_request_id").is_none(),
+        "a signed request's echo is `request_id` and only that: {echoed:#}"
+    );
+
+    // §3.2's other echo, for the one route with no signed header. A separate
+    // key in the schema, not the same one reused — an enrolling agent looks
+    // for its `enrollment_request_id` and would not find its attempt under
+    // `request_id`.
+    let enrolling = pool_api::error::ApiError::unknown_route()
+        .echoing_enrollment(request_id)
+        .body(&server_time);
+    let enrolling = serde_json::to_value(&enrolling).expect("serializable");
+    support::assert_conforms("common.schema.json#ErrorResponse", &enrolling);
+    assert_eq!(enrolling["enrollment_request_id"], request_id);
+    assert!(
+        enrolling.get("request_id").is_none(),
+        "and not under the signed-request key: {enrolling:#}"
+    );
 }
 
 #[test]

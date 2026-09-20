@@ -114,6 +114,7 @@ fn not_authenticated() -> ApiError {
         message: "that signature does not authorise a ticket".to_owned(),
         retryable: false,
         request_id: None,
+        enrollment_request_id: None,
     }
 }
 
@@ -124,6 +125,7 @@ fn unavailable() -> ApiError {
         message: "the pool could not complete this request".to_owned(),
         retryable: true,
         request_id: None,
+        enrollment_request_id: None,
     }
 }
 
@@ -145,6 +147,7 @@ async fn issue(
             message: "the request body is not the shape this route accepts".to_owned(),
             retryable: false,
             request_id: None,
+            enrollment_request_id: None,
         }
         .into_response_at(&server_time);
     };

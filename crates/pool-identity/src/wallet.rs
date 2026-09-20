@@ -107,6 +107,21 @@ pub struct LoginExpectation<'a> {
     pub expires_at_rfc3339: &'a str,
 }
 
+/// What a login signature proved.
+///
+/// The expiry comes back with the address because the caller needs the same
+/// instant the signature carried — to bound how far ahead it may reach, and
+/// to record how long the nonce that spent it must be remembered
+/// (`accounting.md` §12.2). Returning it here means one parse of the signed
+/// text rather than the caller interpreting it a second time and possibly
+/// differently.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProvedLogin {
+    pub address: ProvedAddress,
+    /// The signed expiry, as a Unix second.
+    pub expires_at_unix: u64,
+}
+
 /// A proved member address: lowercase `0x` hex, as `pool.member` stores it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProvedAddress(String);
@@ -132,7 +147,7 @@ pub fn recover_login_address(
     expectation: &LoginExpectation<'_>,
     signature: &str,
     now_unix: u64,
-) -> IdentityResult<ProvedAddress> {
+) -> IdentityResult<ProvedLogin> {
     // The expiry is checked before the cryptography, because it needs no
     // secret and an expired signature is not worth a recovery. It is parsed
     // from the same text that was signed, so a caller cannot present one
@@ -173,7 +188,10 @@ pub fn recover_login_address(
     let key = VerifyingKey::recover_from_prehash(&eip191_digest(&message), &signature, recovery)
         .map_err(|_| refused("no public key recovers from this signature"))?;
 
-    Ok(address_of(&key))
+    Ok(ProvedLogin {
+        address: address_of(&key),
+        expires_at_unix: expires_at,
+    })
 }
 
 /// EIP-191 `personal_sign`: keccak256 over the prefix, the decimal byte

@@ -38,6 +38,19 @@ const TICKET_LIFETIME: &str = "15 minutes";
 /// unpadded base64url so a member can paste it.
 const BEARER_BYTES: usize = 32;
 
+/// How far ahead of server time a login signature may claim to be valid.
+///
+/// `accounting.md` §12.2 requires an expiry but names no bound, and the
+/// signature carries whatever the member signed — so without this a member
+/// could sign one good for years. Two things go wrong then: a stolen
+/// signature is worth something for that whole time, and the pool must
+/// remember its nonce for just as long, because §12.2 keeps a spent nonce
+/// "until the signature that spent it has expired".
+///
+/// Fifteen minutes, which is what a signature actually needs: the round trip
+/// between a wallet signing and a browser posting.
+const LOGIN_MAX_LIFETIME_SECONDS: u64 = 15 * 60;
+
 /// What the account routes need. Crate-private, because it holds the ticket
 /// key and `security.md` §4.1 keeps that here.
 #[derive(Clone)]
@@ -158,12 +171,23 @@ async fn issue_ticket(
     };
 
     let now = (state.now)();
-    let address = recover_login_address(
-        &expectation,
-        &request.signature,
-        u64::try_from(now.unix_timestamp()).unwrap_or(0),
-    )
-    .map_err(|_| not_authenticated())?;
+    let now_unix = u64::try_from(now.unix_timestamp()).unwrap_or(0);
+    let proved = recover_login_address(&expectation, &request.signature, now_unix)
+        .map_err(|_| not_authenticated())?;
+
+    // The signature is inside its own expiry — `recover_login_address`
+    // checked that — but the expiry is the member's to choose, so the pool
+    // bounds how far ahead it may reach. Refused as an authentication
+    // failure, like every other way a login does not authorise a ticket.
+    if proved.expires_at_unix > now_unix.saturating_add(LOGIN_MAX_LIFETIME_SECONDS) {
+        tracing::info!(
+            event = "account.login_rejected",
+            reason = "EXPIRY_TOO_FAR_AHEAD",
+            "a login signature claimed a validity this pool does not grant"
+        );
+        return Err(not_authenticated());
+    }
+    let address = proved.address;
 
     // One transaction from here. `security.md` §4.1 puts "ticket lookup,
     // expiry check, one-time consumption, and worker/credential creation" in
@@ -179,15 +203,25 @@ async fn issue_ticket(
     // Spending the nonce first is what makes the rest at-most-once. The
     // primary key is `(network, wallet_address, nonce)`, so a second attempt
     // with the same signature conflicts here rather than further down.
-    let spent = sqlx::query(sqlx::AssertSqlSafe(format!(
+    //
+    // `signature_expires_at` is **the expiry the signature carries**, not the
+    // ticket's lifetime. That column decides when the row may be pruned, and
+    // §12.2 keeps a spent nonce "until the signature that spent it has
+    // expired" — writing anything shorter would let the nonce be forgotten
+    // while the signature it spent was still acceptable, which is the replay
+    // the nonce exists to prevent. Writing the ticket's fifteen minutes here
+    // was this route's first version, and the bound above is what keeps the
+    // honest value from being unboundedly far away.
+    let spent = sqlx::query(
         "INSERT INTO pool.wallet_login_nonce
              (network, wallet_address, nonce, purpose, signature_expires_at)
-         VALUES ($1, $2, $3, 'WORKER_ENROLLMENT', now() + interval '{TICKET_LIFETIME}')
-         ON CONFLICT DO NOTHING"
-    )))
+         VALUES ($1, $2, $3, 'WORKER_ENROLLMENT', to_timestamp($4::bigint))
+         ON CONFLICT DO NOTHING",
+    )
     .bind(&state.network)
     .bind(address.as_str())
     .bind(&request.nonce)
+    .bind(i64::try_from(proved.expires_at_unix).unwrap_or(i64::MAX))
     .execute(&mut *tx)
     .await
     .map_err(|e| {
@@ -602,6 +636,127 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(spent, 0);
+    }
+
+    #[tokio::test]
+    async fn the_nonce_is_remembered_until_the_signature_it_spent_expires() {
+        // `accounting.md` §12.2: a spent nonce is kept "until the signature
+        // that spent it has expired". The first version of this route wrote
+        // the *ticket's* fifteen minutes into that column instead of the
+        // expiry the signature carries — so a signature good for longer would
+        // have had its nonce pruned while it was still acceptable, and could
+        // then be replayed.
+        let Some((_db, mut state)) = migrated("account_nonce_retention").await else {
+            return;
+        };
+
+        // Real time here, not the pinned clock the other tests use. The
+        // database's `now()` is real, and `migrations/0026` compares this
+        // column against it — so a signature dated 2026-03 would be prunable
+        // whatever the code wrote, and the assertion below would pass for the
+        // wrong reason.
+        state.now = time::OffsetDateTime::now_utc;
+        let five_minutes_on = time::OffsetDateTime::now_utc() + time::Duration::minutes(5);
+        let expires_at = five_minutes_on
+            .replace_nanosecond(0)
+            .expect("a valid nanosecond")
+            .format(&time::format_description::well_known::Rfc3339)
+            .expect("a representable instant");
+
+        let message = login_signing_string(
+            POOL_DOMAIN,
+            CHAIN,
+            LoginPurpose::WorkerEnrollment,
+            NONCE,
+            &expires_at,
+        );
+        let request = EnrollmentTicketRequest {
+            nonce: NONCE.to_owned(),
+            expires_at: expires_at.clone(),
+            signature: personal_sign(&signing_key(ALICE_KEY), &message),
+        };
+        issue_ticket(&state, &request).await.expect("a ticket");
+
+        // The stored instant is the one inside the signed text, to the
+        // second, and not `now() + 15 minutes`.
+        let stored: i64 = sqlx::query_scalar(
+            "SELECT EXTRACT(EPOCH FROM signature_expires_at)::bigint
+               FROM pool.wallet_login_nonce WHERE wallet_address = $1",
+        )
+        .bind(ALICE)
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+        assert_eq!(
+            stored,
+            five_minutes_on.unix_timestamp(),
+            "the signed expiry, not the ticket's lifetime"
+        );
+
+        // And `migrations/0026` therefore refuses to prune it: the signature
+        // is still inside its own window. This is the assertion the first
+        // version of this route would have failed — it wrote fifteen minutes
+        // where the signature said five, and for a signature saying an hour
+        // the row would have been prunable while the signature still worked.
+        let early = sqlx::query("DELETE FROM pool.wallet_login_nonce")
+            .execute(&state.db)
+            .await;
+        assert!(early.is_err(), "a live signature's nonce must stay");
+    }
+
+    #[tokio::test]
+    async fn a_signature_good_for_longer_than_the_pool_grants_buys_nothing() {
+        // The expiry is the member's to choose, so without a bound one could
+        // sign a login good for years — a stolen signature worth something
+        // for all of it, and a nonce the pool must remember just as long.
+        let Some((_db, state)) = migrated("account_long_expiry").await else {
+            return;
+        };
+
+        // Fifteen minutes exactly is granted; a second more is not.
+        let at_the_limit = "2026-03-20T10:01:40Z";
+        let past_it = "2026-03-20T10:01:41Z";
+
+        let mut request = request_from(ALICE_KEY, NONCE);
+        let message = login_signing_string(
+            POOL_DOMAIN,
+            CHAIN,
+            LoginPurpose::WorkerEnrollment,
+            NONCE,
+            past_it,
+        );
+        request.expires_at = past_it.to_owned();
+        request.signature = personal_sign(&signing_key(ALICE_KEY), &message);
+
+        let refused = issue_ticket(&state, &request)
+            .await
+            .expect_err("a signature reaching too far ahead must be refused");
+        assert_eq!(refused.error_code, "NOT_AUTHENTICATED");
+
+        // Nothing was spent on its behalf.
+        let spent: i64 = sqlx::query_scalar("SELECT count(*) FROM pool.wallet_login_nonce")
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+        assert_eq!(spent, 0);
+
+        // The boundary itself is granted, so the rejection is a bound rather
+        // than a refusal of anything beyond the default.
+        let message = login_signing_string(
+            POOL_DOMAIN,
+            CHAIN,
+            LoginPurpose::WorkerEnrollment,
+            NONCE,
+            at_the_limit,
+        );
+        let at_limit = EnrollmentTicketRequest {
+            nonce: NONCE.to_owned(),
+            expires_at: at_the_limit.to_owned(),
+            signature: personal_sign(&signing_key(ALICE_KEY), &message),
+        };
+        issue_ticket(&state, &at_limit)
+            .await
+            .expect("fifteen minutes exactly is granted");
     }
 
     #[tokio::test]

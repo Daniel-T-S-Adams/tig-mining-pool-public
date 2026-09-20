@@ -13,6 +13,7 @@
 
 pub mod account;
 pub mod auth;
+pub mod enroll;
 pub mod error;
 pub mod protocol;
 pub mod service;

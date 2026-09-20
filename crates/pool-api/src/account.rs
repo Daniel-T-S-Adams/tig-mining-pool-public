@@ -341,7 +341,7 @@ fn mint_bearer() -> Result<String, ApiError> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     //! In this crate, not in `tests/`, for the reason
     //! `tig_gateway::drive`'s tests give for the same choice: an
     //! `AccountState` holds a `TicketKey`, and a `TicketKey` exists only
@@ -363,19 +363,21 @@ mod tests {
 
     const POOL_DOMAIN: &str = "test.bench-pool.invalid";
     const CHAIN: u64 = 84_532;
-    const NONCE: &str = "3f1a9c0e5b2d47a8bc6f91e0d3247a5b";
+    pub(crate) const NONCE: &str = "3f1a9c0e5b2d47a8bc6f91e0d3247a5b";
     /// Five minutes after `NOW`.
     const EXPIRES: &str = "2026-03-20T09:51:40Z";
     const NOW: i64 = 1_774_000_000;
 
     /// TEST-ONLY, and the most published secp256k1 key there is: the scalar
     /// 1. Its address is in every weak-key list.
-    const ALICE_KEY: &str = "0000000000000000000000000000000000000000000000000000000000000001";
+    pub(crate) const ALICE_KEY: &str =
+        "0000000000000000000000000000000000000000000000000000000000000001";
     const ALICE: &str = "0x7e5f4552091a69125d5dfcb7b8c2659029395bdf";
-    const BOB_KEY: &str = "0000000000000000000000000000000000000000000000000000000000000002";
+    pub(crate) const BOB_KEY: &str =
+        "0000000000000000000000000000000000000000000000000000000000000002";
     const BOB: &str = "0x2b5ad5c4795c026514f8317c7a215e218dccd6cf";
 
-    fn now() -> time::OffsetDateTime {
+    pub(crate) fn now() -> time::OffsetDateTime {
         time::OffsetDateTime::from_unix_timestamp(NOW).expect("a valid instant")
     }
 
@@ -397,7 +399,7 @@ mod tests {
         std::sync::Arc::new(crate::ticket_key::load(&path).expect("a usable key"))
     }
 
-    async fn migrated(name: &str) -> Option<(TempDb, AccountState)> {
+    pub(crate) async fn migrated(name: &str) -> Option<(TempDb, AccountState)> {
         let db = TempDb::create(name).await?;
         let migration_pool = sqlx::PgPool::connect_with(db.as_role("pool_migration"))
             .await
@@ -459,6 +461,17 @@ mod tests {
             expires_at: EXPIRES.to_owned(),
             signature: personal_sign(&signing_key(key_hex), &message),
         }
+    }
+
+    /// One issued ticket, for the tests that redeem rather than issue.
+    pub(crate) async fn issue_one_ticket(
+        state: &AccountState,
+        key_hex: &str,
+        nonce: &str,
+    ) -> EnrollmentTicketResponse {
+        issue_ticket(state, &request_from(key_hex, nonce))
+            .await
+            .expect("a valid signature buys a ticket")
     }
 
     #[tokio::test]

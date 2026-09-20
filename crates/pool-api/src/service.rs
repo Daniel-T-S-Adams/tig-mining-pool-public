@@ -295,10 +295,14 @@ pub async fn run(config: &Config) -> Result<(), String> {
         "member api is serving"
     );
 
+    // Both stated route groups: the account surface a member's browser
+    // calls, and the one member-protocol route with no credential to sign
+    // with yet.
     let router = app_with(
         api,
         AppState::default(),
-        crate::account::routes(account, api.max_control_body_bytes),
+        crate::account::routes(account.clone(), api.max_control_body_bytes)
+            .merge(crate::enroll::routes(account, api.max_control_body_bytes)),
     );
     axum::serve(listener, router)
         .with_graceful_shutdown(shutdown())

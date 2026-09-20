@@ -222,6 +222,40 @@ fn an_error_conforms_with_and_without_the_echoed_request_id() {
 }
 
 #[test]
+fn an_enrollment_response_conforms_to_the_pinned_schema() {
+    // The wire shape §3.1 promises, checked against
+    // `schemas/member_protocol/v0.1.0` rather than against this crate's idea
+    // of it. `EnrollResponse` is built in the crate, so it is checked here
+    // through its serialized form — the thing a member agent actually parses.
+    let response = serde_json::json!({
+        "protocol_version": PROTOCOL_VERSION,
+        "enrollment_request_id": "11111111-1111-4111-8111-111111111111",
+        "package_format": PACKAGE_FORMAT,
+        "member_id": "22222222-2222-4222-8222-222222222222",
+        "worker_id": "33333333-3333-4333-8333-333333333333",
+        "credential_id": "44444444-4444-4444-8444-444444444444",
+        "worker_status": "ACTIVE",
+        "server_time": "2026-03-20T09:46:40Z",
+    });
+    support::assert_conforms("api.schema.json#EnrollResponse", &response);
+
+    // And the request shape an agent sends, so the fields this build reads
+    // are the fields the schema defines — `deny_unknown_fields` makes a
+    // mismatch a rejection rather than a silently ignored value.
+    let request = serde_json::json!({
+        "enrollment_request_id": "11111111-1111-4111-8111-111111111111",
+        "enrollment_ticket": "a".repeat(43),
+        "worker_name": "workshop-1",
+        "ed25519_public_key": "A".repeat(43),
+        "ed25519_key_proof": "B".repeat(86),
+        "supported_protocol_versions": [PROTOCOL_VERSION],
+        "supported_package_formats": [PACKAGE_FORMAT],
+        "member_agent_version": "0.1.0",
+    });
+    support::assert_conforms("api.schema.json#EnrollRequest", &request);
+}
+
+#[test]
 fn the_constants_this_build_serves_are_the_ones_the_schema_pins() {
     // `ProtocolVersion`, `PackageFormat` and the two `const` numbers are facts
     // of the protocol version rather than settings of this deployment

@@ -1294,9 +1294,15 @@ fn a_member_api_section_with_an_unusable_value_does_not_load() {
     // A hostname is refused deliberately: a DNS answer can change between
     // startup and a restart, so a bind address that resolves is a different
     // address over time. An address literal is the one that cannot move.
-    let Err(err) =
-        load("\n[member_api]\nlisten = \"localhost:8081\"\nmax_control_body_bytes = 262144\n")
-    else {
+    //
+    // The body limit here is a *valid* one on purpose. With an invalid value
+    // this case would pass only because `validate_for` happens to check
+    // `listen` first, and reordering the two checks would quietly turn it into
+    // a test of the other rejection.
+    let Err(err) = load(&format!(
+        "\n[member_api]\nlisten = \"localhost:8081\"\n\
+         max_control_body_bytes = {LARGEST_CONFORMING_CONTROL_BODY_BYTES}\n"
+    )) else {
         panic!("a hostname must not load");
     };
     assert_invalid(err, "must be `address:port`");

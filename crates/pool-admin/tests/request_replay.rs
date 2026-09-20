@@ -248,6 +248,46 @@ async fn a_record_is_not_forgotten_before_its_window_closes() {
 }
 
 #[tokio::test]
+async fn the_whole_window_cannot_be_forgotten_in_one_statement() {
+    // TRUNCATE fires no row triggers, so the bounded-DELETE guard does not
+    // see it. Losing the memory entire is worse than losing one record:
+    // every request id in the forgotten window becomes reusable, which is the
+    // replay §3.2 exists to refuse.
+    //
+    // Attempted as `pool_migration`, which owns the table — `pool_api` has no
+    // TRUNCATE privilege, so run as the API this would prove nothing.
+    let Some((db, mut api)) = migrated("replay_truncate", "pool_api").await else {
+        return;
+    };
+    let credential_id = credential(&mut api).await;
+    record(
+        &mut api,
+        &credential_id,
+        NEW_REQUEST,
+        SIGNED_A,
+        "25 hours",
+        "24 hours",
+    )
+    .await
+    .unwrap();
+
+    let mut owner = PgConnection::connect_with(&db.as_role("pool_migration"))
+        .await
+        .unwrap();
+    let emptied = sqlx::query("TRUNCATE pool.request_replay")
+        .execute(&mut owner)
+        .await;
+    assert!(emptied.is_err(), "the window must not be dropped whole");
+
+    // Even though this very record is past due and prunable row by row.
+    let remaining: i64 = sqlx::query_scalar("SELECT count(*) FROM pool.request_replay")
+        .fetch_one(&mut api)
+        .await
+        .unwrap();
+    assert_eq!(remaining, 1);
+}
+
+#[tokio::test]
 async fn a_record_past_its_window_is_prunable() {
     // The other half. Without this, the test above would pass with DELETE
     // refused unconditionally, and the table would grow for ever.

@@ -664,6 +664,70 @@ async fn an_identical_retry_is_accepted_and_a_reuse_is_rejected_and_audited() {
 }
 
 #[tokio::test]
+async fn a_reuse_that_cannot_be_audited_is_not_refused_permanently() {
+    // §3.2 says a reuse is "rejected **and** audited", and `security.md` §9
+    // lists "authentication replay" among the events that must leave a
+    // durable fact. The two are one answer: if the row cannot be written the
+    // pool has not done what it says it does, so it must not hand back a
+    // permanent `409` that no retry would ever turn into a record.
+    let Some((db, api)) = migrated("verify_audit_required").await else {
+        return;
+    };
+    let alice = enrol(&api, ALICE, 0xa1).await;
+    let v = verifier(&api);
+
+    let first = sign(&alice, GET, PATH, b"", &request_id(1), NOW);
+    verify(&v, &first).await.expect("the first attempt");
+
+    let mut owner = sqlx::PgConnection::connect_with(&db.as_role("pool_migration"))
+        .await
+        .unwrap();
+    pool_test_support::exec(
+        &mut owner,
+        "REVOKE INSERT ON pool.audit_event FROM pool_api".to_owned(),
+    )
+    .await
+    .expect("the migration role owns the grant");
+
+    let elsewhere = sign(
+        &alice,
+        GET,
+        "/member/v0/heartbeats",
+        b"",
+        &request_id(1),
+        NOW,
+    );
+    let denied = verify(&v, &elsewhere).await.expect_err("a reuse");
+    assert_eq!(
+        denied.error_code, "TEMPORARILY_UNAVAILABLE",
+        "an unrecordable reuse asks to be asked again"
+    );
+    assert!(denied.retryable);
+
+    // And with the grant back, the same reuse is refused permanently and
+    // leaves the row — so the case above is about the audit write and not
+    // about reuses in general.
+    pool_test_support::exec(
+        &mut owner,
+        "GRANT INSERT ON pool.audit_event TO pool_api".to_owned(),
+    )
+    .await
+    .expect("restored");
+
+    let denied = verify(&v, &elsewhere).await.expect_err("a reuse");
+    assert_eq!(denied.error_code, "REQUEST_ID_REUSED");
+    assert!(!denied.retryable);
+
+    let audited: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM pool.audit_event WHERE request_id = $1::uuid")
+            .bind(request_id(1))
+            .fetch_one(&api)
+            .await
+            .unwrap();
+    assert_eq!(audited, 1, "one rejection, one row");
+}
+
+#[tokio::test]
 async fn one_worker_cannot_spend_another_workers_request_ids() {
     // The replay memory is per credential, not global: two workers choosing
     // the same request ID are two attempts, not a replay. A global key would

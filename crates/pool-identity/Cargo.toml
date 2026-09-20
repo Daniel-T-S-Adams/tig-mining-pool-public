@@ -11,6 +11,15 @@ base64 = "0.22"
 blake3 = "1"
 ed25519-dalek = "2"
 getrandom = "0.3"
+# ADR 0011's member account is a Base address, proved by a secp256k1
+# signature: `k256` recovers the signing key from one, and `sha3::Keccak256`
+# is the hash Ethereum addresses and EIP-191 are defined over. Keccak256, not
+# Sha3_256 — the two differ in padding and would derive different addresses.
+k256 = { version = "0.13", default-features = false, features = [
+    "ecdsa",
+    "std",
+] }
+sha3 = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"

@@ -1688,6 +1688,33 @@ The account system must require:
 - one-time nonces and exact-domain validation to prevent signature reuse on a
   different pool or chain.
 
+The signature is EIP-191 (`personal_sign`) over this exact UTF-8 text, with no
+final newline. It is domain-separated by its first line, like every signing
+string in `member_protocol.md` §3:
+
+```text
+TIG-POOL-LOGIN-V1
+<pool domain>
+<chain id>
+<purpose>
+<nonce>
+<expires at, RFC 3339 UTC, whole seconds>
+```
+
+`purpose` is `WORKER_ENROLLMENT` or `WORKER_RECOVERY` — the two authorities a
+member account grants (`member_protocol.md` §3.1, §3.3). The address is absent
+because it is recovered from the signature, which is what makes it the
+identity rather than a claim. The pool rebuilds this text from values it
+fixes and recovers the signer: a signature made for another domain, chain,
+purpose, nonce or expiry recovers to a different address, which matches no
+member.
+
+The nonce is one-time **per address**. A nonce spent globally would let anyone
+sign a value with their own key to deny it to someone else; scoping to the
+recovered address means a party can only spend nonces for an address they
+control. A spent nonce is remembered until the signature that spent it has
+expired, after which remembering it prevents nothing.
+
 The address-change controls this section previously carried — reauthentication
 and phishing-resistant MFA or a passkey for a change, a 48-hour security delay,
 and out-of-band notification — are not listed because there is no change

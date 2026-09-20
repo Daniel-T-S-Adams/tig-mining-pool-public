@@ -35,6 +35,18 @@ for role in "${roles[@]}"; do
     fi
 done
 
+# The Pool API's ticket HMAC key (security.md §4.1). Generated here with the
+# database passwords because it lives alongside them in `secrets/` and an
+# operator wants one command, not two — but it is not a database credential:
+# `pool-api` hashes every enrollment and recovery ticket under it, and refuses
+# to start unless the file is at least 32 bytes and readable by nobody else.
+ticket_key="$root/secrets/ticket-hmac-key"
+if [[ ! -s "$ticket_key" ]]; then
+    head -c 32 /dev/urandom > "$ticket_key"
+    chmod 600 "$ticket_key"
+    echo "generated $ticket_key"
+fi
+
 if ! docker ps --format '{{.Names}}' | grep -qx "$container"; then
     if docker ps -a --format '{{.Names}}' | grep -qx "$container"; then
         docker start "$container" >/dev/null

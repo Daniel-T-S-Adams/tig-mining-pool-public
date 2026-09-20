@@ -37,6 +37,12 @@ deployment = "local-dev"
 # is no proxy and no member but the local agent. An address literal rather than
 # a hostname: a DNS answer can change between restarts.
 listen = "127.0.0.1:8081"
+# The dedicated key every enrollment and recovery ticket is hashed under
+# (security.md §4.1). The path, never the key — `scripts/dev-db.sh` generates
+# the referenced file into the untracked `secrets/` directory, readable only
+# by the owner. `pool-api` refuses to start if it is missing, short, or
+# readable by anyone else.
+ticket_hmac_key_file = "secrets/ticket-hmac-key"
 # The largest control-message body this deployment reads. The floor is what
 # the pinned request schemas can produce — a maximal `HeartbeatRequest` is
 # 383156 bytes compactly encoded — and the ceiling is §10.3's 64 MiB chunk,

@@ -19,6 +19,7 @@ use tower_http::limit::RequestBodyLimitLayer;
 
 use crate::error::{ApiError, ProtocolShaped};
 use crate::protocol::{ProtocolInfo, ServerTime};
+use crate::ticket_key::{self, TicketKey};
 
 /// What every handler can reach.
 #[derive(Clone)]
@@ -223,6 +224,13 @@ pub async fn run(config: &Config) -> Result<(), String> {
         .member_api
         .as_ref()
         .ok_or_else(|| "pool-api requires [member_api]".to_owned())?;
+
+    // Before the listener. `security.md` §4.1 hashes every enrollment and
+    // recovery ticket under this key, so a deployment without a usable one
+    // cannot issue or redeem a ticket — and a service that accepted
+    // connections first would discover that at a member's first enrollment
+    // rather than at startup, where an operator is watching.
+    let _ticket_key = preflight(api)?;
     let addr: SocketAddr = api
         .listen
         .parse()
@@ -244,6 +252,24 @@ pub async fn run(config: &Config) -> Result<(), String> {
         .with_graceful_shutdown(shutdown())
         .await
         .map_err(|e| format!("serve failed: {e}"))
+}
+
+/// Everything that must be true before this process accepts a connection.
+///
+/// Separate from `run` so `pool-api check` can ask the same question without
+/// binding a port, and so a test can hand it a configuration and read the
+/// answer instead of starting a server.
+pub fn preflight(api: &MemberApiConfig) -> Result<TicketKey, String> {
+    let key = ticket_key::load(&api.ticket_hmac_key_file).map_err(|e| e.to_string())?;
+    // Reported as presence, never as the key or its length
+    // (`TicketKey::Debug` prints neither).
+    tracing::info!(
+        event = "api.ticket_key.loaded",
+        path = %api.ticket_hmac_key_file.display(),
+        present = key.is_present(),
+        "the ticket HMAC key is readable by this process alone"
+    );
+    Ok(key)
 }
 
 /// SIGTERM or Ctrl-C. A member's upload is a long request, so the server

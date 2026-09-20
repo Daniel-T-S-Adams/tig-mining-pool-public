@@ -5,12 +5,21 @@ run benchmarks on their own machines via a member agent; the pool owns TIG
 credentials, orchestrates precommit/benchmark/proof submission, and settles
 rewards through an append-only accounting ledger.
 
-**Status: pre-build complete.** The design is settled, the deterministic
-fixture sets exist, and the end-to-end protocol spike ran twice on TIG testnet
-(`docs/protocol_spike_report.md`). The first production vertical slice — TIG
-gateway and restart-safe protocol state machine — is specified in
-`docs/plans/slice-1-gateway.md`; `docs/pre_build_checklist.md` owns the
-remaining gates and the slice order.
+**Status: slice 1 shipped; slice 2 in progress.** The pool talks to TIG: it
+takes block-consistent snapshots, decides what to submit, transmits through the
+credential-holding gateway, advances a workflow only on confirmed reads, and
+survives a crash at each of the four `architecture.md` §12 points on the TIG
+write path without paying twice. That ran live on testnet
+(`docs/evidence/slice-1-live-run.md`), and where each of its 61 acceptance
+criteria is satisfied is recorded in `docs/evidence/slice-1-criteria.md`. The
+earlier end-to-end protocol spike that preceded it is in
+`docs/protocol_spike_report.md`.
+
+Slice 2 — the member agent, the member API, and artifact ingestion — is
+specified in `docs/plans/slice-2-member-agent.md`. It replaces the two
+stand-ins slice 1 shipped with: the pool-owned placeholder where a member
+should be, and the feature-gated stub where durable package acceptance should
+be. `docs/pre_build_checklist.md` owns the slice order.
 
 ## A note on provenance
 
@@ -92,13 +101,22 @@ config/              pinned TIG integration contract; per-binary dev configs
 fixtures/            versioned deterministic test fixtures (see fixtures/tig/v1/README.md)
 migrations/          forward-only SQL, applied only by `pool-admin migrate`
 scripts/             dev database, secret scan, feature gate
-crates/pool-domain   shared domain types (grows as behavior is implemented)
-crates/pool-config   typed fail-closed configuration loading
-crates/pool-telemetry structured logging shared by the binaries
-crates/pool-identity member identity issuance and verification
-crates/pool-admin    operator CLI; `migrate` is the one-shot migration job
-crates/fake-tig      deterministic local stand-in for the TIG API (`make smoke`)
-crates/spike         disposable protocol-spike binaries (retained until its
-                     acceptance tests are ported — docs/plans/slice-1-gateway.md §7)
+crates/               one Cargo workspace; the binaries are listed first
+  pool-api            member-facing HTTPS service; holds no TIG credential
+  pool-controller     the protocol state machine: what to write and when
+  tig-gateway         the one holder of the TIG API key; §13's compatibility gate
+  pool-admin          operator CLI; `migrate` is the one-shot migration job
+  fake-tig            deterministic local stand-in for the TIG API (`make smoke`)
+  pool-config         typed fail-closed configuration loading
+  pool-decision       the pure decision rules of docs/mining_system.md §6
+  pool-domain         shared domain types (grows as behavior is implemented)
+  pool-identity       member identity issuance and verification
+  pool-snapshot       block-consistent TIG snapshot assembly
+  pool-telemetry      structured logging shared by the binaries
+  pool-workflow       write intents and their idempotency
+  tig-client          rate-limited read client for the TIG API
+  pool-test-support   throwaway provisioned databases; never a binary dependency
+  spike               disposable protocol-spike binaries (retained until its
+                      acceptance tests are ported — docs/plans/slice-1-gateway.md §7)
 .github/workflows/   PR checks (fmt, clippy, test from a clean checkout)
 ```

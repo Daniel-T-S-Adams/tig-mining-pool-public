@@ -86,35 +86,49 @@ fn control_routes(max_control_body_bytes: u64) -> Router<AppState> {
     )
 }
 
-/// Put `routes` under the control bound.
+/// Put `routes` under `limit`, and under nothing else.
 ///
 /// `route_layer` wraps only the routes registered before it runs, so the
 /// routes and the bound have to be applied together — which is why this takes
-/// the group rather than being folded into `control_routes`. A test that
-/// registered a probe after the bound would be measuring the layer it
-/// installed itself, and would pass with this one deleted.
+/// the group rather than being folded into its caller. A test that registered
+/// a probe after the bound would be measuring the layer it installed itself,
+/// and would pass with this one deleted.
 ///
 /// Two layers, because two limits would otherwise apply. `axum` caps every
 /// body-consuming extractor at 2 MiB unless `DefaultBodyLimit` says otherwise,
-/// so a deployment naming more than that would find its own number ignored —
-/// a limit nobody chose, which is the thing `MemberApiConfig` exists to
-/// prevent. Disabling that leaves `max_control_body_bytes` as the only bound
-/// on these routes, which is what the configuration says it is.
-fn bounded(routes: Router<AppState>, max_control_body_bytes: u64) -> Router<AppState> {
+/// so any group wanting more than that would find its own number silently
+/// replaced — a limit nobody chose, which is the thing `MemberApiConfig`
+/// exists to prevent, and which matters most for the group whose contract
+/// starts at 1 MiB and runs to 64.
+fn bounded(routes: Router<AppState>, limit: u64) -> Router<AppState> {
     routes
         .route_layer(RequestBodyLimitLayer::new(
-            usize::try_from(max_control_body_bytes).unwrap_or(usize::MAX),
+            usize::try_from(limit).unwrap_or(usize::MAX),
         ))
         .route_layer(DefaultBodyLimit::disable())
 }
 
-/// Routes whose body is raw bytes, bounded by the upload session's own chunk
-/// size rather than by `max_control_body_bytes`.
+/// Routes whose body is raw bytes rather than a JSON control message.
 ///
-/// Empty until `PUT /member/v0/uploads/{upload_id}` lands (slice-2 criterion
-/// G3). It exists now so that route has somewhere to go that is not under the
-/// control limit, and so the separation is something a test can check today:
-/// see `the_control_limit_does_not_reach_the_raw_body_group`.
+/// **Empty, and deliberately unbounded, because there is nothing here to
+/// bound.** axum panics on a `route_layer` applied to a router with no routes
+/// — "adding a route_layer before any routes is a no-op" — so the group's
+/// bound cannot be installed ahead of its first route. It arrives with that
+/// route, which is `PUT /member/v0/uploads/{upload_id}` (slice-2 criterion
+/// G3), and it must arrive as `bounded(routes, LARGEST_PROTOCOL_BODY_BYTES)`.
+///
+/// That ceiling is `member_protocol.md` §10.3's 64 MiB chunk, the largest
+/// single body this protocol defines. It is an outer bound and not the one
+/// that decides a request: §11 gives each upload session its own chunk size
+/// within §10.3's 1–64 MiB range, which is a fact about that session rather
+/// than about the router, so the handler checks the declared session itself.
+///
+/// The ceiling is needed rather than optional, because the alternative is not
+/// "no limit" but axum's own 2 MiB — *below* the range §10.3 defines, so a
+/// chunk route registered without it would be refused at 2 MiB by a limit
+/// nobody chose. `the_raw_group_carries_the_protocols_own_ceiling` pins the
+/// shape that route has to take, so the requirement is a failing test rather
+/// than a paragraph someone has to remember.
 fn raw_body_routes() -> Router<AppState> {
     Router::new()
 }
@@ -267,6 +281,11 @@ async fn shutdown() {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+    // Only the tests name these: production code has no route to bound with
+    // the protocol ceiling yet, and the control bound arrives as
+    // configuration rather than as a constant.
+    use pool_config::{LARGEST_CONFORMING_CONTROL_BODY_BYTES, LARGEST_PROTOCOL_BODY_BYTES};
+
     use super::*;
 
     fn empty(status: StatusCode) -> Response {
@@ -281,6 +300,22 @@ mod tests {
     /// as a rejection rather than as a number.
     async fn probe(body: axum::body::Bytes) -> String {
         body.len().to_string()
+    }
+
+    /// The body is the protocol's `ErrorResponse`, carrying `code`.
+    ///
+    /// Only `protocol_shaped_errors` produces this, so asserting it is what
+    /// makes a test notice a router assembled without that layer — a status
+    /// alone would look the same.
+    fn assert_protocol_error(body: &str, code: &str) {
+        let parsed: serde_json::Value = serde_json::from_str(body)
+            .unwrap_or_else(|e| panic!("a protocol error body, got {body:?} ({e})"));
+        assert_eq!(parsed["error_code"], code);
+        assert_eq!(
+            parsed["protocol_version"],
+            crate::protocol::PROTOCOL_VERSION
+        );
+        assert!(parsed["server_time"].is_string());
     }
 
     async fn post_bytes(router: Router, path: &str, len: usize) -> (StatusCode, String) {
@@ -300,19 +335,77 @@ mod tests {
         (status, String::from_utf8_lossy(&bytes).into_owned())
     }
 
+    /// The raw group as it will look once it has a route: a body-reading
+    /// handler under `LARGEST_PROTOCOL_BODY_BYTES` and nothing else. This is
+    /// the shape `raw_body_routes` documents as required of the chunk `PUT`,
+    /// built the one way a bound can be applied — with the routes.
+    fn raw_group_with_probe() -> Router<AppState> {
+        bounded(
+            Router::new().route("/probe/raw", axum::routing::post(probe)),
+            LARGEST_PROTOCOL_BODY_BYTES,
+        )
+    }
+
     #[tokio::test]
     async fn the_control_limit_does_not_reach_the_raw_body_group() {
         // `member_protocol.md` §10.3 puts an upload chunk at 1-64 MiB, so a
         // chunk `PUT` bounded by `max_control_body_bytes` would be capped by
         // the wrong contract. The bound is a `route_layer` on the control
         // group for exactly that reason, and this is what says so.
-        let limit = 64;
-        let raw = Router::new().route("/probe/raw", axum::routing::post(probe));
-        let router = assemble(control_routes(limit), raw, AppState::default());
+        //
+        // Three MiB, not three hundred bytes. A small body would pass whatever
+        // the raw group's bound turned out to be — including axum's own 2 MiB,
+        // which is below the range §10.3 defines and would refuse a real
+        // chunk. The number has to be one the wrong answer fails at.
+        let control_limit = LARGEST_CONFORMING_CONTROL_BODY_BYTES;
+        let router = assemble(
+            control_routes(control_limit),
+            raw_group_with_probe(),
+            AppState::default(),
+        );
 
-        let (status, body) = post_bytes(router, "/probe/raw", limit as usize * 4).await;
+        let chunk = 3 * 1024 * 1024;
+        assert!(
+            chunk > control_limit as usize,
+            "the probe body must exceed the control limit, or this proves nothing"
+        );
+        let (status, body) = post_bytes(router, "/probe/raw", chunk).await;
         assert_eq!(status, StatusCode::OK, "the raw group must not be capped");
-        assert_eq!(body, (limit * 4).to_string(), "the whole body must arrive");
+        assert_eq!(body, chunk.to_string(), "the whole body must arrive");
+    }
+
+    #[tokio::test]
+    async fn the_raw_group_carries_the_protocols_own_ceiling() {
+        // The other half. Disabling axum's default without putting the
+        // protocol's ceiling in its place would leave the group unbounded, so
+        // a route added there later would read whatever arrived — which is a
+        // worse answer than the wrong limit it replaced.
+        //
+        // Declared rather than sent: tower-http refuses on the content length,
+        // so the test does not have to allocate 64 MiB to find the edge.
+        let router = assemble(
+            control_routes(LARGEST_CONFORMING_CONTROL_BODY_BYTES),
+            raw_group_with_probe(),
+            AppState::default(),
+        );
+
+        let request = axum::http::Request::post("/probe/raw")
+            .header(axum::http::header::CONTENT_TYPE, "application/octet-stream")
+            .header(
+                axum::http::header::CONTENT_LENGTH,
+                (LARGEST_PROTOCOL_BODY_BYTES + 1).to_string(),
+            )
+            .body(axum::body::Body::empty())
+            .expect("a well-formed request");
+        let response = tower::ServiceExt::oneshot(router, request)
+            .await
+            .expect("the router answers");
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let bytes = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .expect("a readable body")
+            .to_bytes();
+        assert_protocol_error(&String::from_utf8_lossy(&bytes), "BODY_TOO_LARGE");
     }
 
     /// The probe, inside the control group and under the group's own bound —
@@ -332,20 +425,27 @@ mod tests {
         // The other half: without this, the test above would also pass with
         // the limit removed from both groups.
         let limit = 64;
-        let router = control_group_with_probe(limit)
-            .merge(raw_body_routes())
-            .fallback(unknown_route)
-            .with_state(AppState::default());
+        let router = assemble(
+            control_group_with_probe(limit),
+            raw_body_routes(),
+            AppState::default(),
+        );
 
-        let (status, _) = post_bytes(router, "/probe/control", limit as usize * 4).await;
+        let (status, body) = post_bytes(router, "/probe/control", limit as usize * 4).await;
         assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+        // In the pinned shape, which only the shaping middleware supplies —
+        // §14 has the member parse every failure through one parser, and a
+        // router assembled some other way would answer the same status with a
+        // body it cannot read.
+        assert_protocol_error(&body, "BODY_TOO_LARGE");
 
         // And a body at the bound arrives whole, so the case above is a bound
         // rather than a layer that refuses everything.
-        let router = control_group_with_probe(limit)
-            .merge(raw_body_routes())
-            .fallback(unknown_route)
-            .with_state(AppState::default());
+        let router = assemble(
+            control_group_with_probe(limit),
+            raw_body_routes(),
+            AppState::default(),
+        );
         let (status, body) = post_bytes(router, "/probe/control", limit as usize).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body, limit.to_string());
@@ -358,10 +458,11 @@ mod tests {
         // 2 MiB while its configuration said something else — and
         // `LARGEST_PROTOCOL_BODY_BYTES` lets it name up to 64 MiB.
         let limit = 4 * 1024 * 1024;
-        let router = control_group_with_probe(limit)
-            .merge(raw_body_routes())
-            .fallback(unknown_route)
-            .with_state(AppState::default());
+        let router = assemble(
+            control_group_with_probe(limit),
+            raw_body_routes(),
+            AppState::default(),
+        );
 
         let over_axums_default = 3 * 1024 * 1024;
         let (status, body) = post_bytes(router, "/probe/control", over_axums_default).await;

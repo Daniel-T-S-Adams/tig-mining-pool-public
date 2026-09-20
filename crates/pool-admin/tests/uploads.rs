@@ -791,6 +791,271 @@ async fn retention_eligibility_is_the_controllers_and_deletion_the_workers() {
 }
 
 #[tokio::test]
+async fn a_receipt_names_its_own_assignments_upload_and_package() {
+    // A receipt releases the slot and the member's retention obligation (§9,
+    // §16 invariant 10). Checking only that *some* upload is durably accepted
+    // would release one member's obligation on the strength of another's
+    // package — and §16 invariant 11 fails the moment the first member deletes
+    // its only copy.
+    let Some((db, mut owner)) = migrated("upload_receipt_chain", "pool_migration").await else {
+        return;
+    };
+    let mine = assignment(&mut owner, 0x0a).await;
+    let theirs = assignment(&mut owner, 0x0b).await;
+
+    let mut api = PgConnection::connect_with(&db.as_role("pool_api"))
+        .await
+        .unwrap();
+    let mut worker = PgConnection::connect_with(&db.as_role("pool_artifact_worker"))
+        .await
+        .unwrap();
+    let mut controller = PgConnection::connect_with(&db.as_role("pool_controller"))
+        .await
+        .unwrap();
+
+    // Their package, carried all the way to durable acceptance.
+    let their_upload = open_session(&mut api, &theirs).await.unwrap();
+    commit_chunk(&mut api, &their_upload, 0, CHUNK)
+        .await
+        .unwrap();
+    exec(
+        &mut api,
+        format!(
+            "UPDATE pool.upload_session SET state = 'FINALIZED'
+              WHERE upload_id = '{their_upload}'::uuid"
+        ),
+    )
+    .await
+    .unwrap();
+    for state in ["RECEIVED", "STRUCTURALLY_ACCEPTED"] {
+        exec(
+            &mut worker,
+            format!(
+                "UPDATE pool.upload_session SET state = '{state}'
+                  WHERE upload_id = '{their_upload}'::uuid"
+            ),
+        )
+        .await
+        .unwrap();
+    }
+    let their_artifact: String = sqlx::query_scalar(
+        "INSERT INTO pool.artifact
+             (network, artifact_id, assignment_id, benchmark_id, kind, backend,
+              container, object_key, media_type, format_version, sha256,
+              compressed_size, uncompressed_size, manifest_sha256)
+         VALUES ('testnet', gen_random_uuid(), $1::uuid, 'bench-0b', 'PACKAGE',
+                 'FILESYSTEM', 'accepted', 'accepted/testnet/bench-0b/pkg.tar.zst',
+                 'application/vnd.tig-pool.proof-material-v1.tar+zstd', 'v1', $2,
+                 $3, $3, $2)
+         RETURNING artifact_id::text",
+    )
+    .bind(&theirs)
+    .bind(SHA.as_slice())
+    .bind(CHUNK)
+    .fetch_one(&mut worker)
+    .await
+    .unwrap();
+    exec(
+        &mut worker,
+        format!(
+            "UPDATE pool.artifact SET lifecycle_state = 'ACCEPTED', accepted_at = now()
+              WHERE artifact_id = '{their_artifact}'::uuid"
+        ),
+    )
+    .await
+    .unwrap();
+    exec(
+        &mut controller,
+        format!(
+            "UPDATE pool.upload_session SET state = 'DURABLY_ACCEPTED'
+              WHERE upload_id = '{their_upload}'::uuid"
+        ),
+    )
+    .await
+    .unwrap();
+
+    // The same again for my assignment, so each half can be borrowed on its own
+    // — with only one side wrong at a time, the other side's check cannot be
+    // what refuses it.
+    let my_upload = open_session(&mut api, &mine).await.unwrap();
+    commit_chunk(&mut api, &my_upload, 0, CHUNK).await.unwrap();
+    exec(
+        &mut api,
+        format!(
+            "UPDATE pool.upload_session SET state = 'FINALIZED'
+              WHERE upload_id = '{my_upload}'::uuid"
+        ),
+    )
+    .await
+    .unwrap();
+    for state in ["RECEIVED", "STRUCTURALLY_ACCEPTED"] {
+        exec(
+            &mut worker,
+            format!(
+                "UPDATE pool.upload_session SET state = '{state}'
+                  WHERE upload_id = '{my_upload}'::uuid"
+            ),
+        )
+        .await
+        .unwrap();
+    }
+    let my_artifact: String = sqlx::query_scalar(
+        "INSERT INTO pool.artifact
+             (network, artifact_id, assignment_id, benchmark_id, kind, backend,
+              container, object_key, media_type, format_version, sha256,
+              compressed_size, uncompressed_size, manifest_sha256)
+         VALUES ('testnet', gen_random_uuid(), $1::uuid, 'bench-0a', 'PACKAGE',
+                 'FILESYSTEM', 'accepted', 'accepted/testnet/bench-0a/pkg.tar.zst',
+                 'application/vnd.tig-pool.proof-material-v1.tar+zstd', 'v1', $2,
+                 $3, $3, $2)
+         RETURNING artifact_id::text",
+    )
+    .bind(&mine)
+    .bind(SHA.as_slice())
+    .bind(CHUNK)
+    .fetch_one(&mut worker)
+    .await
+    .unwrap();
+    exec(
+        &mut worker,
+        format!(
+            "UPDATE pool.artifact SET lifecycle_state = 'ACCEPTED', accepted_at = now()
+              WHERE artifact_id = '{my_artifact}'::uuid"
+        ),
+    )
+    .await
+    .unwrap();
+    exec(
+        &mut controller,
+        format!(
+            "UPDATE pool.upload_session SET state = 'DURABLY_ACCEPTED'
+              WHERE upload_id = '{my_upload}'::uuid"
+        ),
+    )
+    .await
+    .unwrap();
+
+    let receipt = |artifact: &str, upload: &str| {
+        format!(
+            "INSERT INTO pool.acceptance_receipt
+                 (network, assignment_id, receipt_id, artifact_id, upload_id, package_sha256)
+             VALUES ('testnet', '{mine}'::uuid, gen_random_uuid(), '{artifact}'::uuid,
+                     '{upload}'::uuid, decode(repeat('7e', 32), 'hex'))"
+        )
+    };
+
+    let borrowed_upload = exec(&mut controller, receipt(&my_artifact, &their_upload))
+        .await
+        .expect_err("a receipt names its own assignment's upload");
+    assert!(
+        format!("{borrowed_upload}").contains("the upload belongs to"),
+        "expected the upload's assignment check, got: {borrowed_upload}"
+    );
+
+    let borrowed_package = exec(&mut controller, receipt(&their_artifact, &my_upload))
+        .await
+        .expect_err("a receipt names its own assignment's package");
+    assert!(
+        format!("{borrowed_package}").contains("the artifact belongs to"),
+        "expected the artifact's assignment check, got: {borrowed_package}"
+    );
+
+    exec(&mut controller, receipt(&my_artifact, &my_upload))
+        .await
+        .expect("its own upload and its own package");
+}
+
+#[tokio::test]
+async fn an_artifact_arrives_unpublished() {
+    // The same hole as a session arriving finished, on the sibling table: every
+    // lifecycle and ownership rule is `BEFORE UPDATE`, and the worker holds
+    // `INSERT`. A row created already `DELETABLE` — with `accepted_at` set,
+    // which the CHECKs permit — skips the controller's retention decision
+    // entirely, and the worker can then delete it under its own grant.
+    let Some((db, mut owner)) = migrated("upload_artifact_arrival", "pool_migration").await else {
+        return;
+    };
+    let a = assignment(&mut owner, 0x0c).await;
+    let mut worker = PgConnection::connect_with(&db.as_role("pool_artifact_worker"))
+        .await
+        .unwrap();
+
+    let arrive = |state: &str, stamps: &str| {
+        format!(
+            "INSERT INTO pool.artifact
+                 (network, artifact_id, assignment_id, benchmark_id, kind, backend,
+                  container, object_key, media_type, format_version, sha256,
+                  compressed_size, uncompressed_size, manifest_sha256,
+                  lifecycle_state{stamps_cols})
+             VALUES ('testnet', gen_random_uuid(), '{a}'::uuid, 'bench-0c', 'PACKAGE',
+                     'FILESYSTEM', 'accepted',
+                     'accepted/testnet/bench-0c/' || gen_random_uuid()::text,
+                     'application/vnd.tig-pool.proof-material-v1.tar+zstd', 'v1',
+                     decode(repeat('7e', 32), 'hex'), {CHUNK}, {CHUNK},
+                     decode(repeat('7e', 32), 'hex'), '{state}'{stamps_vals})",
+            stamps_cols = if stamps.is_empty() {
+                ""
+            } else {
+                ", accepted_at"
+            },
+            stamps_vals = if stamps.is_empty() { "" } else { ", now()" }
+        )
+    };
+
+    let born_deletable = exec(&mut worker, arrive("DELETABLE", "accepted"))
+        .await
+        .expect_err("an artifact is created before it is published");
+    assert!(
+        format!("{born_deletable}").contains("before it is published"),
+        "expected the arrival guard, got: {born_deletable}"
+    );
+
+    let born_accepted = exec(&mut worker, arrive("ACCEPTED", "accepted"))
+        .await
+        .expect_err("publication is a transition, not a starting point");
+    assert!(
+        format!("{born_accepted}").contains("before it is published"),
+        "expected the arrival guard, got: {born_accepted}"
+    );
+
+    // The guard holds against the owner too — the role a later slice grants
+    // INSERT to is the one this is for.
+    let by_owner = exec(&mut owner, arrive("DELETED", "accepted")).await;
+    assert!(by_owner.is_err(), "the arrival guard is not a grant");
+
+    // And a dated arrival in a *permitted* state, so the timestamps are
+    // refused by this guard rather than by the state check beside it.
+    // `deletable_at` is the one no CHECK ties to a lifecycle state, which makes
+    // it the only case that reaches here.
+    let born_dated = exec(
+        &mut worker,
+        format!(
+            "INSERT INTO pool.artifact
+                 (network, artifact_id, assignment_id, benchmark_id, kind, backend,
+                  container, object_key, media_type, format_version, sha256,
+                  compressed_size, uncompressed_size, manifest_sha256,
+                  lifecycle_state, deletable_at)
+             VALUES ('testnet', gen_random_uuid(), '{a}'::uuid, 'bench-0c', 'PACKAGE',
+                     'FILESYSTEM', 'accepted',
+                     'accepted/testnet/bench-0c/' || gen_random_uuid()::text,
+                     'application/vnd.tig-pool.proof-material-v1.tar+zstd', 'v1',
+                     decode(repeat('7e', 32), 'hex'), {CHUNK}, {CHUNK},
+                     decode(repeat('7e', 32), 'hex'), 'PUBLISHING', now())"
+        ),
+    )
+    .await
+    .expect_err("a new artifact has no retention decision behind it");
+    assert!(
+        format!("{born_dated}").contains("no acceptance, retention or deletion"),
+        "expected the arrival guard, got: {born_dated}"
+    );
+
+    exec(&mut worker, arrive("PUBLISHING", ""))
+        .await
+        .expect("a row starts where publication starts");
+}
+
+#[tokio::test]
 async fn each_role_writes_only_its_own_step() {
     // `architecture.md` §6: the API owns the session and the ledger, the worker
     // verifies and publishes, and the controller alone records durable

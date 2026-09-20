@@ -590,6 +590,47 @@ CREATE TRIGGER artifact_location_immutable
     FOR EACH ROW
     EXECUTE FUNCTION pool.artifact_location_is_immutable();
 
+-- An artifact arrives unpublished.
+--
+-- The same hole this migration closes for `pool.upload_session`, on its sibling
+-- table: every lifecycle and ownership rule above is `BEFORE UPDATE`, and
+-- `pool_artifact_worker` holds `INSERT`. So a row could be created already
+-- `DELETABLE` — with `accepted_at` set, which the CHECKs permit — and then
+-- deleted under the worker's own grant, skipping the retention decision
+-- `architecture.md` §8.4 gives the controller entirely.
+--
+-- Publication is a process, so a row starts at its beginning: `PUBLISHING`
+-- while the bytes are being written, or `QUARANTINE` for an object that is not
+-- an accepted artifact yet. Nothing arrives accepted, deletable or deleted.
+CREATE OR REPLACE FUNCTION pool.artifact_arrives_unpublished()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF NEW.lifecycle_state NOT IN ('QUARANTINE', 'PUBLISHING') THEN
+        RAISE EXCEPTION
+            'an artifact is created before it is published, not after (architecture.md §8.2, §8.4)'
+            USING ERRCODE = 'raise_exception';
+    END IF;
+
+    IF NEW.accepted_at IS NOT NULL
+       OR NEW.deletable_at IS NOT NULL
+       OR NEW.deleted_at IS NOT NULL
+    THEN
+        RAISE EXCEPTION
+            'a new artifact has no acceptance, retention or deletion behind it (architecture.md §8.4)'
+            USING ERRCODE = 'raise_exception';
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER artifact_arrives_unpublished
+    BEFORE INSERT ON pool.artifact
+    FOR EACH ROW
+    EXECUTE FUNCTION pool.artifact_arrives_unpublished();
+
 -- ---------------------------------------------------------------------------
 -- The receipt
 -- ---------------------------------------------------------------------------
@@ -666,13 +707,27 @@ RETURNS trigger
 LANGUAGE plpgsql
 AS $$
 DECLARE
-    upload_state   text;
-    artifact_state text;
-    artifact_kind  text;
+    upload_state      text;
+    upload_assignment uuid;
+    artifact_state    text;
+    artifact_kind     text;
+    artifact_assignment uuid;
 BEGIN
-    SELECT state INTO upload_state
+    SELECT state, assignment_id INTO upload_state, upload_assignment
       FROM pool.upload_session
      WHERE network = NEW.network AND upload_id = NEW.upload_id;
+
+    -- The upload is *this* assignment's. Checking only that some upload
+    -- somewhere is durably accepted would let a receipt release one member's
+    -- slot and retention obligation on the strength of another member's
+    -- package — and §16 invariant 11 then fails the moment the first member
+    -- deletes its only copy.
+    IF upload_assignment IS DISTINCT FROM NEW.assignment_id THEN
+        RAISE EXCEPTION
+            'the receipt is for assignment %, the upload belongs to % (member_protocol.md §16 invariant 10)',
+            NEW.assignment_id, upload_assignment
+            USING ERRCODE = 'raise_exception';
+    END IF;
 
     IF upload_state IS DISTINCT FROM 'DURABLY_ACCEPTED' THEN
         RAISE EXCEPTION
@@ -681,9 +736,17 @@ BEGIN
             USING ERRCODE = 'raise_exception';
     END IF;
 
-    SELECT lifecycle_state, kind INTO artifact_state, artifact_kind
+    SELECT lifecycle_state, kind, assignment_id
+      INTO artifact_state, artifact_kind, artifact_assignment
       FROM pool.artifact
      WHERE network = NEW.network AND artifact_id = NEW.artifact_id;
+
+    IF artifact_assignment IS DISTINCT FROM NEW.assignment_id THEN
+        RAISE EXCEPTION
+            'the receipt is for assignment %, the artifact belongs to % (architecture.md §8.2)',
+            NEW.assignment_id, artifact_assignment
+            USING ERRCODE = 'raise_exception';
+    END IF;
 
     IF artifact_kind IS DISTINCT FROM 'PACKAGE'
        OR artifact_state NOT IN ('ACCEPTED', 'DELETABLE', 'DELETED', 'DELETE_FAILED')

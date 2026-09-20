@@ -40,7 +40,15 @@ use sha2::Sha256;
 ///
 /// Deliberately opaque: no `Display`, no revealing `Debug`, no `Serialize`,
 /// no `Clone`. The only thing it will do is hash, and that is crate-private.
-pub struct TicketKey(Vec<u8>);
+///
+/// **The type itself is crate-private, and that is the load-bearing part.**
+/// Keeping `load` private left `pub fn ... -> TicketKey` available, which is
+/// how the key escaped once already. With the type private, rustc refuses
+/// any public signature that mentions it — `private_interfaces` is a
+/// warning, and this workspace builds with `-D warnings`. A grep over
+/// signatures cannot do that: rustfmt wraps a long one across lines, and the
+/// pattern that caught my hand-written example missed the wrapped form.
+pub(crate) struct TicketKey(Vec<u8>);
 
 impl TicketKey {
     /// The HMAC-SHA-256 of `bearer` under this key: the value stored in
@@ -62,7 +70,7 @@ impl TicketKey {
     }
 
     /// Whether a key is present, without revealing anything about it.
-    pub fn is_present(&self) -> bool {
+    pub(crate) fn is_present(&self) -> bool {
         !self.0.is_empty()
     }
 }
@@ -77,7 +85,7 @@ impl std::fmt::Debug for TicketKey {
 }
 
 #[derive(Debug)]
-pub enum TicketKeyError {
+pub(crate) enum TicketKeyError {
     Missing {
         path: PathBuf,
     },

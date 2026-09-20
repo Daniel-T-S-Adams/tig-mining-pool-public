@@ -7,7 +7,9 @@
 
 use std::path::{Path, PathBuf};
 
-use pool_config::{Binary, Config, ConfigError};
+use pool_config::{
+    Binary, Config, ConfigError, LARGEST_CONFORMING_CONTROL_BODY_BYTES, LARGEST_PROTOCOL_BODY_BYTES,
+};
 
 /// A scratch directory with a populated password file, so cases that are
 /// *not* about the password file all pass that check.
@@ -209,7 +211,7 @@ const GATEWAY: &str = "\n[gateway]\napi_key_file = \"/dev/null\"\nlease_secs = 1
 
 /// `pool-api`-only: `architecture.md` §3 gives member traffic to one process.
 const MEMBER_API: &str =
-    "\n[member_api]\nlisten = \"127.0.0.1:8081\"\nmax_control_body_bytes = 262144\n";
+    "\n[member_api]\nlisten = \"127.0.0.1:8081\"\nmax_control_body_bytes = 524288\n";
 
 /// The endpoint the controller and gateway both require. A local `fake-tig`
 /// here, which is also what F4d's guard reads.
@@ -1119,6 +1121,16 @@ fn every_shipped_dev_config_parses_into_the_typed_shape() {
                     "a dev config names an address literal, not a hostname: {}",
                     api.listen
                 );
+                // Checked here because this test parses rather than loads, so
+                // `validate_for`'s bounds do not run: a shipped file under the
+                // floor would answer `413` to a conforming heartbeat, and an
+                // operator would meet that before anything told them why.
+                assert!(
+                    (LARGEST_CONFORMING_CONTROL_BODY_BYTES..=LARGEST_PROTOCOL_BODY_BYTES)
+                        .contains(&api.max_control_body_bytes),
+                    "a dev config names a body limit validate_for accepts: {}",
+                    api.max_control_body_bytes
+                );
             }
             _ => {
                 assert!(config.tig.is_none(), "migrate does not talk to TIG");
@@ -1231,7 +1243,7 @@ fn the_member_api_section_is_required_by_pool_api_and_forbidden_elsewhere() {
     let config = Config::load(scratch.write(&toml), Binary::PoolApi).expect("a pool-api config");
     let api = config.member_api.expect("the section is kept");
     assert_eq!(api.listen, "127.0.0.1:8081");
-    assert_eq!(api.max_control_body_bytes, 262_144);
+    assert_eq!(api.max_control_body_bytes, 524_288);
 }
 
 #[test]
@@ -1272,7 +1284,7 @@ fn a_member_api_section_with_an_unusable_value_does_not_load() {
         "127.0.0.1:0x1f",
     ] {
         let Err(err) = load(&format!(
-            "\n[member_api]\nlisten = \"{bad}\"\nmax_control_body_bytes = 262144\n"
+            "\n[member_api]\nlisten = \"{bad}\"\nmax_control_body_bytes = 524288\n"
         )) else {
             panic!("listen {bad:?} must not load");
         };
@@ -1289,21 +1301,32 @@ fn a_member_api_section_with_an_unusable_value_does_not_load() {
     };
     assert_invalid(err, "must be `address:port`");
 
-    // Zero reads no request at all, and anything above `member_protocol.md`
-    // §10.3's manifest ceiling would let a control message carry more than the
-    // largest thing the protocol defines.
-    for bad in [0_u64, 262_145, u64::MAX] {
+    // Below the floor, a maximal `HeartbeatRequest` the pinned schemas permit
+    // would be answered `413` — a refusal `member_protocol.md` §14 reserves
+    // for incompatible input. Above §10.3's chunk ceiling, the value describes
+    // a body no route of this protocol accepts.
+    for bad in [
+        0_u64,
+        1,
+        262_144,
+        LARGEST_CONFORMING_CONTROL_BODY_BYTES - 1,
+        LARGEST_PROTOCOL_BODY_BYTES + 1,
+        u64::MAX,
+    ] {
         let Err(err) = load(&format!(
             "\n[member_api]\nlisten = \"127.0.0.1:8081\"\nmax_control_body_bytes = {bad}\n"
         )) else {
             panic!("max_control_body_bytes {bad} must not load");
         };
-        assert_invalid(err, "max_control_body_bytes must be between 1 and 262144");
+        assert_invalid(err, "max_control_body_bytes must be between");
     }
 
     // Both ends of the accepted range, so the rejections above are bounds
     // rather than a check that refuses everything.
-    for good in [1_u64, 262_144] {
+    for good in [
+        LARGEST_CONFORMING_CONTROL_BODY_BYTES,
+        LARGEST_PROTOCOL_BODY_BYTES,
+    ] {
         load(&format!(
             "\n[member_api]\nlisten = \"[::1]:8081\"\nmax_control_body_bytes = {good}\n"
         ))

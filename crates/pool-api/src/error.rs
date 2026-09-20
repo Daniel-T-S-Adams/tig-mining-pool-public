@@ -14,15 +14,17 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 
-use crate::protocol::PROTOCOL_VERSION;
+use crate::protocol::{PROTOCOL_VERSION, ServerTime};
 
 /// The pinned `ErrorResponse` body.
 ///
-/// The optional fields are the protocol's diagnostic hints — §5's
-/// `expected_offset` for a resumed upload, §8's `expected_event_seq` for an
-/// out-of-order event. They are `None` here and carried by the routes that
-/// have something to say; the schema forbids unknown properties, so a field
-/// that does not apply must be absent rather than null.
+/// It carries the five properties the schema requires and no others yet. The
+/// optional ones each belong to a route that does not exist: `request_id` and
+/// `enrollment_request_id` to §3.2's echo, which lands with the authentication
+/// PR (slice-2 criterion A8); `expected_state`, `expected_offset` and
+/// `expected_event_seq` to the assignment, upload and event routes that have
+/// something to say. The schema forbids unknown properties, so each arrives
+/// with the code that populates it rather than as an always-absent field.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ErrorResponse {
     pub protocol_version: &'static str,
@@ -96,27 +98,21 @@ impl ApiError {
         }
     }
 
-    /// The wire body for this error, as of `now`.
-    pub fn body(&self, now: time::OffsetDateTime) -> ErrorResponse {
+    /// The wire body for this error, as of `server_time`.
+    pub fn body(&self, server_time: &ServerTime) -> ErrorResponse {
         ErrorResponse {
             protocol_version: PROTOCOL_VERSION,
             error_code: self.error_code,
             message: self.message.clone(),
             retryable: self.retryable,
-            server_time: crate::protocol::rfc3339(now),
+            server_time: server_time.as_str().to_owned(),
         }
     }
 
     /// The response, timestamped from the server's own clock (§13).
-    pub fn into_response_at(self, now: time::OffsetDateTime) -> Response {
-        let mut response = (self.status, Json(self.body(now))).into_response();
+    pub fn into_response_at(self, server_time: &ServerTime) -> Response {
+        let mut response = (self.status, Json(self.body(server_time))).into_response();
         response.extensions_mut().insert(ProtocolShaped);
         response
-    }
-}
-
-impl IntoResponse for ApiError {
-    fn into_response(self) -> Response {
-        self.into_response_at(time::OffsetDateTime::now_utc())
     }
 }

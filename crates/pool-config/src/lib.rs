@@ -305,6 +305,35 @@ pub struct GatewayConfig {
     pub served_compute: Vec<String>,
 }
 
+/// The largest control-message body a conforming member agent can send,
+/// compactly encoded.
+///
+/// Derived from the pinned request schemas rather than chosen: the binding
+/// case is `HeartbeatRequest`, whose `resources` array is capped at 1024
+/// entries of eight fields each — five UUIDs, a `SlotState`, and two
+/// `UInt64`s at their maximum. A deployment whose limit sat below this would
+/// answer `413` to a request `schemas/member_protocol/v0.1.0` permits, which
+/// `member_protocol.md` §14 reserves for incompatible input.
+///
+/// `pool-api`'s `the_derived_floor_is_what_the_pinned_schemas_can_produce`
+/// constructs that body, validates it against the shipped schema, and checks
+/// this number against its length, so the two cannot drift apart.
+///
+/// Compactly encoded, because that is the encoding the number describes.
+/// §3.2 signs "the exact transmitted request body", so an agent that pads its
+/// JSON sends more bytes for the same values; the headroom for that is a
+/// deployment's choice, above this floor.
+pub const LARGEST_CONFORMING_CONTROL_BODY_BYTES: u64 = 383_156;
+
+/// The largest single HTTP body this protocol defines, from
+/// `member_protocol.md` §10.3's `upload chunk: 1-64 MiB`.
+///
+/// A control message is never a chunk, so a limit above this is describing a
+/// body no route of this protocol accepts — which reads as a typo rather than
+/// a policy. This is the one upper bound the protocol supplies; the choice
+/// between it and the floor is the operator's, and is about memory.
+pub const LARGEST_PROTOCOL_BODY_BYTES: u64 = 64 * 1024 * 1024;
+
 /// The public member service's own settings.
 ///
 /// `pool-api`-only, the way `[gateway]` is gateway-only: a config carrying it
@@ -323,7 +352,12 @@ pub struct MemberApiConfig {
     /// limits and §5.1 refuses an upload before quota is reserved; a service
     /// that defaulted this would have a limit nobody chose. Chunk bodies are
     /// bounded separately by the upload session's own chunk size
-    /// (`member_protocol.md` §10.3).
+    /// (`member_protocol.md` §10.3), and the route that carries them is
+    /// registered outside this bound.
+    ///
+    /// Bounded below by [`LARGEST_CONFORMING_CONTROL_BODY_BYTES`] and above by
+    /// [`LARGEST_PROTOCOL_BODY_BYTES`]; see both for why those are the two
+    /// numbers the protocol actually determines.
     pub max_control_body_bytes: u64,
 }
 
@@ -929,14 +963,19 @@ impl Config {
                         api.listen
                     )));
                 }
-                // A body limit of zero reads no request at all, and one above
-                // the manifest ceiling would let a control message carry more
-                // than the largest thing `member_protocol.md` §10.3 defines.
-                if api.max_control_body_bytes == 0 || api.max_control_body_bytes > 262_144 {
+                // Both bounds are derived rather than picked. Below the
+                // floor, a conforming request is answered `413`; above the
+                // ceiling, the value describes a body no route accepts.
+                if api.max_control_body_bytes < LARGEST_CONFORMING_CONTROL_BODY_BYTES
+                    || api.max_control_body_bytes > LARGEST_PROTOCOL_BODY_BYTES
+                {
                     return Err(invalid(format!(
-                        "member_api.max_control_body_bytes must be between 1 \
-                         and 262144 (member_protocol.md §10.3's manifest \
-                         ceiling), found {}",
+                        "member_api.max_control_body_bytes must be between \
+                         {LARGEST_CONFORMING_CONTROL_BODY_BYTES} (the largest \
+                         body the pinned request schemas can produce) and \
+                         {LARGEST_PROTOCOL_BODY_BYTES} (member_protocol.md \
+                         §10.3's chunk ceiling, the largest body this protocol \
+                         defines), found {}",
                         api.max_control_body_bytes
                     )));
                 }

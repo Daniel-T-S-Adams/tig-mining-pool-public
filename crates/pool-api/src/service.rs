@@ -11,19 +11,14 @@ use std::net::SocketAddr;
 use axum::extract::{Request, State};
 use axum::http::StatusCode;
 use axum::middleware::Next;
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
-use pool_config::Config;
+use pool_config::{Config, MemberApiConfig};
 use tower_http::limit::RequestBodyLimitLayer;
 
 use crate::error::{ApiError, ProtocolShaped};
-use crate::protocol::ProtocolInfo;
-
-/// The body limit applied when a caller builds a router without configuration.
-/// Only reachable from tests; a binary always has `[member_api]`, which
-/// `pool-config` requires for `Binary::PoolApi`.
-const FALLBACK_BODY_LIMIT: u64 = 262_144;
+use crate::protocol::{ProtocolInfo, ServerTime};
 
 /// What every handler can reach.
 #[derive(Clone)]
@@ -44,21 +39,32 @@ impl Default for AppState {
 }
 
 /// The router, without a listener, so tests drive it directly.
-pub fn app(config: &Config, state: AppState) -> Router {
-    let limit = config
-        .member_api
-        .as_ref()
-        .map_or(FALLBACK_BODY_LIMIT, |api| api.max_control_body_bytes);
+///
+/// Takes the member-API settings rather than the whole `Config` so there is
+/// nothing to fall back to: `max_control_body_bytes` has no default, and a
+/// builder that could supply one would be a limit nobody chose.
+pub fn app(api: &MemberApiConfig, state: AppState) -> Router {
+    assemble(
+        control_routes(api.max_control_body_bytes),
+        raw_body_routes(),
+        state,
+    )
+}
 
-    Router::new()
-        .route("/member/v0/protocol", get(protocol))
-        // An unrouted path is incompatible input (§14), not an absence to
-        // report in the framework's own words.
+/// The two groups, the fallback, and the shaping middleware.
+///
+/// Separate from `app` so a test can assemble the real thing around a probe
+/// route in the raw group: the claim that the control limit does not reach
+/// that group is otherwise unobservable while the group is empty, and an
+/// unobservable claim is one that stops being true without anything failing.
+fn assemble(control: Router<AppState>, raw: Router<AppState>, state: AppState) -> Router {
+    control
+        .merge(raw)
+        // Outside both groups: an unrouted path is incompatible input (§14),
+        // not an absence to report in the framework's own words, and it is
+        // answered without reading whatever body arrived with it.
         .fallback(unknown_route)
-        .layer(RequestBodyLimitLayer::new(
-            usize::try_from(limit).unwrap_or(usize::MAX),
-        ))
-        // Outside the limit layer, so its rejection passes through here too.
+        // Outermost, so a rejection from either group passes through here.
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             protocol_shaped_errors,
@@ -66,13 +72,68 @@ pub fn app(config: &Config, state: AppState) -> Router {
         .with_state(state)
 }
 
+/// Routes whose body is a JSON control message.
+///
+/// `route_layer`, not `layer`: the bound belongs to these routes and to
+/// nothing else. `member_protocol.md` §10.3 puts an upload chunk at 1–64 MiB,
+/// so a chunk `PUT` registered under this layer would be capped at whatever a
+/// deployment chose for control messages — a limit from the wrong contract,
+/// and one no test would notice until a member's upload failed.
+fn control_routes(max_control_body_bytes: u64) -> Router<AppState> {
+    Router::new()
+        .route("/member/v0/protocol", get(protocol))
+        .route_layer(RequestBodyLimitLayer::new(
+            usize::try_from(max_control_body_bytes).unwrap_or(usize::MAX),
+        ))
+}
+
+/// Routes whose body is raw bytes, bounded by the upload session's own chunk
+/// size rather than by `max_control_body_bytes`.
+///
+/// Empty until `PUT /member/v0/uploads/{upload_id}` lands (slice-2 criterion
+/// G3). It exists now so that route has somewhere to go that is not under the
+/// control limit, and so the separation is something a test can check today:
+/// see `the_control_limit_does_not_reach_the_raw_body_group`.
+fn raw_body_routes() -> Router<AppState> {
+    Router::new()
+}
+
 /// §4's public read.
-async fn protocol(State(state): State<AppState>) -> Json<ProtocolInfo> {
-    Json(ProtocolInfo::at((state.now)()))
+async fn protocol(State(state): State<AppState>) -> Response {
+    let Some(server_time) = ServerTime::at((state.now)()) else {
+        return no_server_time();
+    };
+    // `no-store` because the body carries server time, and §13 makes that the
+    // value a member diagnoses skew against. A proxy replaying a cached answer
+    // would hand an agent a stale clock and a confident explanation for it.
+    (
+        StatusCode::OK,
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Json(ProtocolInfo::at(&server_time)),
+    )
+        .into_response()
 }
 
 async fn unknown_route(State(state): State<AppState>) -> Response {
-    ApiError::unknown_route().into_response_at((state.now)())
+    let Some(server_time) = ServerTime::at((state.now)()) else {
+        return no_server_time();
+    };
+    ApiError::unknown_route().into_response_at(&server_time)
+}
+
+/// The one response this service cannot shape.
+///
+/// Every body the schema defines carries `server_time`, so a clock with no
+/// RFC 3339 form leaves nothing conforming to send. §13 makes that value
+/// authoritative, and a fabricated authoritative time is worse than an
+/// unexplained failure: the member would diagnose skew against a lie. `503`,
+/// because a clock is a thing an operator fixes.
+fn no_server_time() -> Response {
+    tracing::error!(
+        event = "api.server_time_unrepresentable",
+        "the server clock has no RFC 3339 form; answering without a body"
+    );
+    StatusCode::SERVICE_UNAVAILABLE.into_response()
 }
 
 /// Restate the responses this service did not write itself.
@@ -92,7 +153,10 @@ async fn protocol_shaped_errors(
     let Some(error) = framework_error(&response) else {
         return response;
     };
-    error.into_response_at((state.now)())
+    let Some(server_time) = ServerTime::at((state.now)()) else {
+        return no_server_time();
+    };
+    error.into_response_at(&server_time)
 }
 
 /// Which framework-generated status this response is, if any.
@@ -141,7 +205,7 @@ pub async fn run(config: &Config) -> Result<(), String> {
         "member api is serving"
     );
 
-    axum::serve(listener, app(config, AppState::default()))
+    axum::serve(listener, app(api, AppState::default()))
         .with_graceful_shutdown(shutdown())
         .await
         .map_err(|e| format!("serve failed: {e}"))
@@ -180,7 +244,7 @@ async fn shutdown() {
 
 #[cfg(test)]
 mod tests {
-    use axum::response::IntoResponse;
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use super::*;
 
@@ -189,6 +253,61 @@ mod tests {
             .status(status)
             .body(axum::body::Body::empty())
             .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+    }
+
+    /// A raw-body route stands in for the chunk `PUT`: it reads its body in
+    /// full and reports the length, so a limit that reached it would show up
+    /// as a rejection rather than as a number.
+    async fn probe(body: axum::body::Bytes) -> String {
+        body.len().to_string()
+    }
+
+    async fn post_bytes(router: Router, path: &str, len: usize) -> (StatusCode, String) {
+        use tower::ServiceExt;
+
+        let request = axum::http::Request::post(path)
+            .header(axum::http::header::CONTENT_TYPE, "application/octet-stream")
+            .header(axum::http::header::CONTENT_LENGTH, len.to_string())
+            .body(axum::body::Body::from(vec![b'x'; len]))
+            .expect("a well-formed request");
+        let response = router.oneshot(request).await.expect("the router answers");
+        let status = response.status();
+        let bytes = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .expect("a readable body")
+            .to_bytes();
+        (status, String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    #[tokio::test]
+    async fn the_control_limit_does_not_reach_the_raw_body_group() {
+        // `member_protocol.md` §10.3 puts an upload chunk at 1-64 MiB, so a
+        // chunk `PUT` bounded by `max_control_body_bytes` would be capped by
+        // the wrong contract. The bound is a `route_layer` on the control
+        // group for exactly that reason, and this is what says so.
+        let limit = 64;
+        let raw = Router::new().route("/probe/raw", axum::routing::post(probe));
+        let router = assemble(control_routes(limit), raw, AppState::default());
+
+        let (status, body) = post_bytes(router, "/probe/raw", limit as usize * 4).await;
+        assert_eq!(status, StatusCode::OK, "the raw group must not be capped");
+        assert_eq!(body, (limit * 4).to_string(), "the whole body must arrive");
+    }
+
+    #[tokio::test]
+    async fn the_control_group_is_capped_by_the_same_number() {
+        // The other half: without this, the test above would also pass with
+        // the limit removed from both groups.
+        let limit = 64;
+        let control = control_routes(limit)
+            .route("/probe/control", axum::routing::post(probe))
+            // The same bound the group's own routes carry, applied the same
+            // way, so the probe is inside the group rather than beside it.
+            .route_layer(RequestBodyLimitLayer::new(limit as usize));
+        let router = assemble(control, raw_body_routes(), AppState::default());
+
+        let (status, _) = post_bytes(router, "/probe/control", limit as usize * 4).await;
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
     }
 
     #[test]
@@ -220,8 +339,10 @@ mod tests {
     fn a_handlers_own_error_is_left_alone() {
         // The same statuses, but written here: rewriting one would replace a
         // specific `error_code` with a generic one.
+        let server_time =
+            ServerTime::at(time::OffsetDateTime::UNIX_EPOCH).expect("the epoch is representable");
         for error in [ApiError::body_too_large(), ApiError::method_not_allowed()] {
-            let written = error.into_response_at(time::OffsetDateTime::UNIX_EPOCH);
+            let written = error.into_response_at(&server_time);
             assert!(framework_error(&written).is_none());
         }
     }

@@ -254,7 +254,14 @@ enforcement rules.
 - Revocation is checked on every authenticated request and is not hidden behind
   a long-lived authorization cache.
 - Authentication failures do not reveal whether a worker, credential, or
-  resource ID exists.
+  resource ID exists. This is met in what the pool *says*: every such failure
+  is one error code, one status, and one message. It is not yet met in what
+  the pool *spends* — a request naming a credential that does not exist is
+  refused before any signature check, while one naming a real credential pays
+  a verification first, so the two take measurably different work. Closing
+  that is a change to how authentication is structured, not a branch inside
+  it, and until then the difference is a known limit of this bullet rather
+  than a property the implementation claims.
 
 ### 4.2 Resource authorization
 

@@ -237,17 +237,13 @@ impl Verifier {
             }
             None => {
                 // No such credential, or one belonging to another worker.
-                // §4.1 makes these the same answer as a bad signature, so the
-                // request is verified against a stand-in key and refused when
-                // that fails — which it always does.
+                // §4.1 makes both the same answer as a bad signature, and the
+                // request stops here.
                 //
-                // Returning here instead would make the two cases take
-                // visibly different work: an unknown credential answered
-                // before any Ed25519 operation, a known one only after. That
-                // is the existence disclosure §4.1 forbids, rebuilt out of
-                // timing. This removes the short-circuit; it does not claim
-                // to equalise the whole path, which the lookup itself does
-                // not allow.
+                // That leaves a timing difference: a known credential with a
+                // bad signature pays an Ed25519 verify and an unknown one
+                // does not. It is a known and unclosed gap, recorded rather
+                // than papered over — see the comment below.
                 tracing::info!(
                     event = "auth.rejected",
                     reason = "NO_SUCH_CREDENTIAL_FOR_THIS_WORKER",
@@ -255,7 +251,7 @@ impl Verifier {
                     worker_id = %headers.worker_id,
                     "a credential that does not exist, or not for this worker"
                 );
-                absent_credential_stand_in()
+                return Err(echo(not_authenticated()));
             }
         };
 
@@ -492,24 +488,31 @@ impl Verifier {
     }
 }
 
-/// A valid Ed25519 public key that verifies nothing anyone can produce.
-///
-/// Used when the credential lookup finds nothing, so that an unknown
-/// credential and a known one with a bad signature are both refused *after* a
-/// verification attempt rather than one before and one after. The bytes are a
-/// fixed generator multiple with no known scalar; no signature checked
-/// against it can succeed, and none is meant to.
-fn absent_credential_stand_in() -> ed25519_dalek::VerifyingKey {
-    // The Ed25519 basepoint's compressed encoding: a valid curve point, and
-    // the discrete log nobody has.
-    const BASEPOINT: [u8; 32] = [
-        0x58, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66,
-        0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66,
-        0x66, 0x66,
-    ];
-    ed25519_dalek::VerifyingKey::from_bytes(&BASEPOINT)
-        .unwrap_or_else(|_| unreachable!("the Ed25519 basepoint is a valid public key"))
-}
+// A note on what is *not* here, because it was here and was wrong.
+//
+// An unknown credential is refused before any Ed25519 operation while a known
+// one with a bad signature is refused after, and that difference in work is a
+// credential-existence oracle of the kind `security.md` §4.1 forbids in its
+// stated form. An earlier version tried to close it by verifying against a
+// stand-in key when the lookup missed, and chose the Ed25519 basepoint for
+// that key on the claim that nobody holds its scalar.
+//
+// The basepoint's discrete log with respect to itself is 1. Signatures
+// against it are forgeable by anyone, so the branch did not refuse — a forged
+// signature carried an *absent* credential past verification and into the
+// binding query, giving that path an extra round trip that a genuine
+// credential with a bad signature never takes. It widened the oracle it was
+// meant to close, and it falsified §4.1's own sentence about what is read
+// before possession is proved.
+//
+// It is gone rather than replaced. A key whose scalar is genuinely unheld is
+// constructible — generate a keypair at startup and drop the signing half —
+// but it would still equalise only one of several differences (the lookup
+// itself is slower on a hit), and nothing in this repository can test either
+// version. A second unverifiable construction, in the place where the first
+// was wrong, is not a trade this code should make. The gap is stated here and
+// in `docs/security.md` §4.1, and closing it properly is a design change:
+// authentication that does the same work on every path.
 
 /// Read the seven headers. Anything missing or misshapen is the same answer
 /// as a bad signature: a caller learns only that they were not authenticated.
@@ -682,28 +685,6 @@ mod tests {
                 good.parse::<u64>().unwrap()
             );
         }
-    }
-
-    #[test]
-    fn the_stand_in_key_exists_and_verifies_nothing() {
-        // The `None` branch hands this to `verify_b64url` so that an unknown
-        // credential and a bad signature both cost a verification. It has to
-        // be a valid key — `from_bytes` rejects a non-point, and the branch
-        // would panic — and it has to verify nothing, or an attacker naming a
-        // credential that does not exist could authenticate as it.
-        let key = absent_credential_stand_in();
-
-        let real = ed25519_dalek::SigningKey::from_bytes(&[0x11; 32]);
-        let message = "TIG-POOL-REQUEST-V1\nGET\n/member/v0/protocol";
-        let signature = pool_identity::keys::sign_b64url(&real, message);
-        assert!(
-            verify_b64url(&key, message, &signature).is_err(),
-            "a real signature must not verify against the stand-in"
-        );
-        // And a signature it produced for itself cannot exist: nobody holds
-        // the scalar. The closest a test can get is that the key is not the
-        // one that signed.
-        assert_ne!(key.as_bytes(), real.verifying_key().as_bytes());
     }
 
     #[test]

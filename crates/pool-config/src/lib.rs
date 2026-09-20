@@ -332,6 +332,13 @@ pub const LARGEST_CONFORMING_CONTROL_BODY_BYTES: u64 = 383_156;
 /// body no route of this protocol accepts — which reads as a typo rather than
 /// a policy. This is the one upper bound the protocol supplies; the choice
 /// between it and the floor is the operator's, and is about memory.
+///
+/// The whole range is usable: `axum` caps a body-consuming extractor at 2 MiB
+/// of its own accord, so `pool-api` disables that on the control routes and
+/// `max_control_body_bytes` is the only bound that applies there
+/// (`pool_api::service::bounded`). Without that, a deployment naming more than
+/// 2 MiB would be refused at 2 MiB while its configuration said otherwise —
+/// a limit nobody chose, which is what this section exists to prevent.
 pub const LARGEST_PROTOCOL_BODY_BYTES: u64 = 64 * 1024 * 1024;
 
 /// The public member service's own settings.

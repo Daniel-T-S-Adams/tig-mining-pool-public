@@ -8,6 +8,12 @@
 //! anything else, so every failing response from this service carries that
 //! shape — including the ones the framework generates rather than a handler
 //! (see `service::protocol_shaped_errors`).
+//!
+//! One exception, and it is structural rather than an omission: every body the
+//! schema defines carries `server_time`, so a clock with no RFC 3339 form
+//! leaves nothing conforming to send. `service::no_server_time` answers that
+//! with a bodyless `503`, which §13's retry rules already have a member back
+//! off from.
 
 use axum::Json;
 use axum::http::StatusCode;

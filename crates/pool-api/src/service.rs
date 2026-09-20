@@ -8,7 +8,7 @@
 
 use std::net::SocketAddr;
 
-use axum::extract::{Request, State};
+use axum::extract::{DefaultBodyLimit, Request, State};
 use axum::http::StatusCode;
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
@@ -80,11 +80,32 @@ fn assemble(control: Router<AppState>, raw: Router<AppState>, state: AppState) -
 /// deployment chose for control messages — a limit from the wrong contract,
 /// and one no test would notice until a member's upload failed.
 fn control_routes(max_control_body_bytes: u64) -> Router<AppState> {
-    Router::new()
-        .route("/member/v0/protocol", get(protocol))
+    bounded(
+        Router::new().route("/member/v0/protocol", get(protocol)),
+        max_control_body_bytes,
+    )
+}
+
+/// Put `routes` under the control bound.
+///
+/// `route_layer` wraps only the routes registered before it runs, so the
+/// routes and the bound have to be applied together — which is why this takes
+/// the group rather than being folded into `control_routes`. A test that
+/// registered a probe after the bound would be measuring the layer it
+/// installed itself, and would pass with this one deleted.
+///
+/// Two layers, because two limits would otherwise apply. `axum` caps every
+/// body-consuming extractor at 2 MiB unless `DefaultBodyLimit` says otherwise,
+/// so a deployment naming more than that would find its own number ignored —
+/// a limit nobody chose, which is the thing `MemberApiConfig` exists to
+/// prevent. Disabling that leaves `max_control_body_bytes` as the only bound
+/// on these routes, which is what the configuration says it is.
+fn bounded(routes: Router<AppState>, max_control_body_bytes: u64) -> Router<AppState> {
+    routes
         .route_layer(RequestBodyLimitLayer::new(
             usize::try_from(max_control_body_bytes).unwrap_or(usize::MAX),
         ))
+        .route_layer(DefaultBodyLimit::disable())
 }
 
 /// Routes whose body is raw bytes, bounded by the upload session's own chunk
@@ -294,20 +315,58 @@ mod tests {
         assert_eq!(body, (limit * 4).to_string(), "the whole body must arrive");
     }
 
+    /// The probe, inside the control group and under the group's own bound —
+    /// `bounded` is handed the routes, exactly as `control_routes` hands it
+    /// the real ones. Registering the probe afterwards and applying a second
+    /// layer would measure that layer instead, and would pass with the group's
+    /// bound deleted.
+    fn control_group_with_probe(limit: u64) -> Router<AppState> {
+        bounded(
+            Router::new().route("/probe/control", axum::routing::post(probe)),
+            limit,
+        )
+    }
+
     #[tokio::test]
     async fn the_control_group_is_capped_by_the_same_number() {
         // The other half: without this, the test above would also pass with
         // the limit removed from both groups.
         let limit = 64;
-        let control = control_routes(limit)
-            .route("/probe/control", axum::routing::post(probe))
-            // The same bound the group's own routes carry, applied the same
-            // way, so the probe is inside the group rather than beside it.
-            .route_layer(RequestBodyLimitLayer::new(limit as usize));
-        let router = assemble(control, raw_body_routes(), AppState::default());
+        let router = control_group_with_probe(limit)
+            .merge(raw_body_routes())
+            .fallback(unknown_route)
+            .with_state(AppState::default());
 
         let (status, _) = post_bytes(router, "/probe/control", limit as usize * 4).await;
         assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+
+        // And a body at the bound arrives whole, so the case above is a bound
+        // rather than a layer that refuses everything.
+        let router = control_group_with_probe(limit)
+            .merge(raw_body_routes())
+            .fallback(unknown_route)
+            .with_state(AppState::default());
+        let (status, body) = post_bytes(router, "/probe/control", limit as usize).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, limit.to_string());
+    }
+
+    #[tokio::test]
+    async fn the_configured_limit_is_the_only_one_that_applies() {
+        // `axum` caps a body-consuming extractor at 2 MiB of its own accord.
+        // A deployment naming more than that would otherwise be refused at
+        // 2 MiB while its configuration said something else — and
+        // `LARGEST_PROTOCOL_BODY_BYTES` lets it name up to 64 MiB.
+        let limit = 4 * 1024 * 1024;
+        let router = control_group_with_probe(limit)
+            .merge(raw_body_routes())
+            .fallback(unknown_route)
+            .with_state(AppState::default());
+
+        let over_axums_default = 3 * 1024 * 1024;
+        let (status, body) = post_bytes(router, "/probe/control", over_axums_default).await;
+        assert_eq!(status, StatusCode::OK, "the configured limit is the bound");
+        assert_eq!(body, over_axums_default.to_string());
     }
 
     #[test]

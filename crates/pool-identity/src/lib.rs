@@ -26,6 +26,7 @@
 pub mod keys;
 pub mod service;
 mod store;
+pub mod wallet;
 pub mod wire;
 
 use std::fmt;

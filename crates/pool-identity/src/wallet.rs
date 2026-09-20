@@ -228,10 +228,36 @@ fn parse_rfc3339_seconds(text: &str) -> Option<u64> {
     let field = |from: usize, to: usize| text.get(from..to)?.parse::<i64>().ok();
     let (year, month, day) = (field(0, 4)?, field(5, 7)?, field(8, 10)?);
     let (hour, minute, second) = (field(11, 13)?, field(14, 16)?, field(17, 19)?);
-    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+    if !(1..=12).contains(&month) {
         return None;
     }
     if hour > 23 || minute > 59 || second > 59 {
+        return None;
+    }
+
+    // Against the real calendar, not against 31. The algorithm below is
+    // `civil_from_days` run backwards, and it is *total*: handed 31 February
+    // it returns a perfectly good instant three days into March. Normalising
+    // an impossible date into a real one is what `member_protocol.md` §14
+    // refuses — "an unknown enum, missing required field, lossy integer,
+    // invalid digest, or schema mismatch is incompatible input, not a value
+    // to coerce" — and here it would also mean two spellings of one instant,
+    // when the point of this text is that there is exactly one.
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let days_in_month = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        // February, which is the whole reason this is a match and not a
+        // constant: 2000 has 29 days and 2100 has 28.
+        _ => {
+            if leap {
+                29
+            } else {
+                28
+            }
+        }
+    };
+    if !(1..=days_in_month).contains(&day) {
         return None;
     }
 
@@ -269,6 +295,12 @@ mod tests {
             ("2026-03-20T09:51:40Z", 1_774_000_300),
             ("2038-01-19T03:14:07Z", 2_147_483_647),
             ("2100-03-01T00:00:00Z", 4_107_542_400),
+            // The last day of each month length, so the bound above is a
+            // calendar and not a blanket refusal of anything past the 28th.
+            ("2026-01-31T00:00:00Z", 1_769_817_600),
+            ("2026-02-28T00:00:00Z", 1_772_236_800),
+            ("2026-04-30T00:00:00Z", 1_777_507_200),
+            ("2000-02-29T00:00:00Z", 951_782_400),
         ] {
             assert_eq!(parse_rfc3339_seconds(text), Some(expected), "{text}");
         }
@@ -285,6 +317,18 @@ mod tests {
             "1970-13-01T00:00:00Z",
             "1970-00-01T00:00:00Z",
             "1970-01-32T00:00:00Z",
+            // Days that do not exist, each of which the civil-from-days
+            // algorithm would happily turn into a real date in the next
+            // month.
+            "2026-02-29T00:00:00Z",
+            "2026-02-31T00:00:00Z",
+            "2024-02-30T00:00:00Z",
+            "2100-02-29T00:00:00Z",
+            "2026-04-31T00:00:00Z",
+            "2026-06-31T00:00:00Z",
+            "2026-09-31T00:00:00Z",
+            "2026-11-31T00:00:00Z",
+            "2026-01-00T00:00:00Z",
             "1970-01-01T24:00:00Z",
             "1970-01-01T00:60:00Z",
             "1970-01-01T00:00:60Z",

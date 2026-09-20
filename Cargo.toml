@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/fake-tig",
     "crates/pool-admin",
+    "crates/pool-api",
     "crates/pool-config",
     "crates/pool-controller",
     "crates/pool-decision",

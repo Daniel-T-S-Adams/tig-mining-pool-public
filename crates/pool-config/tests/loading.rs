@@ -207,6 +207,10 @@ const ORCHESTRATION: &str = "\n[orchestration]\ninternal_pool_unverified_limit =
 /// shape.
 const GATEWAY: &str = "\n[gateway]\napi_key_file = \"/dev/null\"\nlease_secs = 120\nplatform = \"linux/arm64\"\nserved_compute = []\n";
 
+/// `pool-api`-only: `architecture.md` §3 gives member traffic to one process.
+const MEMBER_API: &str =
+    "\n[member_api]\nlisten = \"127.0.0.1:8081\"\nmax_control_body_bytes = 262144\n";
+
 /// The endpoint the controller and gateway both require. A local `fake-tig`
 /// here, which is also what F4d's guard reads.
 const TIG: &str = "\n[tig]\nbase_url = \"http://127.0.0.1:8080\"\nplayer_id = \"0x2935a721068da756b28cba896efdb64e8909dfae\"\nacquired_upstream_commit = \"ad08d1ea001a73ff5aab3b556d7f59246fece14e\"\n";
@@ -1032,6 +1036,11 @@ fn every_shipped_dev_config_parses_into_the_typed_shape() {
             Binary::TigGateway,
             "pool_gateway",
         ),
+        (
+            include_str!("../../../config/pool-api.dev.toml"),
+            Binary::PoolApi,
+            "pool_api",
+        ),
     ] {
         let config: Config = toml::from_str(file)
             .unwrap_or_else(|e| panic!("{} dev config does not parse: {e}", binary.as_str()));
@@ -1095,9 +1104,26 @@ fn every_shipped_dev_config_parses_into_the_typed_shape() {
                     "the gateway chooses no work"
                 );
             }
+            Binary::PoolApi => {
+                // §2.2 and §3: no endpoint, no key, no orchestration policy —
+                // this process terminates member traffic and nothing else.
+                assert!(config.tig.is_none(), "pool-api does not talk to TIG");
+                assert!(config.gateway.is_none());
+                assert!(config.orchestration.is_none());
+                let api = config
+                    .member_api
+                    .as_ref()
+                    .expect("the member_api section is what makes this binary runnable");
+                assert!(
+                    api.listen.parse::<std::net::SocketAddr>().is_ok(),
+                    "a dev config names an address literal, not a hostname: {}",
+                    api.listen
+                );
+            }
             _ => {
                 assert!(config.tig.is_none(), "migrate does not talk to TIG");
                 assert!(config.orchestration.is_none());
+                assert!(config.member_api.is_none());
             }
         }
     }
@@ -1167,5 +1193,120 @@ fn a_rejected_endpoint_never_echoes_its_userinfo() {
             !rendered.contains("hunter2"),
             "the refusal printed the credential it was rejecting: {rendered}"
         );
+    }
+}
+
+#[test]
+fn the_member_api_section_is_required_by_pool_api_and_forbidden_elsewhere() {
+    let scratch = Scratch::new("member-api-section");
+    let base = |role: &str| {
+        valid_toml(&scratch.password_file())
+            .replace("user = \"pool_migration\"", &format!("user = \"{role}\""))
+    };
+
+    // Required. `listen` says where the TLS proxy in front of this process
+    // reaches it and `max_control_body_bytes` says how much a member may say
+    // in one control message; a default for either would answer a deployment
+    // question on the operator's behalf.
+    let Err(err) = Config::load(scratch.write(&base("pool_api")), Binary::PoolApi) else {
+        panic!("pool-api with no [member_api] must not load");
+    };
+    assert_invalid(err, "pool-api requires [member_api]");
+
+    // And forbidden elsewhere: a controller carrying it would read as though
+    // the controller terminated member traffic.
+    let mut toml = base("pool_controller");
+    toml.push_str(TIG);
+    toml.push_str(ORCHESTRATION);
+    toml.push_str(MEMBER_API);
+    let Err(err) = Config::load(scratch.write(&toml), Binary::PoolController) else {
+        panic!("a controller carrying [member_api] must not load");
+    };
+    assert_invalid(err, "[member_api] belongs to pool-api");
+
+    // The shape that does load, so the rejections above are not passing for
+    // some unrelated reason.
+    let mut toml = base("pool_api");
+    toml.push_str(MEMBER_API);
+    let config = Config::load(scratch.write(&toml), Binary::PoolApi).expect("a pool-api config");
+    let api = config.member_api.expect("the section is kept");
+    assert_eq!(api.listen, "127.0.0.1:8081");
+    assert_eq!(api.max_control_body_bytes, 262_144);
+}
+
+#[test]
+fn pool_api_must_not_carry_a_tig_endpoint() {
+    // `architecture.md` §2.2 puts the TIG credential in the gateway alone and
+    // §3 gives this process no reason to reach TIG at all. A config that named
+    // an endpoint here would read as though it did.
+    let scratch = Scratch::new("member-api-tig");
+    let mut toml = valid_toml(&scratch.password_file())
+        .replace("user = \"pool_migration\"", "user = \"pool_api\"");
+    toml.push_str(MEMBER_API);
+    toml.push_str(TIG);
+    let Err(err) = Config::load(scratch.write(&toml), Binary::PoolApi) else {
+        panic!("pool-api carrying [tig] must not load");
+    };
+    assert_invalid(err, "must not carry [tig]");
+}
+
+#[test]
+fn a_member_api_section_with_an_unusable_value_does_not_load() {
+    let scratch = Scratch::new("member-api-values");
+    let load = |section: &str| {
+        let mut toml = valid_toml(&scratch.password_file())
+            .replace("user = \"pool_migration\"", "user = \"pool_api\"");
+        toml.push_str(section);
+        Config::load(scratch.write(&toml), Binary::PoolApi)
+    };
+
+    // Parsed at load rather than at bind: a service that starts, logs
+    // "listening", and only then fails to bind looks healthy while serving
+    // nobody, which is the fail-open shape `architecture.md` §9 refuses.
+    for bad in [
+        "",
+        "   ",
+        "127.0.0.1",
+        ":8081",
+        "localhost:8081",
+        "127.0.0.1:0x1f",
+    ] {
+        let Err(err) = load(&format!(
+            "\n[member_api]\nlisten = \"{bad}\"\nmax_control_body_bytes = 262144\n"
+        )) else {
+            panic!("listen {bad:?} must not load");
+        };
+        assert_invalid(err, "member_api.listen");
+    }
+
+    // A hostname is refused deliberately: a DNS answer can change between
+    // startup and a restart, so a bind address that resolves is a different
+    // address over time. An address literal is the one that cannot move.
+    let Err(err) =
+        load("\n[member_api]\nlisten = \"localhost:8081\"\nmax_control_body_bytes = 262144\n")
+    else {
+        panic!("a hostname must not load");
+    };
+    assert_invalid(err, "must be `address:port`");
+
+    // Zero reads no request at all, and anything above `member_protocol.md`
+    // §10.3's manifest ceiling would let a control message carry more than the
+    // largest thing the protocol defines.
+    for bad in [0_u64, 262_145, u64::MAX] {
+        let Err(err) = load(&format!(
+            "\n[member_api]\nlisten = \"127.0.0.1:8081\"\nmax_control_body_bytes = {bad}\n"
+        )) else {
+            panic!("max_control_body_bytes {bad} must not load");
+        };
+        assert_invalid(err, "max_control_body_bytes must be between 1 and 262144");
+    }
+
+    // Both ends of the accepted range, so the rejections above are bounds
+    // rather than a check that refuses everything.
+    for good in [1_u64, 262_144] {
+        load(&format!(
+            "\n[member_api]\nlisten = \"[::1]:8081\"\nmax_control_body_bytes = {good}\n"
+        ))
+        .unwrap_or_else(|e| panic!("max_control_body_bytes {good} must load: {e:?}"));
     }
 }

@@ -305,6 +305,28 @@ pub struct GatewayConfig {
     pub served_compute: Vec<String>,
 }
 
+/// The public member service's own settings.
+///
+/// `pool-api`-only, the way `[gateway]` is gateway-only: a config carrying it
+/// elsewhere would read as though some other process terminated member
+/// traffic, which `architecture.md` §3 says only this one does.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MemberApiConfig {
+    /// Where the service listens. `architecture.md` §11.2 puts a TLS proxy in
+    /// front of it, so this is the private address that proxy reaches, and
+    /// TLS termination is not this process's job.
+    pub listen: String,
+    /// The largest control-message body this service will read.
+    ///
+    /// Required, not defaulted. `security.md` §4.3 has the edge enforce body
+    /// limits and §5.1 refuses an upload before quota is reserved; a service
+    /// that defaulted this would have a limit nobody chose. Chunk bodies are
+    /// bounded separately by the upload session's own chunk size
+    /// (`member_protocol.md` §10.3).
+    pub max_control_body_bytes: u64,
+}
+
 /// `accounting.md` §3's canonical unsigned base-10 atom string.
 ///
 /// Digits only, no sign, no exponent, no decimal point, and no redundant
@@ -431,6 +453,9 @@ pub struct Config {
     /// `validate_for` enforces in both directions.
     pub orchestration: Option<OrchestrationConfig>,
     pub gateway: Option<GatewayConfig>,
+    /// Present for `pool-api` and absent for every other binary, which
+    /// `validate_for` enforces in both directions.
+    pub member_api: Option<MemberApiConfig>,
 }
 
 /// Which binary is loading, so cross-field rules can differ where the
@@ -450,6 +475,10 @@ pub enum Binary {
     PoolAdminMigrate,
     PoolController,
     TigGateway,
+    /// The public member-facing service (`architecture.md` §4). It holds no
+    /// TIG credential — §2.2 puts that in the gateway alone — and its database
+    /// role cannot create an intent or change a workflow (§6).
+    PoolApi,
 }
 
 impl Binary {
@@ -461,6 +490,7 @@ impl Binary {
             Binary::PoolAdminMigrate => "pool_migration",
             Binary::PoolController => "pool_controller",
             Binary::TigGateway => "pool_gateway",
+            Binary::PoolApi => "pool_api",
         }
     }
 
@@ -469,6 +499,7 @@ impl Binary {
             Binary::PoolAdminMigrate => "pool-admin migrate",
             Binary::PoolController => "pool-controller",
             Binary::TigGateway => "tig-gateway",
+            Binary::PoolApi => "pool-api",
         }
     }
 }
@@ -703,13 +734,13 @@ impl Config {
                     )));
                 }
             }
-            (Binary::PoolAdminMigrate, Some(_)) => {
-                return Err(invalid(
-                    "pool-admin migrate must not carry [tig]: it does not talk to TIG (architecture.md §4)"
-                        .into(),
-                ));
+            (Binary::PoolAdminMigrate | Binary::PoolApi, Some(_)) => {
+                return Err(invalid(format!(
+                    "{} must not carry [tig]: it does not talk to TIG (architecture.md §3, §4)",
+                    binary.as_str()
+                )));
             }
-            (Binary::PoolAdminMigrate, None) => {}
+            (Binary::PoolAdminMigrate | Binary::PoolApi, None) => {}
         }
 
         // Required for the controller and refused for anyone else. Both
@@ -869,6 +900,50 @@ impl Config {
             (other, Some(_)) => {
                 return Err(invalid(format!(
                     "[gateway] belongs to tig-gateway; {} must not carry it",
+                    other.as_str()
+                )));
+            }
+            (_, None) => {}
+        }
+
+        // And the same for `[member_api]`. `architecture.md` §3 gives member
+        // traffic to one process; a config carrying this elsewhere would read
+        // as though another terminated it.
+        match (binary, &self.member_api) {
+            (Binary::PoolApi, None) => {
+                return Err(invalid(
+                    "pool-api requires [member_api] with listen and \
+                     max_control_body_bytes; neither has a default because \
+                     each is a fact about this deployment that a fallback \
+                     would answer on its behalf"
+                        .into(),
+                ));
+            }
+            (Binary::PoolApi, Some(api)) => {
+                // Parsed rather than merely non-empty: a service that starts,
+                // logs "listening", and then fails to bind is the fail-open
+                // shape §9 refuses — it looks healthy while serving nobody.
+                if api.listen.parse::<std::net::SocketAddr>().is_err() {
+                    return Err(invalid(format!(
+                        "member_api.listen must be `address:port`, found {:?}",
+                        api.listen
+                    )));
+                }
+                // A body limit of zero reads no request at all, and one above
+                // the manifest ceiling would let a control message carry more
+                // than the largest thing `member_protocol.md` §10.3 defines.
+                if api.max_control_body_bytes == 0 || api.max_control_body_bytes > 262_144 {
+                    return Err(invalid(format!(
+                        "member_api.max_control_body_bytes must be between 1 \
+                         and 262144 (member_protocol.md §10.3's manifest \
+                         ceiling), found {}",
+                        api.max_control_body_bytes
+                    )));
+                }
+            }
+            (other, Some(_)) => {
+                return Err(invalid(format!(
+                    "[member_api] belongs to pool-api; {} must not carry it",
                     other.as_str()
                 )));
             }

@@ -1,0 +1,29 @@
+[package]
+name = "pool-api"
+description = "The public member-facing service: member_protocol.md's HTTPS surface, terminated by the one process that holds no TIG credential"
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+version = "0.1.0"
+
+[dependencies]
+axum = "0.8"
+clap = { version = "4", features = ["derive"] }
+pool-config = { path = "../pool-config" }
+pool-telemetry = { path = "../pool-telemetry" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# The protocol endpoint answers with server time (§13: "so a client can
+# diagnose skew"), which is a formatted timestamp rather than a raw epoch.
+time = { version = "0.3", features = ["formatting", "macros"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal"] }
+tower-http = { version = "0.6", features = ["limit"] }
+tracing = "0.1"
+
+[dev-dependencies]
+http-body-util = "0.1"
+jsonschema = "0.26"
+tower = { version = "0.5", features = ["util"] }
+
+[lints]
+workspace = true

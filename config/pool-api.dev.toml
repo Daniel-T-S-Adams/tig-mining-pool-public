@@ -37,7 +37,12 @@ deployment = "local-dev"
 # is no proxy and no member but the local agent. An address literal rather than
 # a hostname: a DNS answer can change between restarts.
 listen = "127.0.0.1:8081"
-# The largest control-message body this deployment reads, which is
-# `member_protocol.md` §10.3's manifest ceiling. Chunk bodies are bounded
-# separately, by the upload session's own chunk size.
-max_control_body_bytes = 262144
+# The largest control-message body this deployment reads. The floor is what
+# the pinned request schemas can produce — a maximal `HeartbeatRequest` is
+# 383156 bytes compactly encoded — and the ceiling is §10.3's 64 MiB chunk,
+# the largest body the protocol defines at all. This is 512 KiB: above the
+# floor with room for an agent whose JSON encoder is not compact, and far
+# below anything that would make a control message a place to put bulk.
+# Chunk bodies are bounded separately, by the upload session's own chunk size,
+# and the route that carries them is registered outside this limit.
+max_control_body_bytes = 524288

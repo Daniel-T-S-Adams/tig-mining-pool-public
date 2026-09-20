@@ -31,6 +31,41 @@ pub const REQUEST_CLOCK_SKEW_SECONDS: u32 = 300;
 /// §8's heartbeat cadence, in seconds. Pinned the same way.
 pub const HEARTBEAT_INTERVAL_SECONDS: u32 = 30;
 
+/// Server time, already expressed as the schema's `DateTime`.
+///
+/// A type rather than a `String` because expressing the clock is the one step
+/// that can fail, and `member_protocol.md` §13 makes the value authoritative:
+/// "server time and TIG block height are authoritative". A response that
+/// invented a timestamp when formatting failed would publish a wrong
+/// authoritative value, which is worse than not answering. Constructing this
+/// is therefore the single fallible step, and every body that carries server
+/// time is built from one that already exists.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServerTime(String);
+
+impl ServerTime {
+    /// Express `now` as RFC 3339 with whole seconds.
+    ///
+    /// Whole seconds because §3.2's freshness window is 300 seconds wide and
+    /// sub-second precision states a confidence the protocol does not use.
+    ///
+    /// `None` when the instant has no RFC 3339 form at all — a year outside
+    /// 0..=9999, which `OffsetDateTime::now_utc` cannot produce on a working
+    /// clock. The caller answers without a body rather than with a wrong one.
+    pub fn at(now: time::OffsetDateTime) -> Option<Self> {
+        now.replace_nanosecond(0)
+            .unwrap_or(now)
+            .format(&time::format_description::well_known::Rfc3339)
+            .ok()
+            .map(Self)
+    }
+
+    /// The wire value.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 /// The §4 response body.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ProtocolInfo {
@@ -45,28 +80,43 @@ pub struct ProtocolInfo {
 }
 
 impl ProtocolInfo {
-    /// What this build accepts, as of `now`.
-    pub fn at(now: time::OffsetDateTime) -> Self {
+    /// What this build accepts, as of `server_time`.
+    pub fn at(server_time: &ServerTime) -> Self {
         Self {
-            supported_protocol_versions: vec![PROTOCOL_VERSION.to_string()],
-            supported_package_formats: vec![PACKAGE_FORMAT.to_string()],
-            server_time: rfc3339(now),
+            supported_protocol_versions: vec![PROTOCOL_VERSION.to_owned()],
+            supported_package_formats: vec![PACKAGE_FORMAT.to_owned()],
+            server_time: server_time.as_str().to_owned(),
             request_clock_skew_seconds: REQUEST_CLOCK_SKEW_SECONDS,
             heartbeat_interval_seconds: HEARTBEAT_INTERVAL_SECONDS,
         }
     }
 }
 
-/// Server time as the schema's `DateTime` — RFC 3339, whole seconds.
-///
-/// Whole seconds because §3.2's freshness window is 300 seconds wide and
-/// sub-second precision states a confidence the protocol does not use.
-pub fn rfc3339(now: time::OffsetDateTime) -> String {
-    now.replace_nanosecond(0)
-        .unwrap_or(now)
-        .format(&time::format_description::well_known::Rfc3339)
-        // An unformattable timestamp is not a reason to fail a read, and the
-        // epoch is visibly wrong rather than quietly plausible — a client
-        // diagnosing skew sees a bad answer instead of a convincing one.
-        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_owned())
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::*;
+
+    #[test]
+    fn a_normal_instant_has_a_wire_form_and_carries_whole_seconds() {
+        let now = time::OffsetDateTime::from_unix_timestamp(1_774_000_000)
+            .expect("a valid instant")
+            .replace_nanosecond(123_456_789)
+            .expect("a valid nanosecond");
+        let server_time = ServerTime::at(now).expect("a representable instant");
+        assert_eq!(server_time.as_str(), "2026-03-20T09:46:40Z");
+    }
+
+    #[test]
+    fn an_instant_with_no_rfc_3339_form_has_none() {
+        // The branch that used to answer with the Unix epoch. A year before
+        // zero has no RFC 3339 form, so the only honest answers are "no value"
+        // and a fabricated one; this is the test that pins which.
+        let year_minus_one = time::Date::from_calendar_date(-1, time::Month::January, 1)
+            .expect("a constructible date")
+            .midnight()
+            .assume_utc();
+        assert_eq!(ServerTime::at(year_minus_one), None);
+    }
 }

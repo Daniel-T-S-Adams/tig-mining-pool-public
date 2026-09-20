@@ -45,10 +45,23 @@ impl Default for AppState {
 /// nothing to fall back to: `max_control_body_bytes` has no default, and a
 /// builder that could supply one would be a limit nobody chose.
 pub fn app(api: &MemberApiConfig, state: AppState) -> Router {
+    app_with(api, state, Router::new())
+}
+
+/// The router, with `extra` merged in before the shaping middleware.
+///
+/// `extra` is already stated — the account routes carry their own state,
+/// because it holds the ticket key and `security.md` §4.1 keeps that inside
+/// this crate. Merging before `assemble`'s layer rather than after is what
+/// puts those routes under the same error shaping as everything else: §14
+/// has a caller parse every failure through one parser, and a route outside
+/// the layer would answer a bare framework status.
+pub(crate) fn app_with(api: &MemberApiConfig, state: AppState, extra: Router) -> Router {
     assemble(
         control_routes(api.max_control_body_bytes),
         raw_body_routes(),
         state,
+        extra,
     )
 }
 
@@ -58,19 +71,27 @@ pub fn app(api: &MemberApiConfig, state: AppState) -> Router {
 /// route in the raw group: the claim that the control limit does not reach
 /// that group is otherwise unobservable while the group is empty, and an
 /// unobservable claim is one that stops being true without anything failing.
-fn assemble(control: Router<AppState>, raw: Router<AppState>, state: AppState) -> Router {
+fn assemble(
+    control: Router<AppState>,
+    raw: Router<AppState>,
+    state: AppState,
+    extra: Router,
+) -> Router {
     control
         .merge(raw)
         // Outside both groups: an unrouted path is incompatible input (§14),
         // not an absence to report in the framework's own words, and it is
         // answered without reading whatever body arrived with it.
         .fallback(unknown_route)
-        // Outermost, so a rejection from either group passes through here.
+        .with_state(state.clone())
+        // Merged after the member groups are stated and before the shaping
+        // layer, so the account routes answer in the same shape.
+        .merge(extra)
+        // Outermost, so a rejection from any group passes through here.
         .layer(axum::middleware::from_fn_with_state(
-            state.clone(),
+            state,
             protocol_shaped_errors,
         ))
-        .with_state(state)
 }
 
 /// Routes whose body is a JSON control message.
@@ -101,7 +122,10 @@ fn control_routes(max_control_body_bytes: u64) -> Router<AppState> {
 /// replaced — a limit nobody chose, which is the thing `MemberApiConfig`
 /// exists to prevent, and which matters most for the group whose contract
 /// starts at 1 MiB and runs to 64.
-fn bounded(routes: Router<AppState>, limit: u64) -> Router<AppState> {
+pub(crate) fn bounded<S>(routes: Router<S>, limit: u64) -> Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
     routes
         .route_layer(RequestBodyLimitLayer::new(
             usize::try_from(limit).unwrap_or(usize::MAX),
@@ -164,7 +188,7 @@ async fn unknown_route(State(state): State<AppState>) -> Response {
 /// authoritative, and a fabricated authoritative time is worse than an
 /// unexplained failure: the member would diagnose skew against a lie. `503`,
 /// because a clock is a thing an operator fixes.
-fn no_server_time() -> Response {
+pub(crate) fn no_server_time() -> Response {
     tracing::error!(
         event = "api.server_time_unrepresentable",
         "the server clock has no RFC 3339 form; answering without a body"
@@ -230,7 +254,30 @@ pub async fn run(config: &Config) -> Result<(), String> {
     // cannot issue or redeem a ticket — and a service that accepted
     // connections first would discover that at a member's first enrollment
     // rather than at startup, where an operator is watching.
-    let _ticket_key = load_ticket_key(api)?;
+    let ticket_key = std::sync::Arc::new(load_ticket_key(api)?);
+
+    // The URL carries the password: built here, handed to the driver, never
+    // logged or stored (`architecture.md` §2.2).
+    let url = config
+        .database_url()
+        .map_err(|e| format!("cannot build database URL: {e}"))?;
+    let db = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(8)
+        .acquire_timeout(std::time::Duration::from_millis(u64::from(
+            config.database.connect_timeout_ms,
+        )))
+        .connect(&url)
+        .await
+        .map_err(|e| format!("cannot connect to database: {e}"))?;
+
+    let account = crate::account::AccountState {
+        db,
+        key: ticket_key,
+        network: config.network.to_string(),
+        pool_domain: api.pool_domain.clone(),
+        login_chain_id: api.login_chain_id,
+        now: time::OffsetDateTime::now_utc,
+    };
     let addr: SocketAddr = api
         .listen
         .parse()
@@ -248,7 +295,12 @@ pub async fn run(config: &Config) -> Result<(), String> {
         "member api is serving"
     );
 
-    axum::serve(listener, app(api, AppState::default()))
+    let router = app_with(
+        api,
+        AppState::default(),
+        crate::account::routes(account, api.max_control_body_bytes),
+    );
+    axum::serve(listener, router)
         .with_graceful_shutdown(shutdown())
         .await
         .map_err(|e| format!("serve failed: {e}"))
@@ -402,6 +454,7 @@ mod tests {
             control_routes(control_limit),
             raw_group_with_probe(),
             AppState::default(),
+            Router::new(),
         );
 
         let chunk = 3 * 1024 * 1024;
@@ -427,6 +480,7 @@ mod tests {
             control_routes(LARGEST_CONFORMING_CONTROL_BODY_BYTES),
             raw_group_with_probe(),
             AppState::default(),
+            Router::new(),
         );
 
         let request = axum::http::Request::post("/probe/raw")
@@ -469,6 +523,7 @@ mod tests {
             control_group_with_probe(limit),
             raw_body_routes(),
             AppState::default(),
+            Router::new(),
         );
 
         let (status, body) = post_bytes(router, "/probe/control", limit as usize * 4).await;
@@ -485,6 +540,7 @@ mod tests {
             control_group_with_probe(limit),
             raw_body_routes(),
             AppState::default(),
+            Router::new(),
         );
         let (status, body) = post_bytes(router, "/probe/control", limit as usize).await;
         assert_eq!(status, StatusCode::OK);
@@ -502,6 +558,7 @@ mod tests {
             control_group_with_probe(limit),
             raw_body_routes(),
             AppState::default(),
+            Router::new(),
         );
 
         let over_axums_default = 3 * 1024 * 1024;

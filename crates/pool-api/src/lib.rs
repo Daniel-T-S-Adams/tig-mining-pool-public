@@ -11,6 +11,7 @@
 //! signed-request rules are §3.2, and the wire shapes are pinned in
 //! `schemas/member_protocol/v0.1.0`.
 
+pub mod account;
 pub mod auth;
 pub mod error;
 pub mod protocol;

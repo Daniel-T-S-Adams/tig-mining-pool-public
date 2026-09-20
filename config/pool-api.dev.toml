@@ -43,6 +43,13 @@ listen = "127.0.0.1:8081"
 # by the owner. `pool-api` refuses to start if it is missing, short, or
 # readable by anyone else.
 ticket_hmac_key_file = "secrets/ticket-hmac-key"
+# The domain a member's wallet shows them when they sign in, compared byte for
+# byte (accounting.md §12.2). Two deployments are two pools: a signature made
+# for one must not authorise anything at the other.
+pool_domain = "local-dev.bench-pool.invalid"
+# Base Sepolia. Stated rather than derived — `network` is pinned to "testnet"
+# and could not tell one Base chain from the other.
+login_chain_id = 84532
 # The largest control-message body this deployment reads. The floor is what
 # the pinned request schemas can produce — a maximal `HeartbeatRequest` is
 # 383156 bytes compactly encoded — and the ceiling is §10.3's 64 MiB chunk,

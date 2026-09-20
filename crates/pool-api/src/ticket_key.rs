@@ -14,6 +14,14 @@
 //! formatting call is how a secret usually escapes and it is not usually the
 //! call anyone reviewed.
 //!
+//! The file holds printable text — base64 or hex — rather than raw bytes.
+//! That is not cosmetic: the loader strips a trailing newline, because that
+//! is what an editor adds, and a file of raw random bytes ends in `0x0A`
+//! about once in every two hundred and fifty-six. Text and the trim are
+//! consistent; binary and the trim are a key that is occasionally one byte
+//! shorter than the file, which is the kind of failure that reaches
+//! production because it passed every time it was tried.
+//!
 //! Why keyed at all, rather than a plain SHA-256 of the bearer value: a
 //! ticket is 256 bits of entropy, so a plain hash is not guessable — but a
 //! database copy would then let its holder confirm a *guessed* ticket
@@ -82,6 +90,16 @@ pub enum TicketKeyError {
         path: PathBuf,
         bytes: usize,
     },
+    /// The file is not text.
+    ///
+    /// This exists because of the newline trim below. A file of raw random
+    /// bytes ends in `0x0A` about once in every two hundred and fifty-six,
+    /// and trimming that would take a byte off the key — silently, and only
+    /// sometimes. Refusing a non-text file makes the trim mean what it says:
+    /// it removes what an editor added, not part of a key.
+    NotText {
+        path: PathBuf,
+    },
     /// A key is short. A larger file is a pasted certificate, a log, or the
     /// wrong path entirely, and reading it in to find out is the thing this
     /// module is trying not to do.
@@ -112,6 +130,13 @@ impl std::fmt::Display for TicketKeyError {
                 f,
                 "the ticket HMAC key at {} is {bytes} bytes; at least {MIN_KEY_BYTES} \
                  are required, which is the width of the digest it keys",
+                path.display()
+            ),
+            TicketKeyError::NotText { path } => write!(
+                f,
+                "the ticket HMAC key at {} is not printable text; provision it \
+                 as base64 or hex, because a file of raw bytes cannot be told \
+                 from one an editor added a newline to",
                 path.display()
             ),
             TicketKeyError::TooLarge { path, bytes } => write!(
@@ -194,10 +219,23 @@ pub(crate) fn load(path: &Path) -> Result<TicketKey, TicketKeyError> {
 
     // A trailing newline is what an editor adds and what `echo` writes, and
     // it is not part of the key an operator provisioned. Trimmed from the end
-    // only: a key is bytes, and trimming leading bytes would silently accept
-    // two different files as the same key.
+    // only: trimming leading bytes would silently accept two different files
+    // as the same key.
     while key.last().is_some_and(|b| *b == b'\n' || *b == b'\r') {
         key.pop();
+    }
+
+    // And the rest must be text, which is what makes that trim safe. A file
+    // of raw random bytes ends in `0x0A` about once in two hundred and
+    // fifty-six: trimming it would take a byte off the key, silently and
+    // only sometimes — a 32-byte key would become 31 and be refused as short,
+    // and a longer one would simply be a different key than the file holds.
+    // Requiring printable text means the only thing the loop can remove is
+    // the thing it is there to remove.
+    if !key.iter().all(|b| (0x21..=0x7e).contains(b)) {
+        return Err(TicketKeyError::NotText {
+            path: path.to_path_buf(),
+        });
     }
 
     if key.len() < MIN_KEY_BYTES {

@@ -40,9 +40,20 @@ done
 # operator wants one command, not two — but it is not a database credential:
 # `pool-api` hashes every enrollment and recovery ticket under it, and refuses
 # to start unless the file is at least 32 bytes and readable by nobody else.
+#
+# Printable text, generated the same way the passwords above are, and for a
+# reason beyond consistency: `pool-api` strips a trailing newline from this
+# file, and a file of raw random bytes ends in one about once in every two
+# hundred and fifty-six. Such a key would silently lose a byte — 32 would
+# become 31 and be refused as short — on roughly one run in a hundred and
+# twenty-eight, which is exactly often enough to reach someone else's machine
+# and not yours.
+#
+# 44 characters from the 62-symbol alphabet left after `/+=` are dropped,
+# which is comfortably more entropy than the 32-byte minimum asks for.
 ticket_key="$root/secrets/ticket-hmac-key"
 if [[ ! -s "$ticket_key" ]]; then
-    head -c 32 /dev/urandom > "$ticket_key"
+    head -c 64 /dev/urandom | base64 | tr -d '/+=\n' | head -c 44 > "$ticket_key"
     chmod 600 "$ticket_key"
     echo "generated $ticket_key"
 fi

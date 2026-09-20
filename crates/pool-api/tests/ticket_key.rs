@@ -167,6 +167,65 @@ fn a_trailing_newline_is_not_part_of_the_key() {
 }
 
 #[test]
+fn a_key_of_raw_bytes_is_refused_rather_than_quietly_shortened() {
+    // The regression this test exists for: the loader strips a trailing
+    // newline, so a file of raw random bytes ending in `0x0A` — about one in
+    // every two hundred and fifty-six — would lose a byte. A 32-byte key
+    // would become 31 and be refused as "too short", which tells an operator
+    // nothing about what is wrong, and only on some of their runs.
+    //
+    // The first version of `scripts/dev-db.sh` in this PR generated exactly
+    // that: `head -c 32 /dev/urandom`.
+    let scratch = Scratch::new("binary");
+
+    // The unlucky file, spelled out: 31 arbitrary bytes and a trailing 0x0A.
+    let mut unlucky = vec![0x5a; 31];
+    unlucky.push(b'\n');
+    let key = scratch.key_file("unlucky", &unlucky, 0o600);
+    let err = preflight(&scratch, &key).expect_err("must be refused");
+    assert!(
+        err.contains("32"),
+        "31 printable bytes plus a newline is a short key, and says so: {err}"
+    );
+
+    // And a file that is simply not text is refused for being that, rather
+    // than being trimmed into something that might pass.
+    let mut binary = vec![0x5a; 40];
+    binary[7] = 0x00;
+    binary[19] = 0xff;
+    let key = scratch.key_file("binary", &binary, 0o600);
+    let err = preflight(&scratch, &key).expect_err("must be refused");
+    assert!(err.contains("not printable text"), "{err}");
+
+    // Including one whose last byte is the newline the trim looks for: the
+    // trim runs first, and what remains is still not text.
+    let mut binary_newline = vec![0xab; 40];
+    binary_newline.push(b'\n');
+    let key = scratch.key_file("binary-newline", &binary_newline, 0o600);
+    let err = preflight(&scratch, &key).expect_err("must be refused");
+    assert!(err.contains("not printable text"), "{err}");
+}
+
+#[test]
+fn the_key_the_dev_script_generates_is_one_this_process_accepts() {
+    // The two halves of this PR agreeing. `scripts/dev-db.sh` writes 44
+    // characters of filtered base64; if the loader's rules and the
+    // generator's output ever part company, the failure is at an operator's
+    // first `pool-api run` and not here.
+    let scratch = Scratch::new("dev-shape");
+    let generated: Vec<u8> = b"icia1lfzQwErTyUiOpAsDfGhJkLzXcVbNmQwErTyUiOp".to_vec();
+    assert_eq!(generated.len(), 44, "the shape dev-db.sh writes");
+    let key = scratch.key_file("generated", &generated, 0o600);
+    preflight(&scratch, &key).expect("the generated shape is accepted");
+
+    // And with the newline a shell redirect or an editor might leave.
+    let mut with_newline = generated;
+    with_newline.push(b'\n');
+    let key = scratch.key_file("generated-newline", &with_newline, 0o600);
+    preflight(&scratch, &key).expect("a trailing newline is still fine");
+}
+
+#[test]
 fn the_error_never_carries_the_key() {
     // §4.1's whole point. The paths and reasons an operator needs are in the
     // message; the bytes are not, however the file is shaped.

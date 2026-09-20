@@ -7,8 +7,11 @@
 //! it."
 //!
 //! Same shape as `tig_gateway::credential`, and for the same reasons.
-//! [`load`] and [`TicketKey::hmac`] are crate-private, so no other crate can
-//! obtain a key or use one — sharing a Rust library does not grant access to
+//! [`load`] and [`TicketKey::hmac`] are crate-private, **and no public
+//! function returns a [`TicketKey`]** — the second half matters as much as
+//! the first, because a public function handing one out is a public way to
+//! obtain one however private the loader is. So no other crate can obtain a
+//! key or use one — sharing a Rust library does not grant access to
 //! the secret, and that is a compile error rather than a convention. The key
 //! has no `Display` and a `Debug` that prints nothing of it, because a
 //! formatting call is how a secret usually escapes and it is not usually the
@@ -37,7 +40,15 @@ use sha2::Sha256;
 ///
 /// Deliberately opaque: no `Display`, no revealing `Debug`, no `Serialize`,
 /// no `Clone`. The only thing it will do is hash, and that is crate-private.
-pub struct TicketKey(Vec<u8>);
+///
+/// **The type itself is crate-private, and that is the load-bearing part.**
+/// Keeping `load` private left `pub fn ... -> TicketKey` available, which is
+/// how the key escaped once already. With the type private, rustc refuses
+/// any public signature that mentions it — `private_interfaces` is a
+/// warning, and this workspace builds with `-D warnings`. A grep over
+/// signatures cannot do that: rustfmt wraps a long one across lines, and the
+/// pattern that caught my hand-written example missed the wrapped form.
+pub(crate) struct TicketKey(Vec<u8>);
 
 impl TicketKey {
     /// The HMAC-SHA-256 of `bearer` under this key: the value stored in
@@ -59,7 +70,7 @@ impl TicketKey {
     }
 
     /// Whether a key is present, without revealing anything about it.
-    pub fn is_present(&self) -> bool {
+    pub(crate) fn is_present(&self) -> bool {
         !self.0.is_empty()
     }
 }
@@ -74,7 +85,7 @@ impl std::fmt::Debug for TicketKey {
 }
 
 #[derive(Debug)]
-pub enum TicketKeyError {
+pub(crate) enum TicketKeyError {
     Missing {
         path: PathBuf,
     },
@@ -246,4 +257,72 @@ pub(crate) fn load(path: &Path) -> Result<TicketKey, TicketKeyError> {
     }
 
     Ok(TicketKey(key))
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::*;
+
+    /// A synthetic key in a private file. Never a real secret.
+    fn key_file(name: &str, contents: &[u8], mode: u32) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = std::env::temp_dir().join(format!("pool-api-key-unit-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(name);
+        std::fs::write(&path, contents).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+        path
+    }
+
+    #[test]
+    fn a_loaded_key_shows_nothing_of_itself() {
+        // In this crate, because no public function returns a `TicketKey` —
+        // an integration test could not obtain one, which is the point.
+        let secret = b"SUPER-SECRET-VALUE-NOBODY-SHOULD-EVER-SEE";
+        let key = load(&key_file("debug", secret, 0o600)).expect("a usable key");
+
+        let debug = format!("{key:?}");
+        assert!(!debug.contains("SUPER-SECRET"), "{debug}");
+        // Not the length either: a length distinguishes one provisioned key
+        // from another.
+        assert!(!debug.contains(&secret.len().to_string()), "{debug}");
+        assert!(key.is_present());
+    }
+
+    #[test]
+    fn the_permission_message_names_the_mode_and_not_just_the_path() {
+        // The file is named without its mode on purpose. Naming it `key644`
+        // would put "644" in the path, and the path is in every message — so
+        // an assertion that the message mentions the mode would pass even if
+        // `Display` stopped naming it.
+        let path = key_file("plain", &[0x5a; 32], 0o644);
+        let Err(e) = load(&path) else {
+            panic!("0644 must be refused")
+        };
+        let rendered = e.to_string();
+        let without_path = rendered.replace(&path.display().to_string(), "<path>");
+        assert!(
+            without_path.contains("644"),
+            "the mode must survive removing the path: {without_path}"
+        );
+    }
+
+    #[test]
+    fn the_same_key_hashes_the_same_bearer_the_same_way() {
+        // `hmac` is crate-private, so this is the only place it can be
+        // exercised at all.
+        let key = load(&key_file("hmac", &[0x5a; 32], 0o600)).expect("a usable key");
+        // Printable, because this crate's own rule requires it — `[0xa5; 32]`
+        // is refused as not text, which the first version of this test met.
+        let other = load(&key_file("hmac2", &[0x41; 32], 0o600)).expect("a usable key");
+
+        assert_eq!(key.hmac(b"ticket-one"), key.hmac(b"ticket-one"));
+        assert_ne!(key.hmac(b"ticket-one"), key.hmac(b"ticket-two"));
+        // A different key gives a different value for the same bearer, which
+        // is what makes a stored hash useless without the file.
+        assert_ne!(key.hmac(b"ticket-one"), other.hmac(b"ticket-one"));
+        assert_eq!(key.hmac(b"ticket-one").len(), 32);
+    }
 }

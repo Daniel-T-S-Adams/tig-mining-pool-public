@@ -188,6 +188,10 @@ fi
 cat > "$probe/src/main.rs" <<'RS'
 fn main() {
     // Positive control: public API of the same crate MUST compile.
+    //
+    // `preflight` returns `Result<(), String>` and not the key. An earlier
+    // version returned the loaded `TicketKey`, which made this control a
+    // demonstration of the very hole the two probes above test for.
     let _ = pool_api::service::preflight;
 }
 RS
@@ -204,6 +208,34 @@ for symbol in 'fn load(' 'fn hmac('; do
         exit 1
     fi
 done
+
+# 7b. And no public function may hand a `TicketKey` back. Keeping `load`
+#     private is only half of it: a `pub fn ... -> TicketKey` anywhere in the
+#     crate is a public way to obtain one, which is what B9 forbids.
+#
+#     Asserted as the TYPE being crate-private, not as a pattern over
+#     signatures. The first version of this check did scan signatures, and it
+#     only matched when `pub fn ... -> TicketKey` fitted on one line — rustfmt
+#     wraps a long one, so the realistic form evaded it while my hand-written
+#     example did not. With the type private, `rustc` refuses every public
+#     signature that mentions it, wrapped or not, and this workspace builds
+#     with `-D warnings`. One grep that cannot be defeated by formatting, and
+#     the compiler does the rest.
+if ! grep -q 'pub(crate) struct TicketKey' "$ticket_key"; then
+    echo "FAIL: pool_api::ticket_key::TicketKey is not crate-private;" >&2
+    echo "a public function could then return it, and the key would leave pool-api" >&2
+    echo "security.md §4.1: the ticket HMAC key stays in the Pool API alone" >&2
+    exit 1
+fi
+
+# `tig-gateway` is checked differently and deliberately so. Its `TigApiKey`
+# is public, but nothing public *returns* one: the public mentions of it are
+# `Driver.key` and the transmitter's parameters, which are inputs — a caller
+# needs a key already, and the probes above show it cannot get one. Making
+# that type crate-private too would mean making `Driver` and those methods
+# crate-private, which is a refactor of the write path rather than a
+# boundary fix. Recorded here so the difference is a decision and not an
+# oversight.
 
 # 8. And the ticket key's own FILE, named outside pool-api. Same reasoning as
 #    the scan above: a crate that opens the file itself never mentions

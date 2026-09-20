@@ -137,6 +137,28 @@ fn sign(
     request_id: &str,
     timestamp: i64,
 ) -> Signed {
+    sign_at(
+        who,
+        method,
+        path,
+        body,
+        request_id,
+        u64::try_from(timestamp).expect("a non-negative test timestamp"),
+    )
+}
+
+/// The same, with the §3.2 timestamp given as the unsigned value it is — so a
+/// test can sign one at the end of the range rather than only put it in the
+/// header, where the signature would refuse it before the freshness check
+/// ever ran.
+fn sign_at(
+    who: &Enrolled,
+    method: &str,
+    path: &str,
+    body: &[u8],
+    request_id: &str,
+    timestamp: u64,
+) -> Signed {
     sign_as(
         &who.key,
         &who.worker_id,
@@ -163,7 +185,7 @@ fn sign_as(
     path: &str,
     body: &[u8],
     request_id: &str,
-    timestamp: i64,
+    timestamp: u64,
 ) -> Signed {
     let body_sha256 = sha256_hex(body);
     let signing_string = request_signing_string(
@@ -173,7 +195,7 @@ fn sign_as(
         worker_id,
         credential_id,
         request_id,
-        u64::try_from(timestamp).unwrap_or(u64::MAX),
+        timestamp,
         &body_sha256,
     );
     let signature = sign_b64url(key, &signing_string);
@@ -373,7 +395,7 @@ async fn a_credential_does_not_authorise_another_worker() {
         PATH,
         b"",
         &request_id(1),
-        NOW,
+        NOW as u64,
     );
     let cross = verify(&v, &borrowed).await.expect_err("cross-worker");
 
@@ -630,6 +652,61 @@ async fn one_worker_cannot_spend_another_workers_request_ids() {
             .await
             .unwrap();
     assert_eq!(rows, 2, "one memory each, not one between them");
+}
+
+#[tokio::test]
+async fn a_timestamp_at_the_ends_of_its_range_is_refused_rather_than_overflowing() {
+    // `X-Request-Timestamp` is the one header a caller can put an arbitrary
+    // integer in. While it was parsed as `i64`, the freshness check subtracted
+    // it from server time and took `abs()` — so `i64::MIN` overflowed, which
+    // is a panic in a debug build and a wrapped value in a release one, and
+    // `abs()` on `i64::MIN` panics outright. A member could have taken the
+    // process down with one header.
+    //
+    // It is unsigned now, and the difference is taken in `i128`, which holds
+    // every value the two types can produce. These are the inputs that used
+    // to reach the arithmetic.
+    let Some((_db, api)) = migrated("verify_timestamp_range").await else {
+        return;
+    };
+    let alice = enrol(&api, ALICE, 0xa1).await;
+    let v = verifier(&api);
+
+    // Values the header can express but the type cannot hold. These are
+    // refused when the header is read, before a signature is even considered,
+    // so a header override is the only way to send one.
+    for (n, header) in [
+        (1_u8, "-9223372036854775808"),
+        (2, "-1"),
+        (3, "18446744073709551616"),
+    ] {
+        let request = sign(&alice, GET, PATH, b"", &request_id(n), NOW)
+            .with(HEADER_REQUEST_TIMESTAMP, header);
+        let denied = verify(&v, &request)
+            .await
+            .err()
+            .unwrap_or_else(|| panic!("{header} must be refused"));
+        assert_eq!(denied.error_code, "NOT_AUTHENTICATED", "{header}");
+    }
+
+    // Values the type does hold, at the ends of its range, and **signed** —
+    // so verification reaches the freshness arithmetic instead of stopping at
+    // the signature. Overriding only the header would leave the signed string
+    // disagreeing with it, and this test would pass with the widening undone.
+    //
+    // 2^63 is the one that matters: cast back down it is `i64::MIN`, and
+    // subtracting that from server time overflows whatever the header was
+    // parsed as. That is why the arithmetic is widened rather than the parse
+    // alone being fixed.
+    for (n, timestamp) in [(4_u8, i64::MAX as u64), (5, 1_u64 << 63), (6, u64::MAX)] {
+        let request = sign_at(&alice, GET, PATH, b"", &request_id(n), timestamp);
+        let denied = verify(&v, &request)
+            .await
+            .err()
+            .unwrap_or_else(|| panic!("{timestamp} must be refused"));
+        // Stale, by a stated rule — not a panic, and not accepted as fresh.
+        assert_eq!(denied.error_code, "STALE_TIMESTAMP", "{timestamp}");
+    }
 }
 
 #[tokio::test]

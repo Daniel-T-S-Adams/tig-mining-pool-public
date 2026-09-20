@@ -54,7 +54,15 @@ struct SignedHeaders {
     worker_id: String,
     credential_id: String,
     request_id: String,
-    request_timestamp: i64,
+    /// §3.2's "Unix time in whole seconds".
+    ///
+    /// Unsigned, and refused rather than coerced when it is not: this is the
+    /// one header a caller can put an arbitrary integer in, and §14 makes a
+    /// value outside the type incompatible input rather than something to
+    /// reshape. Keeping it signed cost an `abs()` on a difference a caller
+    /// could drive to overflow, and a `try_into` that turned a negative
+    /// timestamp into `u64::MAX` — a signed string no member ever signed.
+    request_timestamp: u64,
     body_sha256: String,
     signature: String,
 }
@@ -225,10 +233,9 @@ impl Verifier {
             &headers.worker_id,
             &headers.credential_id,
             &headers.request_id,
-            // §3.2 signs "Unix time in whole seconds". Negative is not a time
-            // a conforming agent sends, and the string has to match byte for
-            // byte, so it is signed exactly as it arrived.
-            headers.request_timestamp.try_into().unwrap_or(u64::MAX),
+            // Exactly as it arrived: the string has to match the member's
+            // byte for byte, so there is no conversion here to be lossy.
+            headers.request_timestamp,
             &headers.body_sha256,
         );
         verify_b64url(&key, &signed, &headers.signature).map_err(|_| echo(not_authenticated()))?;
@@ -259,8 +266,15 @@ impl Verifier {
 
         // §3.2's 300 seconds, either side. After the signature, so a caller
         // who cannot sign learns nothing about the server's clock.
-        let skew = (now.unix_timestamp() - headers.request_timestamp).abs();
-        if skew > i64::from(REQUEST_CLOCK_SKEW_SECONDS) {
+        //
+        // Widened to `i128` for the subtraction. Both operands are values a
+        // caller can drive to the end of their range — `u64::MAX` seconds
+        // against a server clock — and in `i64` that difference overflows,
+        // which is a panic in a debug build and a wrapped value that may land
+        // inside the window in a release one. `i128` holds every difference
+        // these two types can produce, so the comparison is total.
+        let skew = (i128::from(now.unix_timestamp()) - i128::from(headers.request_timestamp)).abs();
+        if skew > i128::from(REQUEST_CLOCK_SKEW_SECONDS) {
             return Err(echo(stale_timestamp()));
         }
 
@@ -404,7 +418,7 @@ fn parse(headers: &HeaderMap) -> Result<SignedHeaders, ApiError> {
     let credential_id = uuid(&text(HEADER_CREDENTIAL_ID)?)?;
     let request_id = uuid(&text(HEADER_REQUEST_ID)?)?;
     let request_timestamp = text(HEADER_REQUEST_TIMESTAMP)?
-        .parse::<i64>()
+        .parse::<u64>()
         .map_err(|_| not_authenticated())?;
     let body_sha256 = text(HEADER_BODY_SHA256)?;
     let signature = text(HEADER_SIGNATURE)?;
@@ -529,16 +543,36 @@ mod tests {
     }
 
     #[test]
-    fn a_timestamp_must_be_whole_seconds() {
-        for bad in ["", "1774000000.5", "now", "1_774_000_000", " 1774000000"] {
+    fn a_timestamp_must_be_whole_unsigned_seconds() {
+        for bad in [
+            "",
+            "1774000000.5",
+            "now",
+            "1_774_000_000",
+            " 1774000000",
+            // Not a time §3.2 defines, and the value that made the freshness
+            // subtraction overflow while this was an `i64`.
+            "-5",
+            "-9223372036854775808",
+            // One past `u64::MAX`.
+            "18446744073709551616",
+        ] {
             let headers = headers_with(&[(HEADER_REQUEST_TIMESTAMP, bad)]);
             assert!(
                 parse(&headers).is_err(),
                 "timestamp {bad:?} must be refused"
             );
         }
-        let headers = headers_with(&[(HEADER_REQUEST_TIMESTAMP, "-5")]);
-        assert_eq!(parse(&headers).unwrap().request_timestamp, -5);
+
+        // The ends of what the type does allow, so the rejections above are a
+        // rule rather than a check that refuses everything.
+        for good in ["0", "1774000000", "18446744073709551615"] {
+            let headers = headers_with(&[(HEADER_REQUEST_TIMESTAMP, good)]);
+            assert_eq!(
+                parse(&headers).unwrap().request_timestamp,
+                good.parse::<u64>().unwrap()
+            );
+        }
     }
 
     #[test]

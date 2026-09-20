@@ -1,0 +1,43 @@
+# Local development configuration for `pool-api`, the member-facing service.
+#
+# Non-secret by construction (docs/architecture.md §9): this file names the
+# path of a password file, never a password. `scripts/dev-db.sh` generates the
+# referenced file into the untracked `secrets/` directory.
+#
+# Usage:
+#   ./scripts/dev-db.sh
+#   cargo run -p pool-admin -- --config config/pool-admin.dev.toml migrate
+#   cargo run -p pool-api -- --config config/pool-api.dev.toml run
+
+network = "testnet"
+
+[database]
+host = "127.0.0.1"
+port = 5433
+name = "pool_dev"
+# The member service's own least-privilege role. Migrations 0018–0022 grant it
+# what the member surface writes and nothing else; `architecture.md` §6 keeps
+# creating a write intent and advancing a workflow away from it entirely.
+user = "pool_api"
+password_file = "secrets/db-api-password"
+statement_timeout_ms = 30000
+
+[telemetry]
+format = "json"
+level = "info"
+deployment = "local-dev"
+
+# There is deliberately no [tig] section. `architecture.md` §2.2 puts the TIG
+# API key in `tig-gateway` alone, and §3 gives this process no reason to reach
+# TIG at all; `validate_for` refuses a `pool-api` config that carries one.
+
+[member_api]
+# `architecture.md` §11.2 puts a TLS proxy in front of this process, so this is
+# the private address that proxy reaches — loopback in development, where there
+# is no proxy and no member but the local agent. An address literal rather than
+# a hostname: a DNS answer can change between restarts.
+listen = "127.0.0.1:8081"
+# The largest control-message body this deployment reads, which is
+# `member_protocol.md` §10.3's manifest ceiling. Chunk bodies are bounded
+# separately, by the upload session's own chunk size.
+max_control_body_bytes = 262144

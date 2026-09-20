@@ -204,14 +204,10 @@ async fn enrol_worker(
     // than in a separate ledger, so there is one thing to keep consistent
     // instead of two.
     let body_sha256 = canonical_body_sha256(request);
-    if let Some(existing) = recorded_enrollment(state, &enrollment_request_id).await? {
-        if existing.body_sha256 != body_sha256 {
-            return Err(idempotency_conflict());
-        }
-        return Ok((
-            StatusCode::OK,
-            existing.into_response(&enrollment_request_id, server_time),
-        ));
+    if let Some(existing) =
+        recorded_enrollment(&state.db, &state.network, &enrollment_request_id).await?
+    {
+        return replay(existing, &body_sha256, &enrollment_request_id, server_time);
     }
 
     let mut tx = state.db.begin().await.map_err(|e| {
@@ -252,8 +248,23 @@ async fn enrol_worker(
     })?;
 
     let Some(member_id) = member_id else {
-        // Unknown, already consumed, expired, or the wrong purpose. One
-        // answer for all four (§4.1).
+        // Before concluding the ticket is not redeemable: it may have been
+        // redeemed by *this very request*, arriving twice at once.
+        //
+        // The idempotency read above happens before the transaction, so two
+        // byte-identical retries can both miss it. One wins; the other blocks
+        // on the `FOR UPDATE` above, and by the time it reads, the ticket is
+        // consumed — which is indistinguishable from an expired or stolen one
+        // unless it looks again. §5 promises "repeating the same key and body
+        // returns the recorded result", not a `401` that depends on timing.
+        if let Some(existing) =
+            recorded_enrollment(&mut *tx, &state.network, &enrollment_request_id).await?
+        {
+            return replay(existing, &body_sha256, &enrollment_request_id, server_time);
+        }
+
+        // Unknown, already consumed by something else, expired, or the wrong
+        // purpose. One answer for all four (§4.1).
         tracing::info!(event = "enroll.rejected", reason = "TICKET_NOT_REDEEMABLE");
         return Err(not_authenticated());
     };
@@ -355,6 +366,23 @@ async fn enrol_worker(
     ))
 }
 
+/// §5: the same key and body returns the recorded result; the same key with
+/// a different body is a conflict.
+fn replay(
+    existing: Recorded,
+    body_sha256: &[u8],
+    enrollment_request_id: &str,
+    server_time: &ServerTime,
+) -> Result<(StatusCode, EnrollResponse), ApiError> {
+    if existing.body_sha256 != body_sha256 {
+        return Err(idempotency_conflict());
+    }
+    Ok((
+        StatusCode::OK,
+        existing.into_response(enrollment_request_id, server_time),
+    ))
+}
+
 /// What a previous enrollment under this `enrollment_request_id` produced.
 struct Recorded {
     body_sha256: Vec<u8>,
@@ -385,10 +413,14 @@ impl Recorded {
     }
 }
 
-async fn recorded_enrollment(
-    state: &AccountState,
+async fn recorded_enrollment<'e, E>(
+    executor: E,
+    network: &str,
     enrollment_request_id: &str,
-) -> Result<Option<Recorded>, ApiError> {
+) -> Result<Option<Recorded>, ApiError>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
     // The credential is the one enrollment created, which is the *first* for
     // this worker — §3.3's rotation adds later ones, and a retry of the
     // enrollment must not report a credential the member rotated to since.
@@ -404,9 +436,9 @@ async fn recorded_enrollment(
            FROM pool.worker w
           WHERE w.network = $1 AND w.enrollment_request_id = $2::uuid",
     )
-    .bind(&state.network)
+    .bind(network)
     .bind(enrollment_request_id)
-    .fetch_optional(&state.db)
+    .fetch_optional(executor)
     .await
     .map_err(|e| {
         tracing::error!(event = "enroll.idempotency_read_failed", error = %e);
@@ -829,6 +861,64 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(workers, 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn two_identical_retries_arriving_together_both_get_the_recorded_result() {
+        // §5: "repeating the same key and body returns the recorded result."
+        // Not "unless it arrives twice at once".
+        //
+        // The idempotency read happens before the transaction, so both
+        // requests can miss it. One wins; the other blocks on the ticket's
+        // `FOR UPDATE` and then finds it consumed — which looks exactly like
+        // an expired or stolen ticket unless it looks again. Before the fix
+        // this test failed with the loser getting `401 NOT_AUTHENTICATED`,
+        // and which request lost was a matter of timing.
+        let Some((_db, state)) = migrated("enroll_retry_race").await else {
+            return;
+        };
+        let ticket = issue_one_ticket(&state, ALICE_KEY, NONCE).await;
+        let now = server_time();
+
+        // The *same* request twice — same id, same ticket, same key, so the
+        // same canonical body.
+        let mut handles = Vec::new();
+        for _ in 0..2 {
+            let state = state.clone();
+            let now = now.clone();
+            let request = enrol_request(&ticket.ticket, &agent_key(0xa1), REQUEST_ID);
+            handles.push(tokio::spawn(async move {
+                enrol_worker(&state, &request, &now).await
+            }));
+        }
+
+        let mut responses = Vec::new();
+        for handle in handles {
+            responses.push(handle.await.expect("the task did not panic"));
+        }
+
+        let workers: Vec<String> = responses
+            .iter()
+            .map(|r| match r {
+                Ok((_, response)) => response.worker_id.clone(),
+                Err(e) => panic!("an identical retry must not be refused: {e:?}"),
+            })
+            .collect();
+        assert_eq!(workers[0], workers[1], "both name the same worker");
+
+        // One created it and one replayed it, in whichever order they ran.
+        let mut statuses: Vec<StatusCode> = responses
+            .iter()
+            .filter_map(|r| r.as_ref().ok().map(|(status, _)| *status))
+            .collect();
+        statuses.sort_by_key(axum::http::StatusCode::as_u16);
+        assert_eq!(statuses, vec![StatusCode::OK, StatusCode::CREATED]);
+
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM pool.worker")
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+        assert_eq!(count, 1, "one request, one worker, however many arrived");
     }
 
     #[tokio::test]

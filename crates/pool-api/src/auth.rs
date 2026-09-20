@@ -181,29 +181,25 @@ impl Verifier {
             return Err(echo(not_authenticated()));
         }
 
-        // The one read that must precede verification, because verification
-        // needs the key. Constrained by worker *and* credential, so a
-        // credential presented for another worker finds nothing — §3.2's "the
-        // credential authorizes only its exact `worker_id`" enforced by the
-        // query rather than by a comparison afterwards.
+        // **One column, and it is the key.** `security.md` §4.1 puts
+        // verification before "database work", and verification cannot happen
+        // without the public key — the key is what a signature is checked
+        // against, and it is a database fact (§4.1: "worker public keys are
+        // ordinary database facts"). So one read is unavoidable, and the rule
+        // is honoured by making it the *only* one: nothing about the worker,
+        // the account, or any state is read until the caller has proved
+        // possession of the key. That second read is below the verification.
         //
-        // The grace comparison is made here rather than in Rust so that "has
-        // this credential's grace ended" is answered by the same clock, in
-        // the same statement, as the row it is about (§3.3's ten-minute
-        // window). The states come back as text so the log can say which of
-        // them refused the request; the caller is told none of it.
-        let row = sqlx::query(
-            "SELECT c.public_key,
-                    c.state        AS credential_state,
-                    (c.not_after IS NOT NULL AND c.not_after <= now()) AS grace_ended,
-                    w.state        AS worker_state,
-                    w.member_id::text AS member_id
-               FROM pool.worker_credential c
-               JOIN pool.worker w
-                 ON w.network = c.network AND w.worker_id = c.worker_id
-              WHERE c.network = $1
-                AND c.credential_id = $2::uuid
-                AND c.worker_id = $3::uuid",
+        // Scoped by worker as well as credential, so a credential presented
+        // for another worker finds nothing — §3.2's "the credential
+        // authorizes only its exact `worker_id`" enforced by the query rather
+        // than by a comparison afterwards.
+        let key_row = sqlx::query(
+            "SELECT public_key
+               FROM pool.worker_credential
+              WHERE network = $1
+                AND credential_id = $2::uuid
+                AND worker_id = $3::uuid",
         )
         .bind(&self.network)
         .bind(&headers.credential_id)
@@ -211,12 +207,12 @@ impl Verifier {
         .fetch_optional(&self.db)
         .await
         .map_err(|e| {
-            tracing::error!(event = "auth.lookup_failed", error = %e);
+            tracing::error!(event = "auth.key_lookup_failed", error = %e);
             echo(unavailable())
         })?
         .ok_or_else(|| echo(not_authenticated()))?;
 
-        let public_key: Vec<u8> = row
+        let public_key: Vec<u8> = key_row
             .try_get("public_key")
             .map_err(|_| echo(not_authenticated()))?;
         let key_bytes: [u8; 32] = public_key
@@ -240,9 +236,40 @@ impl Verifier {
         );
         verify_b64url(&key, &signed, &headers.signature).map_err(|_| echo(not_authenticated()))?;
 
-        // Only now is anything about this worker worth reporting, and still
-        // only to the log. §3.3: credential and worker state "take effect on
-        // the next request", so both are read on every one rather than cached.
+        // Everything else, now that the caller has proved possession of the
+        // key. This is the read `security.md` §4.1 means by "database work",
+        // and it happens after verification rather than before it.
+        //
+        // §3.3: credential and worker state "take effect on the next
+        // request", so both are read on every one rather than cached. The
+        // grace comparison is made in SQL so that "has this credential's
+        // grace ended" is answered by the same clock, in the same statement,
+        // as the row it is about (§3.3's ten-minute window). The states come
+        // back as text so the log can say which of them refused the request;
+        // the caller is told none of it.
+        let row = sqlx::query(
+            "SELECT c.state        AS credential_state,
+                    (c.not_after IS NOT NULL AND c.not_after <= now()) AS grace_ended,
+                    w.state        AS worker_state,
+                    w.member_id::text AS member_id
+               FROM pool.worker_credential c
+               JOIN pool.worker w
+                 ON w.network = c.network AND w.worker_id = c.worker_id
+              WHERE c.network = $1
+                AND c.credential_id = $2::uuid
+                AND c.worker_id = $3::uuid",
+        )
+        .bind(&self.network)
+        .bind(&headers.credential_id)
+        .bind(&headers.worker_id)
+        .fetch_optional(&self.db)
+        .await
+        .map_err(|e| {
+            tracing::error!(event = "auth.binding_lookup_failed", error = %e);
+            echo(unavailable())
+        })?
+        .ok_or_else(|| echo(not_authenticated()))?;
+
         let credential_state: String = row
             .try_get("credential_state")
             .map_err(|_| echo(not_authenticated()))?;

@@ -20,7 +20,7 @@ use pool_api::auth::{
 use pool_api::protocol::PROTOCOL_VERSION;
 use pool_identity::keys::{request_signing_string, sha256_hex, sign_b64url};
 use pool_test_support::{MIGRATOR, TempDb};
-use sqlx::PgPool;
+use sqlx::{Connection, PgPool};
 
 const NETWORK: &str = "testnet";
 const DEPLOYMENT: &str = "test";
@@ -298,6 +298,53 @@ async fn a_body_that_does_not_match_its_digest_is_refused_before_any_database_wo
         .expect_err("a mismatched body is refused");
     assert_eq!(denied.error_code, "NOT_AUTHENTICATED");
     assert_eq!(denied.status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn nothing_about_the_worker_is_read_until_the_signature_verifies() {
+    // `security.md` §4.1 puts verification before "database work". One read
+    // is unavoidable — a signature is checked against a public key, and §4.1
+    // itself calls worker public keys "ordinary database facts" — so the rule
+    // is kept by making that the *only* read before verification: the worker,
+    // the account binding and every state are read afterwards.
+    //
+    // Observable by taking the second read away. With `SELECT` on
+    // `pool.worker` revoked, a request the pool cannot authenticate must
+    // still answer `NOT_AUTHENTICATED` — it never got that far — while one it
+    // can authenticate reaches the missing privilege and reports the pool's
+    // own failure. A single joined query would answer the second way to both.
+    let Some((db, api)) = migrated("verify_read_order").await else {
+        return;
+    };
+    let alice = enrol(&api, ALICE, 0xa1).await;
+    let v = verifier(&api);
+
+    let mut owner = sqlx::PgConnection::connect_with(&db.as_role("pool_migration"))
+        .await
+        .unwrap();
+    pool_test_support::exec(
+        &mut owner,
+        "REVOKE SELECT ON pool.worker FROM pool_api".to_owned(),
+    )
+    .await
+    .expect("the migration role owns the grant");
+
+    let forged =
+        sign(&alice, GET, PATH, b"", &request_id(1), NOW).with(HEADER_SIGNATURE, &"A".repeat(86));
+    let denied = verify(&v, &forged).await.expect_err("a bad signature");
+    assert_eq!(
+        denied.error_code, "NOT_AUTHENTICATED",
+        "an unverifiable request must not reach the worker table"
+    );
+
+    let genuine = sign(&alice, GET, PATH, b"", &request_id(2), NOW);
+    let blocked = verify(&v, &genuine)
+        .await
+        .expect_err("the binding read cannot run");
+    assert_eq!(
+        blocked.error_code, "TEMPORARILY_UNAVAILABLE",
+        "a verified request does reach it"
+    );
 }
 
 #[tokio::test]

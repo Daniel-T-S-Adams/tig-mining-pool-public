@@ -28,14 +28,14 @@ async fn replay_rejected(conn: &mut PgConnection) -> Result<String, sqlx::Error>
     sqlx::query_scalar(
         "INSERT INTO pool.audit_event
              (deployment, network, actor_type, actor_id, action, outcome,
-              resource_type, resource_id, request_id, reason, evidence, trace_id)
+              resource_type, resource_id, request_id, reason, evidence)
          VALUES ('local-dev', 'testnet', 'WORKER',
                  '11111111-1111-4111-8111-111111111111',
                  'REQUEST_REPLAY_REJECTED', 'REJECTED',
                  'WORKER_CREDENTIAL', '22222222-2222-4222-8222-222222222222',
                  '33333333-3333-4333-8333-333333333333',
                  'REQUEST_ID_REUSED_WITH_DIFFERENT_BYTES',
-                 $1::jsonb, 'trace-abc')
+                 $1::jsonb)
          RETURNING audit_event_id::text",
     )
     .bind(r#"{"recorded_sha256":"aa00","presented_sha256":"bb11"}"#)
@@ -84,17 +84,28 @@ async fn an_event_cannot_be_edited_or_removed_by_anyone() {
         "UPDATE pool.audit_event SET outcome = 'ALLOWED'",
         "UPDATE pool.audit_event SET evidence = '{}'::jsonb",
         "DELETE FROM pool.audit_event",
+        // TRUNCATE fires no row triggers, so `0024`'s `FOR EACH ROW` guard
+        // did not see it and the owner could empty an append-only table in
+        // one statement. `0025` adds the statement-level trigger that does.
+        // Written without the `WHERE` the others take, hence the marker.
+        "TRUNCATE pool.audit_event -- no-where",
     ] {
         // One transaction per case: a failed statement aborts its
         // transaction, so a shared one would report failure for every case
         // after the first regardless of what the rule does.
         let mut tx = owner.begin().await.unwrap();
-        let changed = sqlx::query(AssertSqlSafe(format!(
-            "{statement} WHERE audit_event_id = $1::uuid"
-        )))
-        .bind(&id)
-        .execute(&mut *tx)
-        .await;
+        let changed = if let Some(bare) = statement.strip_suffix(" -- no-where") {
+            sqlx::query(AssertSqlSafe(bare.to_owned()))
+                .execute(&mut *tx)
+                .await
+        } else {
+            sqlx::query(AssertSqlSafe(format!(
+                "{statement} WHERE audit_event_id = $1::uuid"
+            )))
+            .bind(&id)
+            .execute(&mut *tx)
+            .await
+        };
         assert!(changed.is_err(), "{statement} must be refused");
         tx.rollback().await.unwrap();
     }

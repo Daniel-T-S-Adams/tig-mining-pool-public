@@ -209,18 +209,55 @@ impl Verifier {
         .map_err(|e| {
             tracing::error!(event = "auth.key_lookup_failed", error = %e);
             echo(unavailable())
-        })?
-        .ok_or_else(|| echo(not_authenticated()))?;
+        })?;
 
-        let public_key: Vec<u8> = key_row
-            .try_get("public_key")
-            .map_err(|_| echo(not_authenticated()))?;
-        let key_bytes: [u8; 32] = public_key
-            .as_slice()
-            .try_into()
-            .map_err(|_| echo(not_authenticated()))?;
-        let key = ed25519_dalek::VerifyingKey::from_bytes(&key_bytes)
-            .map_err(|_| echo(not_authenticated()))?;
+        let key = match key_row {
+            Some(row) => {
+                let public_key: Vec<u8> = row.try_get("public_key").map_err(|e| {
+                    // A column this build asked for by name and could not
+                    // decode is a schema the binary was not built against —
+                    // the pool's problem, not a caller's, and silently
+                    // answering "not authenticated" would hide a deployment
+                    // fault behind a refusal the operator never sees.
+                    tracing::error!(event = "auth.key_decode_failed", error = %e);
+                    echo(unavailable())
+                })?;
+                let key_bytes: [u8; 32] = public_key.as_slice().try_into().map_err(|_| {
+                    tracing::error!(
+                        event = "auth.key_wrong_length",
+                        bytes = public_key.len(),
+                        "a stored credential key is not 32 bytes"
+                    );
+                    echo(unavailable())
+                })?;
+                ed25519_dalek::VerifyingKey::from_bytes(&key_bytes).map_err(|e| {
+                    tracing::error!(event = "auth.key_not_ed25519", error = %e);
+                    echo(unavailable())
+                })?
+            }
+            None => {
+                // No such credential, or one belonging to another worker.
+                // §4.1 makes these the same answer as a bad signature, so the
+                // request is verified against a stand-in key and refused when
+                // that fails — which it always does.
+                //
+                // Returning here instead would make the two cases take
+                // visibly different work: an unknown credential answered
+                // before any Ed25519 operation, a known one only after. That
+                // is the existence disclosure §4.1 forbids, rebuilt out of
+                // timing. This removes the short-circuit; it does not claim
+                // to equalise the whole path, which the lookup itself does
+                // not allow.
+                tracing::info!(
+                    event = "auth.rejected",
+                    reason = "NO_SUCH_CREDENTIAL_FOR_THIS_WORKER",
+                    credential_id = %headers.credential_id,
+                    worker_id = %headers.worker_id,
+                    "a credential that does not exist, or not for this worker"
+                );
+                absent_credential_stand_in()
+            }
+        };
 
         let signed = request_signing_string(
             method,
@@ -270,15 +307,13 @@ impl Verifier {
         })?
         .ok_or_else(|| echo(not_authenticated()))?;
 
-        let credential_state: String = row
-            .try_get("credential_state")
-            .map_err(|_| echo(not_authenticated()))?;
-        let worker_state: String = row
-            .try_get("worker_state")
-            .map_err(|_| echo(not_authenticated()))?;
-        let grace_ended: bool = row
-            .try_get("grace_ended")
-            .map_err(|_| echo(not_authenticated()))?;
+        let decoded = |e: sqlx::Error| {
+            tracing::error!(event = "auth.binding_decode_failed", error = %e);
+            echo(unavailable())
+        };
+        let credential_state: String = row.try_get("credential_state").map_err(decoded)?;
+        let worker_state: String = row.try_get("worker_state").map_err(decoded)?;
+        let grace_ended: bool = row.try_get("grace_ended").map_err(decoded)?;
         if credential_state != "ACTIVE" || worker_state != "ACTIVE" || grace_ended {
             tracing::info!(
                 event = "auth.rejected",
@@ -305,9 +340,7 @@ impl Verifier {
             return Err(echo(stale_timestamp()));
         }
 
-        let member_id: String = row
-            .try_get("member_id")
-            .map_err(|_| echo(not_authenticated()))?;
+        let member_id: String = row.try_get("member_id").map_err(decoded)?;
 
         self.record_attempt(&headers, &signed, &member_id).await?;
 
@@ -377,24 +410,38 @@ impl Verifier {
             return Ok(());
         }
 
-        self.audit_reuse(headers, member_id, &recorded, &signed_sha256)
-            .await;
+        // §3.2 says a reuse is "rejected **and** audited", and the two are one
+        // answer rather than an answer and a best effort. If the row cannot be
+        // written the pool has not done what it says it does, so it asks to be
+        // asked again rather than issuing a permanent refusal it could not
+        // record. The retry re-conflicts, re-compares, and tries the row
+        // again; nothing about the caller's position changes meanwhile.
+        if !self
+            .audit_reuse(headers, member_id, &recorded, &signed_sha256)
+            .await
+        {
+            return Err(unavailable().echoing(&headers.request_id));
+        }
         Err(request_id_reused().echoing(&headers.request_id))
     }
 
-    /// §3.2's "rejected **and** audited".
+    /// §3.2's "rejected **and** audited". `true` when the row was written.
     ///
-    /// The audit row is the durable half; the rejection alone leaves nothing
-    /// an operator can look at later. A failure to write it is logged and
-    /// does not turn the rejection into an acceptance — refusing the request
-    /// is the part that protects the pool.
+    /// The row is the durable half: the rejection alone leaves nothing an
+    /// operator can look at later, and `security.md` §9 lists "authentication
+    /// replay" among the events that must leave one. The caller decides what
+    /// to answer when it could not be written.
+    ///
+    /// `audit_event_id` is logged as the row is inserted, which is what puts
+    /// the row and the logs around it back together — `0025` dropped the
+    /// `trace_id` column because nothing here produces a trace id to fill it.
     async fn audit_reuse(
         &self,
         headers: &SignedHeaders,
         member_id: &str,
         recorded: &str,
         presented: &str,
-    ) {
+    ) -> bool {
         let evidence = serde_json::json!({
             "recorded_signed_sha256": recorded,
             "presented_signed_sha256": presented,
@@ -402,13 +449,14 @@ impl Verifier {
             "member_id": member_id,
         });
 
-        let written = sqlx::query(
+        let written = sqlx::query_scalar::<_, String>(
             "INSERT INTO pool.audit_event
                  (deployment, network, actor_type, actor_id, action, outcome,
                   resource_type, resource_id, request_id, reason, evidence)
              VALUES ($1, $2, 'WORKER', $3, 'REQUEST_REPLAY_REJECTED', 'REJECTED',
                      'WORKER_CREDENTIAL', $4, $5::uuid,
-                     'REQUEST_ID_REUSED_WITH_DIFFERENT_BYTES', $6::jsonb)",
+                     'REQUEST_ID_REUSED_WITH_DIFFERENT_BYTES', $6::jsonb)
+             RETURNING audit_event_id::text",
         )
         .bind(&self.deployment)
         .bind(&self.network)
@@ -416,17 +464,51 @@ impl Verifier {
         .bind(&headers.credential_id)
         .bind(&headers.request_id)
         .bind(evidence.to_string())
-        .execute(&self.db)
+        .fetch_one(&self.db)
         .await;
 
-        if let Err(e) = written {
-            tracing::error!(
-                event = "auth.audit_write_failed",
-                error = %e,
-                "a replay was rejected without a durable audit row"
-            );
+        match written {
+            Ok(audit_event_id) => {
+                tracing::info!(
+                    event = "auth.replay_rejected",
+                    audit_event_id = %audit_event_id,
+                    credential_id = %headers.credential_id,
+                    request_id = %headers.request_id,
+                    "a request id was reused over different signed bytes"
+                );
+                true
+            }
+            Err(e) => {
+                tracing::error!(
+                    event = "auth.audit_write_failed",
+                    error = %e,
+                    credential_id = %headers.credential_id,
+                    request_id = %headers.request_id,
+                    "a replay could not be recorded, so it is not being refused permanently"
+                );
+                false
+            }
         }
     }
+}
+
+/// A valid Ed25519 public key that verifies nothing anyone can produce.
+///
+/// Used when the credential lookup finds nothing, so that an unknown
+/// credential and a known one with a bad signature are both refused *after* a
+/// verification attempt rather than one before and one after. The bytes are a
+/// fixed generator multiple with no known scalar; no signature checked
+/// against it can succeed, and none is meant to.
+fn absent_credential_stand_in() -> ed25519_dalek::VerifyingKey {
+    // The Ed25519 basepoint's compressed encoding: a valid curve point, and
+    // the discrete log nobody has.
+    const BASEPOINT: [u8; 32] = [
+        0x58, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66,
+        0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66,
+        0x66, 0x66,
+    ];
+    ed25519_dalek::VerifyingKey::from_bytes(&BASEPOINT)
+        .unwrap_or_else(|_| unreachable!("the Ed25519 basepoint is a valid public key"))
 }
 
 /// Read the seven headers. Anything missing or misshapen is the same answer
@@ -600,6 +682,28 @@ mod tests {
                 good.parse::<u64>().unwrap()
             );
         }
+    }
+
+    #[test]
+    fn the_stand_in_key_exists_and_verifies_nothing() {
+        // The `None` branch hands this to `verify_b64url` so that an unknown
+        // credential and a bad signature both cost a verification. It has to
+        // be a valid key — `from_bytes` rejects a non-point, and the branch
+        // would panic — and it has to verify nothing, or an attacker naming a
+        // credential that does not exist could authenticate as it.
+        let key = absent_credential_stand_in();
+
+        let real = ed25519_dalek::SigningKey::from_bytes(&[0x11; 32]);
+        let message = "TIG-POOL-REQUEST-V1\nGET\n/member/v0/protocol";
+        let signature = pool_identity::keys::sign_b64url(&real, message);
+        assert!(
+            verify_b64url(&key, message, &signature).is_err(),
+            "a real signature must not verify against the stand-in"
+        );
+        // And a signature it produced for itself cannot exist: nobody holds
+        // the scalar. The closest a test can get is that the key is not the
+        // one that signed.
+        assert_ne!(key.as_bytes(), real.verifying_key().as_bytes());
     }
 
     #[test]

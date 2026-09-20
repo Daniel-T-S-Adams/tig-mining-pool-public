@@ -8,7 +8,8 @@
 use std::path::{Path, PathBuf};
 
 use pool_config::{
-    Binary, Config, ConfigError, LARGEST_CONFORMING_CONTROL_BODY_BYTES, LARGEST_PROTOCOL_BODY_BYTES,
+    AUDIT_DEPLOYMENT_MAX_BYTES, Binary, Config, ConfigError, LARGEST_CONFORMING_CONTROL_BODY_BYTES,
+    LARGEST_PROTOCOL_BODY_BYTES,
 };
 
 /// A scratch directory with a populated password file, so cases that are
@@ -526,6 +527,31 @@ fn zero_port_is_rejected() {
     let path = scratch.write(&toml);
     let err = Config::load(&path, Binary::PoolAdminMigrate).expect_err("zero port");
     assert_invalid(err, "database.port");
+}
+
+#[test]
+fn a_deployment_too_long_for_an_audit_row_is_rejected() {
+    // Every `pool.audit_event` row carries this name, and that column is 64
+    // characters. A longer one loads cleanly and then fails every audit
+    // INSERT, which turns `member_protocol.md` §3.2's "rejected and audited"
+    // into rejected-and-logged without anything saying so.
+    let scratch = Scratch::new("deployment-length");
+    let load = |deployment: &str| {
+        let toml = valid_toml(&scratch.password_file()).replace(
+            "deployment = \"test\"",
+            &format!("deployment = \"{deployment}\""),
+        );
+        Config::load(scratch.write(&toml), Binary::PoolAdminMigrate)
+    };
+
+    let Err(err) = load(&"n".repeat(AUDIT_DEPLOYMENT_MAX_BYTES + 1)) else {
+        panic!("a deployment longer than an audit row must not load");
+    };
+    assert_invalid(err, "telemetry.deployment must be 1 to 64 bytes");
+
+    // The boundary itself loads, so the rejection is a bound rather than a
+    // check that refuses every long name.
+    load(&"n".repeat(AUDIT_DEPLOYMENT_MAX_BYTES)).expect("64 bytes is the limit, not past it");
 }
 
 #[test]

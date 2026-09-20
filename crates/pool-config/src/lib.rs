@@ -305,6 +305,13 @@ pub struct GatewayConfig {
     pub served_compute: Vec<String>,
 }
 
+/// The longest deployment name an audit row can hold.
+///
+/// `migrations/0024` bounds `pool.audit_event.deployment` at 64 characters and
+/// every audit row carries this deployment's name, so a longer one would fail
+/// every audit INSERT rather than the startup that chose it.
+pub const AUDIT_DEPLOYMENT_MAX_BYTES: usize = 64;
+
 /// The largest control-message body a conforming member agent can send,
 /// compactly encoded.
 ///
@@ -640,8 +647,20 @@ impl Config {
             }
         }
 
-        if self.telemetry.deployment.trim().is_empty() {
-            return Err(invalid("telemetry.deployment must not be empty".into()));
+        // Bounded above as well as below, because this value is copied into
+        // every `pool.audit_event` row and that column is 64 characters
+        // (`migrations/0024`). A longer name would load cleanly and then fail
+        // every audit INSERT, quietly turning `member_protocol.md` §3.2's
+        // "rejected and audited" into rejected-and-logged — a startup failure
+        // is the honest place for that to surface.
+        if self.telemetry.deployment.trim().is_empty()
+            || self.telemetry.deployment.len() > AUDIT_DEPLOYMENT_MAX_BYTES
+        {
+            return Err(invalid(format!(
+                "telemetry.deployment must be 1 to {AUDIT_DEPLOYMENT_MAX_BYTES} bytes, \
+                 found {}",
+                self.telemetry.deployment.len()
+            )));
         }
         if self.telemetry.level.trim().is_empty() {
             return Err(invalid("telemetry.level must not be empty".into()));

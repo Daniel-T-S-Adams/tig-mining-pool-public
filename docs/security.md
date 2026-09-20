@@ -245,7 +245,12 @@ enforcement rules.
 - Worker public keys are ordinary database facts. A worker private key is
   generated and retained only on the member machine.
 - Signature verification and exact body-hash verification occur before JSON
-  decoding, database work, or upload quota reservation.
+  decoding, database work, or upload quota reservation. The one exception is
+  structural: a signature is verified against the credential's public key, and
+  that key is one of the ordinary database facts above, so the Pool API reads
+  it — and nothing else — before verifying. The worker binding, the account,
+  and every state are read only after the caller has proved possession of the
+  key.
 - Revocation is checked on every authenticated request and is not hidden behind
   a long-lived authorization cache.
 - Authentication failures do not reveal whether a worker, credential, or

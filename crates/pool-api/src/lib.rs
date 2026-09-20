@@ -15,3 +15,4 @@ pub mod auth;
 pub mod error;
 pub mod protocol;
 pub mod service;
+pub mod ticket_key;

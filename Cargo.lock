@@ -1596,6 +1596,7 @@ dependencies = [
  "base64",
  "clap",
  "ed25519-dalek",
+ "hmac 0.12.1",
  "http-body-util",
  "jsonschema",
  "pool-config",

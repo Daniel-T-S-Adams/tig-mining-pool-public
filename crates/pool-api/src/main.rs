@@ -56,7 +56,24 @@ fn main() -> ExitCode {
     };
 
     if matches!(cli.command, Command::Check) {
-        tracing::info!(event = "api.config.ok", "configuration loads");
+        // The same question `run` asks, without binding a port: would this
+        // deployment start? A configuration that loads but names an
+        // unreadable ticket key is not a deployment that starts.
+        let Some(api) = config.member_api.as_ref() else {
+            tracing::error!(
+                event = "api.config.failed",
+                "pool-api requires [member_api]"
+            );
+            return ExitCode::FAILURE;
+        };
+        if let Err(e) = pool_api::service::preflight(api) {
+            tracing::error!(event = "api.preflight.failed", error = %e);
+            return ExitCode::FAILURE;
+        }
+        tracing::info!(
+            event = "api.config.ok",
+            "configuration loads and preflight passes"
+        );
         return ExitCode::SUCCESS;
     }
 

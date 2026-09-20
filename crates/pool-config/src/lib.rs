@@ -360,6 +360,15 @@ pub struct MemberApiConfig {
     /// front of it, so this is the private address that proxy reaches, and
     /// TLS termination is not this process's job.
     pub listen: String,
+    /// Where the ticket HMAC key is read from.
+    ///
+    /// The path, never the key (`architecture.md` §9). `security.md` §4.1
+    /// stores enrollment and recovery tickets "only as HMAC-SHA-256 values
+    /// using a dedicated server key", and slice-2 criterion B9 keeps that key
+    /// "in the Pool API alone, so no other process holds it" — the same shape
+    /// as the gateway's `api_key_file`, for the same reason: naming the file
+    /// is what lets an operator check who can read it.
+    pub ticket_hmac_key_file: PathBuf,
     /// The largest control-message body this service will read.
     ///
     /// Required, not defaulted. `security.md` §4.3 has the edge enforce body
@@ -972,10 +981,10 @@ impl Config {
         match (binary, &self.member_api) {
             (Binary::PoolApi, None) => {
                 return Err(invalid(
-                    "pool-api requires [member_api] with listen and \
-                     max_control_body_bytes; neither has a default because \
-                     each is a fact about this deployment that a fallback \
-                     would answer on its behalf"
+                    "pool-api requires [member_api] with listen, \
+                     ticket_hmac_key_file and max_control_body_bytes; none \
+                     has a default because each is a fact about this \
+                     deployment that a fallback would answer on its behalf"
                         .into(),
                 ));
             }
@@ -988,6 +997,14 @@ impl Config {
                         "member_api.listen must be `address:port`, found {:?}",
                         api.listen
                     )));
+                }
+                if api.ticket_hmac_key_file.as_os_str().is_empty() {
+                    return Err(invalid(
+                        "member_api.ticket_hmac_key_file must name the file \
+                         holding the dedicated ticket key (security.md §4.1); \
+                         the key itself never appears in configuration"
+                            .into(),
+                    ));
                 }
                 // Both bounds are derived rather than picked. Below the
                 // floor, a conforming request is answered `413`; above the

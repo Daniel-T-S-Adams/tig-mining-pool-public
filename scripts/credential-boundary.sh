@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
-# Slice-1 criterion H2: prove the TIG API key-loading path is unreachable
-# from any crate other than `tig-gateway`.
+# Slice-1 criterion H2 and slice-2 criterion B9: prove each credential's
+# loading path is unreachable from any crate but the one that holds it.
+#
+# Two credentials, two owners, the same argument:
+#
+#   * the TIG API key belongs to `tig-gateway` (architecture.md §2.2);
+#   * the ticket HMAC key belongs to `pool-api` (security.md §4.1, B9:
+#     "the ticket HMAC key stays in the Pool API alone, so no other process
+#     holds it").
 #
 # `architecture.md` §2.2: "The TIG API key is loaded only by `tig-gateway`
 # ... sharing a repository or Rust library does not grant access to the
@@ -30,6 +37,7 @@ publish = false
 
 [dependencies]
 tig-gateway = { path = "$root/crates/tig-gateway" }
+pool-api = { path = "$root/crates/pool-api" }
 
 [workspace]
 TOML
@@ -151,6 +159,79 @@ if [[ $scan_hits -gt 0 ]]; then
     exit 1
 fi
 
-echo "credential boundary holds: the key-loading path is crate-private to tig-gateway,"
-echo "and no crate or script outside it (spike, fake-tig and the key-scanners"
-echo "excepted, see the script) names the key"
+# 7. The same three probes for the ticket HMAC key, which belongs to
+#    `pool-api`. `security.md` §4.1 keeps it there; B9 says no other process
+#    holds it, and a crate that could load one would be such a process.
+cat > "$probe/src/main.rs" <<'RS'
+fn main() {
+    // Crate-private: no other crate may load the ticket HMAC key.
+    let _ = pool_api::ticket_key::load;
+}
+RS
+if run_check > /dev/null 2>&1; then
+    echo "FAIL: pool_api::ticket_key::load is reachable outside pool-api" >&2
+    echo "security.md §4.1: the ticket HMAC key stays in the Pool API alone" >&2
+    exit 1
+fi
+
+cat > "$probe/src/main.rs" <<'RS'
+fn main() {
+    // Nor may a key be borrowed to hash something else.
+    let _ = pool_api::ticket_key::TicketKey::hmac;
+}
+RS
+if run_check > /dev/null 2>&1; then
+    echo "FAIL: TicketKey::hmac is reachable outside pool-api" >&2
+    exit 1
+fi
+
+cat > "$probe/src/main.rs" <<'RS'
+fn main() {
+    // Positive control: public API of the same crate MUST compile.
+    let _ = pool_api::service::preflight;
+}
+RS
+if ! run_check; then
+    echo "FAIL: the probe cannot compile against pool-api's public API; the probe is broken" >&2
+    exit 1
+fi
+
+ticket_key="$root/crates/pool-api/src/ticket_key.rs"
+for symbol in 'fn load(' 'fn hmac('; do
+    if ! grep -q "pub(crate) $symbol" "$ticket_key"; then
+        echo "FAIL: '$symbol' is not a crate-private item of pool_api::ticket_key;" >&2
+        echo "the probes above would pass by failing to resolve it, testing nothing" >&2
+        exit 1
+    fi
+done
+
+# 8. And the ticket key's own FILE, named outside pool-api. Same reasoning as
+#    the scan above: a crate that opens the file itself never mentions
+#    `pool-api` at all.
+#
+#    The hyphenated file name, not the underscored configuration field — the
+#    TIG scan above draws the same line by matching `api_key_path` and not
+#    `api_key_file`. `pool-config` declares `ticket_hmac_key_file` because
+#    naming a path is what configuration does (`architecture.md` §9: the path,
+#    never the key), and flagging that would be flagging the design.
+ticket_hits=0
+while IFS= read -r file; do
+    case "$file" in
+        */crates/pool-api/*) continue ;;
+    esac
+    body="$(grep -vE '^[[:space:]]*//' "$file" || true)"
+    if printf '%s\n' "$body" | grep -qiE 'ticket-hmac-key'; then
+        echo "LEAK: $file names the ticket HMAC key path"
+        ticket_hits=$((ticket_hits + 1))
+    fi
+done < <(find "$root/crates" -path '*/src/*' -name '*.rs' -print | sort)
+
+if [[ $ticket_hits -gt 0 ]]; then
+    echo "FAIL: the ticket HMAC key stays in the Pool API alone (security.md §4.1)" >&2
+    exit 1
+fi
+
+echo "credential boundaries hold: the TIG key-loading path is crate-private to"
+echo "tig-gateway and the ticket HMAC key to pool-api, and no crate or script"
+echo "outside each (spike, fake-tig and the key-scanners excepted, see the"
+echo "script) names either key"

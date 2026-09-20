@@ -40,6 +40,9 @@ impl Scratch {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("db-password"), b"local-dev-only").unwrap();
+        // Synthetic, never a real key: `validate_for` only checks that a
+        // path is named, and these tests never load it.
+        std::fs::write(dir.join("ticket-key"), [0x5a; 32]).unwrap();
         Self { dir }
     }
 
@@ -55,6 +58,7 @@ impl Scratch {
     /// A configuration `pool-api` starts on, with one value the caller picks.
     fn config(&self, max_control_body_bytes: u64) -> Config {
         let password_file = self.dir.join("db-password").display().to_string();
+        let key_file = self.dir.join("ticket-key").display().to_string();
         let path = self.dir.join("config.toml");
         std::fs::write(
             &path,
@@ -77,6 +81,7 @@ deployment = "test"
 
 [member_api]
 listen = "127.0.0.1:8081"
+ticket_hmac_key_file = "{key_file}"
 max_control_body_bytes = {max_control_body_bytes}
 "#
             ),

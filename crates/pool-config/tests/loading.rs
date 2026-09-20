@@ -211,8 +211,7 @@ const ORCHESTRATION: &str = "\n[orchestration]\ninternal_pool_unverified_limit =
 const GATEWAY: &str = "\n[gateway]\napi_key_file = \"/dev/null\"\nlease_secs = 120\nplatform = \"linux/arm64\"\nserved_compute = []\n";
 
 /// `pool-api`-only: `architecture.md` §3 gives member traffic to one process.
-const MEMBER_API: &str =
-    "\n[member_api]\nlisten = \"127.0.0.1:8081\"\nmax_control_body_bytes = 524288\n";
+const MEMBER_API: &str = "\n[member_api]\nlisten = \"127.0.0.1:8081\"\nticket_hmac_key_file = \"/dev/null\"\nmax_control_body_bytes = 524288\n";
 
 /// The endpoint the controller and gateway both require. A local `fake-tig`
 /// here, which is also what F4d's guard reads.
@@ -1310,7 +1309,7 @@ fn a_member_api_section_with_an_unusable_value_does_not_load() {
         "127.0.0.1:0x1f",
     ] {
         let Err(err) = load(&format!(
-            "\n[member_api]\nlisten = \"{bad}\"\nmax_control_body_bytes = 524288\n"
+            "\n[member_api]\nlisten = \"{bad}\"\nticket_hmac_key_file = \"/dev/null\"\nmax_control_body_bytes = 524288\n"
         )) else {
             panic!("listen {bad:?} must not load");
         };
@@ -1327,6 +1326,7 @@ fn a_member_api_section_with_an_unusable_value_does_not_load() {
     // a test of the other rejection.
     let Err(err) = load(&format!(
         "\n[member_api]\nlisten = \"localhost:8081\"\n\
+         ticket_hmac_key_file = \"/dev/null\"\n\
          max_control_body_bytes = {LARGEST_CONFORMING_CONTROL_BODY_BYTES}\n"
     )) else {
         panic!("a hostname must not load");
@@ -1346,7 +1346,7 @@ fn a_member_api_section_with_an_unusable_value_does_not_load() {
         u64::MAX,
     ] {
         let Err(err) = load(&format!(
-            "\n[member_api]\nlisten = \"127.0.0.1:8081\"\nmax_control_body_bytes = {bad}\n"
+            "\n[member_api]\nlisten = \"127.0.0.1:8081\"\nticket_hmac_key_file = \"/dev/null\"\nmax_control_body_bytes = {bad}\n"
         )) else {
             panic!("max_control_body_bytes {bad} must not load");
         };
@@ -1360,7 +1360,7 @@ fn a_member_api_section_with_an_unusable_value_does_not_load() {
         LARGEST_PROTOCOL_BODY_BYTES,
     ] {
         load(&format!(
-            "\n[member_api]\nlisten = \"[::1]:8081\"\nmax_control_body_bytes = {good}\n"
+            "\n[member_api]\nlisten = \"[::1]:8081\"\nticket_hmac_key_file = \"/dev/null\"\nmax_control_body_bytes = {good}\n"
         ))
         .unwrap_or_else(|e| panic!("max_control_body_bytes {good} must load: {e:?}"));
     }

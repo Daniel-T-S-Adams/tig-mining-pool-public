@@ -661,6 +661,7 @@ secret-manager-backed files:
 | Member Ed25519 private key | Member Agent only |
 | TIG account signing key (reward wallet) | Manual operations only — API-key provisioning/rotation and `accounting.md` §8.3a's per-round reward-wallet sweep: dedicated operator browser wallet on testnet; offline or hardware-/managed-key protected in production. Never in a runtime process, including Funds Gateway |
 | TIG API key | TIG Gateway only |
+| Enrollment/recovery ticket HMAC key | Pool API only — `security.md` §4.1 hashes every ticket under it, and no other process issues or redeems one |
 | API database credential | Pool API only, API role |
 | Controller database credential | Controller only, controller role |
 | Artifact store write/delete capability | Artifact Worker, scoped by prefixes/actions |

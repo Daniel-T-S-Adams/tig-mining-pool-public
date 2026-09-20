@@ -230,7 +230,7 @@ pub async fn run(config: &Config) -> Result<(), String> {
     // cannot issue or redeem a ticket — and a service that accepted
     // connections first would discover that at a member's first enrollment
     // rather than at startup, where an operator is watching.
-    let _ticket_key = preflight(api)?;
+    let _ticket_key = load_ticket_key(api)?;
     let addr: SocketAddr = api
         .listen
         .parse()
@@ -256,10 +256,24 @@ pub async fn run(config: &Config) -> Result<(), String> {
 
 /// Everything that must be true before this process accepts a connection.
 ///
-/// Separate from `run` so `pool-api check` can ask the same question without
-/// binding a port, and so a test can hand it a configuration and read the
-/// answer instead of starting a server.
-pub fn preflight(api: &MemberApiConfig) -> Result<TicketKey, String> {
+/// Returns nothing. An earlier version returned the loaded [`TicketKey`], and
+/// that was a public key-loading path: any crate linking `pool-api` could
+/// call it and make its own process read the key file, which is precisely
+/// what B9 and `security.md` §4.1 forbid — "the ticket HMAC key stays in the
+/// Pool API alone". `load` and `hmac` being crate-private did not save it,
+/// because a public function handing the key out is a public way to obtain
+/// one. `tig-gateway` exposes nothing public returning a `TigApiKey`, which
+/// is why its identical claim holds, and this now matches.
+///
+/// Public because `pool-api check` and the boundary script's positive
+/// control need *something* public to call; what they need is the verdict,
+/// not the key.
+pub fn preflight(api: &MemberApiConfig) -> Result<(), String> {
+    load_ticket_key(api).map(|_| ())
+}
+
+/// The same work, keeping the key. Crate-private: the key does not leave.
+fn load_ticket_key(api: &MemberApiConfig) -> Result<TicketKey, String> {
     let key = ticket_key::load(&api.ticket_hmac_key_file).map_err(|e| e.to_string())?;
     // Reported as presence, never as the key or its length
     // (`TicketKey::Debug` prints neither).

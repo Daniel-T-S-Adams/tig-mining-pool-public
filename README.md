@@ -64,8 +64,9 @@ make check   # fmt --check, clippy -D warnings, test, feature gate, secret-scan 
 ```
 
 Work that touches the database also needs a local PostgreSQL 18. One command
-starts it, generates dev-only passwords into the untracked `secrets/`
-directory, and provisions the least-privilege login roles:
+starts it, generates dev-only passwords and the Pool API's ticket HMAC key
+into the untracked `secrets/` directory, and provisions the least-privilege
+login roles:
 
 ```bash
 make db-up     # container + roles
@@ -77,13 +78,16 @@ cargo run -p pool-admin -- --config config/pool-admin.dev.toml migrate
 works on a fresh checkout. CI always provides one and sets
 `POOL_REQUIRE_DB_TESTS=1`, which turns a skip into a failure there.
 
-> **Never delete `secrets/` wholesale.** It mixes two kinds of file. The
-> `db-*-password` files are local dev passwords that `scripts/dev-db.sh`
-> regenerates on demand. Others — notably `tig-testnet-api-key` — are
-> **provisioned credentials that cannot be regenerated from this
-> repository**; restoring one means repeating the current operator procedure
-> in `docs/tig_integration.md` §4 with the testnet wallet. To reset only the
-> database side, remove `secrets/db-*` and leave everything else alone.
+> **Never delete `secrets/` wholesale.** It mixes two kinds of file.
+> `scripts/dev-db.sh` regenerates the `db-*-password` files and
+> `ticket-hmac-key` on demand — the first are local dev database passwords,
+> the last is the key the Pool API hashes enrollment tickets under, and
+> regenerating it only invalidates unredeemed local tickets. Others — notably
+> `tig-testnet-api-key` — are **provisioned credentials that cannot be
+> regenerated from this repository**; restoring one means repeating the
+> current operator procedure in `docs/tig_integration.md` §4 with the testnet
+> wallet. To reset only the regenerable side, remove `secrets/db-*` and
+> `secrets/ticket-hmac-key`, and leave everything else alone.
 
 ## Contributing
 

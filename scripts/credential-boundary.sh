@@ -188,6 +188,10 @@ fi
 cat > "$probe/src/main.rs" <<'RS'
 fn main() {
     // Positive control: public API of the same crate MUST compile.
+    //
+    // `preflight` returns `Result<(), String>` and not the key. An earlier
+    // version returned the loaded `TicketKey`, which made this control a
+    // demonstration of the very hole the two probes above test for.
     let _ = pool_api::service::preflight;
 }
 RS
@@ -204,6 +208,17 @@ for symbol in 'fn load(' 'fn hmac('; do
         exit 1
     fi
 done
+
+# 7b. And no public function may hand a `TicketKey` back. Keeping `load`
+#     private is only half of it: a `pub fn ... -> TicketKey` anywhere in the
+#     crate is a public way to obtain one, which is what B9 forbids. This is
+#     the finding that produced this check.
+if grep -rnE '^[[:space:]]*pub fn [^(]+\([^)]*\)[^{]*-> *(Result<)? *TicketKey' \
+        "$root/crates/pool-api/src"; then
+    echo "FAIL: a public function returns a TicketKey; the key leaves pool-api" >&2
+    echo "security.md §4.1: the ticket HMAC key stays in the Pool API alone" >&2
+    exit 1
+fi
 
 # 8. And the ticket key's own FILE, named outside pool-api. Same reasoning as
 #    the scan above: a crate that opens the file itself never mentions

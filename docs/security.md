@@ -239,7 +239,20 @@ enforcement rules.
 ### 4.1 Enrollment and credentials
 
 - The Pool API stores enrollment and recovery tickets only as HMAC-SHA-256
-  values using a dedicated server key; it never stores the bearer value.
+  values using a dedicated server key; it never stores the bearer value. The
+  key is keyed rather than a plain hash for a reason beyond guessability: a
+  copy of the database would otherwise let its holder confirm a guessed ticket
+  offline, and confirm the same ticket against every deployment.
+
+  Local development stores that key at `secrets/ticket-hmac-key` with mode
+  `0600`; a deployed Pool API receives it as a mode-`0400`, read-only secret
+  file or equivalent orchestrator secret. It is printable text of at least 32
+  bytes — the width of the digest it keys — because a trailing newline is
+  stripped and a file of raw bytes ends in one often enough to lose a byte
+  silently. The Pool API reads it at startup, does not return it from
+  diagnostics, and refuses to start if the file is absent, group/world-
+  readable, or malformed. No other process holds it, and no public function of
+  `pool-api` returns it.
 - Ticket lookup, expiry check, one-time consumption, and worker/credential
   creation are one transaction.
 - Worker public keys are ordinary database facts. A worker private key is

@@ -79,7 +79,7 @@ impl Drop for Scratch {
 fn preflight(scratch: &Scratch, key_file: &std::path::Path) -> Result<(), String> {
     let config = scratch.config(key_file);
     let api = config.member_api.as_ref().expect("the section");
-    pool_api::service::preflight(api).map(|_| ())
+    pool_api::service::preflight(api)
 }
 
 #[test]
@@ -95,13 +95,20 @@ fn a_key_anyone_else_could_read_stops_startup() {
     // group is a key held by whatever else runs as that group, which is not
     // "the Pool API alone".
     let scratch = Scratch::new("perms");
-    for mode in [0o644, 0o640, 0o604, 0o666, 0o660] {
-        let key = scratch.key_file(&format!("key{mode:o}"), &[0x5a; 32], mode);
-        let err = preflight(&scratch, &key).expect_err("mode must be refused");
-        assert!(
-            err.contains(&format!("{mode:o}")),
-            "the message names the mode so an operator can fix it: {err}"
-        );
+    for (name, mode) in [
+        ("a", 0o644),
+        ("b", 0o640),
+        ("c", 0o604),
+        ("d", 0o666),
+        ("e", 0o660),
+    ] {
+        // Named without the mode. `key644` would put "644" into the path,
+        // and the path is in every message — so "the message names the mode"
+        // would pass even if `Display` stopped naming it. That assertion
+        // lives in the crate's own tests, where the path can be stripped
+        // before looking.
+        let key = scratch.key_file(name, &[0x5a; 32], mode);
+        preflight(&scratch, &key).expect_err("mode must be refused");
     }
 
     // And the private modes that are fine, so the check is about other
@@ -227,8 +234,13 @@ fn the_key_the_dev_script_generates_is_one_this_process_accepts() {
 
 #[test]
 fn the_error_never_carries_the_key() {
-    // §4.1's whole point. The paths and reasons an operator needs are in the
+    // §4.1's whole point: the paths and reasons an operator needs are in the
     // message; the bytes are not, however the file is shaped.
+    //
+    // What a *loaded* key shows of itself is checked inside the crate
+    // (`ticket_key::tests::a_loaded_key_shows_nothing_of_itself`), because no
+    // public function returns a `TicketKey` — an integration test cannot
+    // obtain one, which is the boundary working.
     let scratch = Scratch::new("no-leak");
     let secret = b"SUPER-SECRET-VALUE-NOBODY-SHOULD-EVER-SEE";
 
@@ -239,13 +251,4 @@ fn the_error_never_carries_the_key() {
         !err.contains("SUPER-SECRET"),
         "the error carried the key: {err}"
     );
-
-    // And `Debug` on a loaded key prints neither the bytes nor the length —
-    // a length distinguishes one provisioned key from another.
-    let key = scratch.key_file("good", secret, 0o600);
-    let config = scratch.config(&key);
-    let loaded = pool_api::service::preflight(config.member_api.as_ref().unwrap()).unwrap();
-    let debug = format!("{loaded:?}");
-    assert!(!debug.contains("SUPER-SECRET"), "{debug}");
-    assert!(!debug.contains(&secret.len().to_string()), "{debug}");
 }

@@ -635,6 +635,162 @@ async fn an_artifact_is_fixed_where_it_was_published() {
 }
 
 #[tokio::test]
+async fn a_session_arrives_open_and_empty() {
+    // Every other rule about a session is `BEFORE UPDATE`, so the row's first
+    // state is where they can all be skipped: a session created already
+    // `DURABLY_ACCEPTED`, or with a committed offset covering the declaration,
+    // never runs any of them.
+    let Some((db, mut owner)) = migrated("upload_arrival", "pool_migration").await else {
+        return;
+    };
+    let a = assignment(&mut owner, 0x08).await;
+    let mut api = PgConnection::connect_with(&db.as_role("pool_api"))
+        .await
+        .unwrap();
+
+    let arrive = |state: &str, offset: i64| {
+        format!(
+            "INSERT INTO pool.upload_session
+                 (network, upload_id, assignment_id, package_id, declaration_sha256,
+                  media_type, compressed_size, uncompressed_size, manifest_sha256,
+                  package_sha256, chunk_size, committed_offset, state, expires_at)
+             VALUES ('testnet', gen_random_uuid(), '{a}'::uuid, gen_random_uuid(),
+                     decode(repeat('7e', 32), 'hex'),
+                     'application/vnd.tig-pool.proof-material-v1.tar+zstd',
+                     {CHUNK}, {}, decode(repeat('7e', 32), 'hex'),
+                     decode(repeat('7e', 32), 'hex'), {CHUNK}, {offset}, '{state}',
+                     now() + interval '1 hour')",
+            CHUNK * 2
+        )
+    };
+
+    let accepted = exec(&mut api, arrive("DURABLY_ACCEPTED", 0))
+        .await
+        .expect_err("a session is created OPEN");
+    assert!(
+        format!("{accepted}").contains("created OPEN"),
+        "expected the arrival guard, got: {accepted}"
+    );
+
+    let prefilled = exec(&mut api, arrive("OPEN", CHUNK))
+        .await
+        .expect_err("a new session has no committed bytes");
+    assert!(
+        format!("{prefilled}").contains("no committed bytes"),
+        "expected the arrival guard, got: {prefilled}"
+    );
+
+    // The guard holds against the table owner too, which is the case a grant
+    // cannot cover.
+    let by_owner = exec(&mut owner, arrive("DURABLY_ACCEPTED", CHUNK)).await;
+    assert!(by_owner.is_err(), "the arrival guard is not a grant");
+
+    exec(&mut api, arrive("OPEN", 0))
+        .await
+        .expect("an empty session is what a member opens");
+}
+
+#[tokio::test]
+async fn retention_eligibility_is_the_controllers_and_deletion_the_workers() {
+    // §8.4: "The controller alone decides that confirmed TIG state and pending
+    // work make an artifact deletable. The Artifact Worker alone performs
+    // physical deletion." Both write `lifecycle_state`, so a column grant
+    // cannot tell those two decisions apart — and a worker that could mark its
+    // own output deletable could then delete the one authoritative accepted
+    // package before the controller had checked anything.
+    let Some((db, mut owner)) = migrated("upload_retention", "pool_migration").await else {
+        return;
+    };
+    let a = assignment(&mut owner, 0x09).await;
+    let artifact: String = sqlx::query_scalar(
+        "INSERT INTO pool.artifact
+             (network, artifact_id, assignment_id, benchmark_id, kind, backend,
+              container, object_key, media_type, format_version, sha256,
+              compressed_size, uncompressed_size, manifest_sha256)
+         VALUES ('testnet', gen_random_uuid(), $1::uuid, 'bench-09', 'PACKAGE',
+                 'FILESYSTEM', 'accepted', 'accepted/testnet/bench-09/pkg.tar.zst',
+                 'application/vnd.tig-pool.proof-material-v1.tar+zstd', 'v1', $2,
+                 $3, $3, $2)
+         RETURNING artifact_id::text",
+    )
+    .bind(&a)
+    .bind(SHA.as_slice())
+    .bind(CHUNK)
+    .fetch_one(&mut owner)
+    .await
+    .unwrap();
+
+    let mut worker = PgConnection::connect_with(&db.as_role("pool_artifact_worker"))
+        .await
+        .unwrap();
+    let mut controller = PgConnection::connect_with(&db.as_role("pool_controller"))
+        .await
+        .unwrap();
+
+    // The controller cannot report a publication. Two guards stand in its way
+    // and the privilege is the first: it holds no grant on `accepted_at`, so
+    // this is refused before the owner check is reached. The owner check
+    // covers the case the grant does not — a role that later gets the column.
+    let accepted_by_controller = exec(
+        &mut controller,
+        format!(
+            "UPDATE pool.artifact SET lifecycle_state = 'ACCEPTED', accepted_at = now()
+              WHERE artifact_id = '{artifact}'::uuid"
+        ),
+    )
+    .await
+    .expect_err("publication is the worker's report, not the controller's claim");
+    assert!(
+        format!("{accepted_by_controller}").contains("permission denied"),
+        "expected a privilege refusal, got: {accepted_by_controller}"
+    );
+
+    exec(
+        &mut worker,
+        format!(
+            "UPDATE pool.artifact SET lifecycle_state = 'ACCEPTED', accepted_at = now()
+              WHERE artifact_id = '{artifact}'::uuid"
+        ),
+    )
+    .await
+    .expect("the worker publishes and says so");
+
+    let deletable_by_worker = exec(
+        &mut worker,
+        format!(
+            "UPDATE pool.artifact SET lifecycle_state = 'DELETABLE'
+              WHERE artifact_id = '{artifact}'::uuid"
+        ),
+    )
+    .await
+    .expect_err("retention eligibility is the controller's");
+    assert!(
+        format!("{deletable_by_worker}").contains("retention eligibility"),
+        "expected the retention owner check, got: {deletable_by_worker}"
+    );
+
+    exec(
+        &mut controller,
+        format!(
+            "UPDATE pool.artifact SET lifecycle_state = 'DELETABLE', deletable_at = now()
+              WHERE artifact_id = '{artifact}'::uuid"
+        ),
+    )
+    .await
+    .expect("the controller decides an artifact may go");
+
+    exec(
+        &mut worker,
+        format!(
+            "UPDATE pool.artifact SET lifecycle_state = 'DELETED', deleted_at = now()
+              WHERE artifact_id = '{artifact}'::uuid"
+        ),
+    )
+    .await
+    .expect("and the worker is the one that deletes it");
+}
+
+#[tokio::test]
 async fn each_role_writes_only_its_own_step() {
     // `architecture.md` §6: the API owns the session and the ledger, the worker
     // verifies and publishes, and the controller alone records durable

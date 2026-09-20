@@ -368,6 +368,40 @@ CREATE TRIGGER upload_session_rung_owner
     FOR EACH ROW
     EXECUTE FUNCTION pool.upload_rung_belongs_to_its_owner();
 
+-- A session arrives empty.
+--
+-- Everything above is `BEFORE UPDATE`, so the row's *first* state was
+-- unguarded: a session could be created already `DURABLY_ACCEPTED`, or with a
+-- committed offset covering the whole declaration, and every rule about how it
+-- got there would simply not have run. The same shape as an offer arriving
+-- already admitted, and refused the same way — at the value, because the API
+-- legitimately writes the row.
+CREATE OR REPLACE FUNCTION pool.upload_session_arrives_empty()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF NEW.state <> 'OPEN' THEN
+        RAISE EXCEPTION
+            'an upload session is created OPEN and climbs from there (member_protocol.md §11, §12)'
+            USING ERRCODE = 'raise_exception';
+    END IF;
+
+    IF NEW.committed_offset <> 0 OR NEW.rejection_reason IS NOT NULL THEN
+        RAISE EXCEPTION
+            'a new session has no committed bytes and no verdict (architecture.md §8.2)'
+            USING ERRCODE = 'raise_exception';
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER upload_session_arrives_open
+    BEFORE INSERT ON pool.upload_session
+    FOR EACH ROW
+    EXECUTE FUNCTION pool.upload_session_arrives_empty();
+
 CREATE TRIGGER upload_session_offset_follows_ledger
     BEFORE UPDATE ON pool.upload_session
     FOR EACH ROW
@@ -498,8 +532,40 @@ BEGIN
             USING ERRCODE = 'raise_exception';
     END IF;
 
-    -- §8.4: the controller decides an artifact is deletable, the worker deletes
-    -- it. Neither un-deletes it, and nothing walks back to `PUBLISHING`.
+    -- §8.4: "The controller alone decides that confirmed TIG state and pending
+    -- work make an artifact deletable. The Artifact Worker alone performs
+    -- physical deletion." Two components, two different decisions — and a
+    -- column grant cannot tell them apart, because both write
+    -- `lifecycle_state`. A worker that could mark its own output deletable
+    -- could then delete the one authoritative accepted package (§8.2) before
+    -- the retention condition the controller is there to check.
+    IF NEW.lifecycle_state <> OLD.lifecycle_state
+       AND current_user NOT IN ('pool_migration', 'postgres')
+    THEN
+        IF NEW.lifecycle_state = 'DELETABLE' AND current_user <> 'pool_controller' THEN
+            RAISE EXCEPTION
+                'retention eligibility is the controller''s, not %''s (architecture.md §8.4)',
+                current_user
+                USING ERRCODE = 'raise_exception';
+        END IF;
+
+        -- The mirror of the rule above. Today the controller is already stopped
+        -- short of this by its grants — it holds no `accepted_at` or
+        -- `deleted_at` — so this branch is unreachable for the roles that
+        -- exist, and it is here for the role a later slice grants the column
+        -- to.
+        IF NEW.lifecycle_state IN ('ACCEPTED', 'DELETED', 'DELETE_FAILED')
+           AND current_user <> 'pool_artifact_worker'
+        THEN
+            RAISE EXCEPTION
+                'publication and deletion are the artifact worker''s, not %''s (architecture.md §8.4)',
+                current_user
+                USING ERRCODE = 'raise_exception';
+        END IF;
+    END IF;
+
+    -- Neither component un-deletes anything, and nothing walks back to
+    -- `PUBLISHING`.
     IF NOT (
         NEW.lifecycle_state = OLD.lifecycle_state
         OR (OLD.lifecycle_state = 'PUBLISHING' AND NEW.lifecycle_state = 'ACCEPTED')

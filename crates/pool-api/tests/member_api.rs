@@ -189,6 +189,32 @@ async fn the_protocol_read_is_public_and_conforms_to_the_pinned_schema() {
 }
 
 #[test]
+fn an_error_conforms_with_and_without_the_echoed_request_id() {
+    // §3.2 has an error echo `request_id` when the request carried the signed
+    // header, and omit it otherwise. `ErrorResponse` forbids unknown
+    // properties and gives `request_id` no null form, so "omit" has to mean
+    // absent rather than null — which is a serialization detail the schema is
+    // the only thing that checks.
+    let server_time = ServerTime::at(fixed_now()).expect("a representable instant");
+    let request_id = "0123abcd-4567-89ab-cdef-0123456789ab";
+
+    let bare = pool_api::error::ApiError::unknown_route().body(&server_time);
+    let bare = serde_json::to_value(&bare).expect("serializable");
+    support::assert_conforms("common.schema.json#ErrorResponse", &bare);
+    assert!(
+        bare.get("request_id").is_none(),
+        "absent, not null: {bare:#}"
+    );
+
+    let echoed = pool_api::error::ApiError::unknown_route()
+        .echoing(request_id)
+        .body(&server_time);
+    let echoed = serde_json::to_value(&echoed).expect("serializable");
+    support::assert_conforms("common.schema.json#ErrorResponse", &echoed);
+    assert_eq!(echoed["request_id"], request_id);
+}
+
+#[test]
 fn the_constants_this_build_serves_are_the_ones_the_schema_pins() {
     // `ProtocolVersion`, `PackageFormat` and the two `const` numbers are facts
     // of the protocol version rather than settings of this deployment

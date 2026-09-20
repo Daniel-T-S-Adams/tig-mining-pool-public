@@ -10,7 +10,20 @@ version = "0.1.0"
 axum = "0.8"
 clap = { version = "4", features = ["derive"] }
 pool-config = { path = "../pool-config" }
+# The §3.2 signed byte string and the Ed25519 primitives, rather than a second
+# definition of either. Two spellings of the signed string is a signature bug
+# with no failing test — the member signs one and the pool verifies the other.
+pool-identity = { path = "../pool-identity" }
 pool-telemetry = { path = "../pool-telemetry" }
+# `VerifyingKey::from_bytes`: the database stores the raw 32 key bytes
+# (`worker_credential.public_key`), not the base64url form pool-identity's
+# `decode_public_key` takes.
+ed25519-dalek = "2"
+sqlx = { version = "0.9", default-features = false, features = [
+    "postgres",
+    "runtime-tokio",
+    "tls-rustls-ring",
+] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # The protocol endpoint answers with server time (§13: "so a client can
@@ -21,7 +34,14 @@ tower-http = { version = "0.6", features = ["limit"] }
 tracing = "0.1"
 
 [dev-dependencies]
+base64 = "0.22"
 http-body-util = "0.1"
+# The verification tests run against a real database and the real grants:
+# `security.md` §4.1's ordering claims are about what the database is asked,
+# so a fake would be asserting the test's own model.
+pool-test-support = { path = "../pool-test-support" }
+sha2 = "0.10"
+sqlx = { version = "0.9", features = ["migrate"] }
 jsonschema = "0.26"
 tower = { version = "0.5", features = ["util"] }
 

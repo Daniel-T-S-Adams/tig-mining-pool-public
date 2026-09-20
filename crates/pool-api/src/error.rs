@@ -42,6 +42,13 @@ pub struct ErrorResponse {
     /// rest; getting this wrong either spins an agent against a permanent
     /// rejection or strands work that a retry would have completed.
     pub retryable: bool,
+    /// §3.2: "an error echoes `request_id` when the request carried the
+    /// standard signed header". Absent rather than null when it did not —
+    /// the schema forbids unknown properties and `Uuid` has no null form, so
+    /// a public read or a failure before the header could be parsed simply
+    /// omits it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
     pub server_time: String,
 }
 
@@ -63,9 +70,23 @@ pub struct ApiError {
     pub error_code: &'static str,
     pub message: String,
     pub retryable: bool,
+    /// The caller's own `X-Request-Id`, once it has been read.
+    ///
+    /// Echoed rather than withheld: it is the caller's value, so returning it
+    /// discloses nothing, and §3.2 has them match a failure to the attempt
+    /// that caused it. `None` before the header is parsed, and on the routes
+    /// that have no signed header at all.
+    pub request_id: Option<String>,
 }
 
 impl ApiError {
+    /// The same error, echoing the attempt it refused (§3.2).
+    #[must_use]
+    pub fn echoing(mut self, request_id: &str) -> Self {
+        self.request_id = Some(request_id.to_owned());
+        self
+    }
+
     /// A request for something this protocol version does not route.
     /// Permanent: the route set is a fact of the version (§5), so retrying
     /// cannot make it appear.
@@ -75,6 +96,7 @@ impl ApiError {
             error_code: "UNKNOWN_ROUTE",
             message: "no such route in this protocol version".to_owned(),
             retryable: false,
+            request_id: None,
         }
     }
 
@@ -86,6 +108,7 @@ impl ApiError {
             error_code: "METHOD_NOT_ALLOWED",
             message: "that route does not accept this method".to_owned(),
             retryable: false,
+            request_id: None,
         }
     }
 
@@ -101,6 +124,7 @@ impl ApiError {
             error_code: "BODY_TOO_LARGE",
             message: "control message body exceeds this deployment's limit".to_owned(),
             retryable: false,
+            request_id: None,
         }
     }
 
@@ -111,6 +135,7 @@ impl ApiError {
             error_code: self.error_code,
             message: self.message.clone(),
             retryable: self.retryable,
+            request_id: self.request_id.clone(),
             server_time: server_time.as_str().to_owned(),
         }
     }

@@ -49,6 +49,12 @@ pub struct ErrorResponse {
     /// omits it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub request_id: Option<String>,
+    /// §3.2's other echo: "or `enrollment_request_id` for a decoded
+    /// enrollment attempt". A separate field, not the same one under a
+    /// different meaning — an enrolling agent has no `X-Request-Id` to match
+    /// against, and the schema gives each its own key.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enrollment_request_id: Option<String>,
     pub server_time: String,
 }
 
@@ -77,6 +83,9 @@ pub struct ApiError {
     /// that caused it. `None` before the header is parsed, and on the routes
     /// that have no signed header at all.
     pub request_id: Option<String>,
+    /// The enrolling agent's own identifier, for the one route with no signed
+    /// header to carry a request id (§3.2).
+    pub enrollment_request_id: Option<String>,
 }
 
 impl ApiError {
@@ -84,6 +93,14 @@ impl ApiError {
     #[must_use]
     pub fn echoing(mut self, request_id: &str) -> Self {
         self.request_id = Some(request_id.to_owned());
+        self
+    }
+
+    /// The same, for an enrollment attempt, which carries no signed header
+    /// and so has no `request_id` to echo (§3.2).
+    #[must_use]
+    pub fn echoing_enrollment(mut self, enrollment_request_id: &str) -> Self {
+        self.enrollment_request_id = Some(enrollment_request_id.to_owned());
         self
     }
 
@@ -97,6 +114,7 @@ impl ApiError {
             message: "no such route in this protocol version".to_owned(),
             retryable: false,
             request_id: None,
+            enrollment_request_id: None,
         }
     }
 
@@ -109,6 +127,7 @@ impl ApiError {
             message: "that route does not accept this method".to_owned(),
             retryable: false,
             request_id: None,
+            enrollment_request_id: None,
         }
     }
 
@@ -125,6 +144,7 @@ impl ApiError {
             message: "control message body exceeds this deployment's limit".to_owned(),
             retryable: false,
             request_id: None,
+            enrollment_request_id: None,
         }
     }
 
@@ -136,6 +156,7 @@ impl ApiError {
             message: self.message.clone(),
             retryable: self.retryable,
             request_id: self.request_id.clone(),
+            enrollment_request_id: self.enrollment_request_id.clone(),
             server_time: server_time.as_str().to_owned(),
         }
     }

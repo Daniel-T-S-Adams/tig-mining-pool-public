@@ -82,6 +82,7 @@ fn not_authenticated() -> ApiError {
         message: "the request is not authenticated".to_owned(),
         retryable: false,
         request_id: None,
+        enrollment_request_id: None,
     }
 }
 
@@ -98,6 +99,7 @@ fn stale_timestamp() -> ApiError {
         message: "request timestamp is outside the accepted window".to_owned(),
         retryable: true,
         request_id: None,
+        enrollment_request_id: None,
     }
 }
 
@@ -111,6 +113,7 @@ fn incompatible_protocol() -> ApiError {
         message: "this server speaks a different protocol version".to_owned(),
         retryable: false,
         request_id: None,
+        enrollment_request_id: None,
     }
 }
 
@@ -122,6 +125,7 @@ fn request_id_reused() -> ApiError {
         message: "that request id was already used for a different request".to_owned(),
         retryable: false,
         request_id: None,
+        enrollment_request_id: None,
     }
 }
 
@@ -133,6 +137,7 @@ fn unavailable() -> ApiError {
         message: "the pool could not complete this request".to_owned(),
         retryable: true,
         request_id: None,
+        enrollment_request_id: None,
     }
 }
 

@@ -82,6 +82,8 @@ deployment = "test"
 [member_api]
 listen = "127.0.0.1:8081"
 ticket_hmac_key_file = "{key_file}"
+pool_domain = "test.invalid"
+login_chain_id = 84532
 max_control_body_bytes = {max_control_body_bytes}
 "#
             ),

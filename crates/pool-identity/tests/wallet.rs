@@ -4,7 +4,7 @@
 
 use k256::ecdsa::{RecoveryId, Signature, SigningKey};
 use pool_identity::wallet::{
-    LoginExpectation, LoginPurpose, ProvedAddress, login_signing_string, recover_login_address,
+    LoginExpectation, LoginPurpose, ProvedLogin, login_signing_string, recover_login_address,
 };
 use sha3::{Digest as _, Keccak256};
 
@@ -66,8 +66,8 @@ fn personal_sign(signing_key: &SigningKey, message: &str) -> String {
 ///
 /// Tests below therefore assert "does not prove this member" rather than "is
 /// refused", which is the true statement.
-fn proves(result: Result<ProvedAddress, pool_identity::IdentityError>, address: &str) -> bool {
-    matches!(result, Ok(proved) if proved.as_str() == address)
+fn proves(result: Result<ProvedLogin, pool_identity::IdentityError>, address: &str) -> bool {
+    matches!(result, Ok(proved) if proved.address.as_str() == address)
 }
 
 fn expectation() -> LoginExpectation<'static> {
@@ -108,7 +108,10 @@ fn the_address_derivation_agrees_with_published_keys_and_addresses() {
         let signature = signed_for(&expectation(), &key(hex));
         let proved =
             recover_login_address(&expectation(), &signature, NOW).expect("a valid signature");
-        assert_eq!(proved.as_str(), address, "for key {hex}");
+        assert_eq!(proved.address.as_str(), address, "for key {hex}");
+        // The signed expiry comes back with it, so a caller records the
+        // instant the member agreed to rather than one of its own.
+        assert_eq!(proved.expires_at_unix, 1_774_000_300);
     }
 }
 
@@ -124,12 +127,13 @@ fn a_valid_signature_authenticates_exactly_the_address_that_signed_it() {
         recover_login_address(&expectation(), &signed_for(&expectation(), &bob), NOW).expect("bob");
 
     assert_ne!(from_alice, from_bob);
-    assert_eq!(from_alice.as_str(), KNOWN_ADDRESS);
+    assert_eq!(from_alice.address.as_str(), KNOWN_ADDRESS);
     // Lowercase `0x` hex, which is the only spelling `pool.member` accepts:
     // its `wallet_address` check refuses a mixed-case address rather than
     // folding it, so two spellings of one account cannot both be inserted.
     assert!(
         from_bob
+            .address
             .as_str()
             .strip_prefix("0x")
             .is_some_and(|hex| hex.len() == 40
@@ -137,7 +141,7 @@ fn a_valid_signature_authenticates_exactly_the_address_that_signed_it() {
                     .bytes()
                     .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))),
         "{}",
-        from_bob.as_str()
+        from_bob.address.as_str()
     );
 }
 
@@ -309,7 +313,7 @@ fn both_spellings_of_the_recovery_byte_are_accepted() {
     let from_high = recover_login_address(&expectation(), &good, NOW).expect("27/28");
     let from_low = recover_login_address(&expectation(), &lowered, NOW).expect("0/1");
     assert_eq!(from_high, from_low);
-    assert_eq!(from_high.as_str(), KNOWN_ADDRESS);
+    assert_eq!(from_high.address.as_str(), KNOWN_ADDRESS);
 }
 
 #[test]

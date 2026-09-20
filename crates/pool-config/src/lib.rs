@@ -369,6 +369,20 @@ pub struct MemberApiConfig {
     /// as the gateway's `api_key_file`, for the same reason: naming the file
     /// is what lets an operator check who can read it.
     pub ticket_hmac_key_file: PathBuf,
+    /// The domain a member signs when they prove control of their wallet.
+    ///
+    /// `accounting.md` §12.2 requires "exact-domain validation to prevent
+    /// signature reuse on a different pool or chain", so this is the value
+    /// the pool rebuilds the signed text from — never one a caller supplies.
+    /// Two deployments of this software are two pools, and a signature made
+    /// for one must not authorise anything at the other.
+    pub pool_domain: String,
+    /// The chain whose address a member proves control of.
+    ///
+    /// Base, and stated rather than derived: `network` is pinned to
+    /// "testnet" in this build and could not tell Base mainnet from Base
+    /// Sepolia, so deriving it would be choosing a chain by accident.
+    pub login_chain_id: u64,
     /// The largest control-message body this service will read.
     ///
     /// Required, not defaulted. `security.md` §4.3 has the edge enforce body
@@ -982,9 +996,10 @@ impl Config {
             (Binary::PoolApi, None) => {
                 return Err(invalid(
                     "pool-api requires [member_api] with listen, \
-                     ticket_hmac_key_file and max_control_body_bytes; none \
-                     has a default because each is a fact about this \
-                     deployment that a fallback would answer on its behalf"
+                     pool_domain, login_chain_id, ticket_hmac_key_file and \
+                     max_control_body_bytes; none has a default because each \
+                     is a fact about this deployment that a fallback would \
+                     answer on its behalf"
                         .into(),
                 ));
             }
@@ -996,6 +1011,35 @@ impl Config {
                     return Err(invalid(format!(
                         "member_api.listen must be `address:port`, found {:?}",
                         api.listen
+                    )));
+                }
+                // A domain that is empty, or that carries a scheme or a
+                // path, is not the thing a member's wallet shows them and not
+                // the thing `accounting.md` §12.2 means by "pool domain". It
+                // is compared byte for byte, so a stray slash is a different
+                // pool.
+                let domain = api.pool_domain.trim();
+                if domain.is_empty()
+                    || domain != api.pool_domain
+                    || api.pool_domain.len() > 253
+                    || api.pool_domain.contains("://")
+                    || api.pool_domain.contains('/')
+                    || api.pool_domain.contains(char::is_whitespace)
+                {
+                    return Err(invalid(format!(
+                        "member_api.pool_domain must be a bare host name with \
+                         no scheme, path, or surrounding space \
+                         (accounting.md §12.2 compares it exactly), found {:?}",
+                        api.pool_domain
+                    )));
+                }
+                // Base mainnet or Base Sepolia. A chain this pool does not
+                // operate on is a signature it should never have asked for.
+                if !matches!(api.login_chain_id, 8453 | 84_532) {
+                    return Err(invalid(format!(
+                        "member_api.login_chain_id must be 8453 (Base) or \
+                         84532 (Base Sepolia), found {}",
+                        api.login_chain_id
                     )));
                 }
                 if api.ticket_hmac_key_file.as_os_str().is_empty() {

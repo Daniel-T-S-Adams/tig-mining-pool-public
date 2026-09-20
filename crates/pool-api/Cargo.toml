@@ -18,7 +18,10 @@ pool-telemetry = { path = "../pool-telemetry" }
 # `VerifyingKey::from_bytes`: the database stores the raw 32 key bytes
 # (`worker_credential.public_key`), not the base64url form pool-identity's
 # `decode_public_key` takes.
+base64 = "0.22"
 ed25519-dalek = "2"
+# §3.1's bearer value is "cryptographically random ... at least 256 bits".
+getrandom = "0.3"
 # `security.md` §4.1 stores a ticket "only as HMAC-SHA-256 values using a
 # dedicated server key".
 hmac = "0.12"
@@ -38,7 +41,8 @@ tower-http = { version = "0.6", features = ["limit"] }
 tracing = "0.1"
 
 [dev-dependencies]
-base64 = "0.22"
+k256 = { version = "0.13", default-features = false, features = ["ecdsa", "std"] }
+sha3 = "0.10"
 http-body-util = "0.1"
 # The verification tests run against a real database and the real grants:
 # `security.md` §4.1's ordering claims are about what the database is asked,

@@ -181,13 +181,31 @@ The first deployed build has these binaries:
 
 ```text
 member-agent       member machine
-pool-api           public member HTTPS service behind the TLS proxy
+pool-api           public member HTTPS service behind the TLS proxy; serves two
+                   surfaces, the member protocol and the account system
 pool-controller    private snapshot, orchestration, reconciliation and accounting process
 artifact-worker    private ingestion, proof and deletion worker
 tig-gateway        private, credential-bearing TIG writer
 pool-admin         operator CLI; normal commands call the private controller endpoint;
                    the migrate subcommand is a one-shot database operation
 ```
+
+`pool-api` serves two surfaces on one process, and they are deliberately
+separate paths rather than one route set:
+
+- `/member/v0/...` is `member_protocol.md`'s contract, spoken by a member's
+  **agent** and authenticated by a worker credential (§3.2).
+- `/account/v0/...` is the **account system** `architecture.md` §9 already
+  names, spoken by a member's **browser** and authenticated by a wallet
+  signature (ADR 0011, `accounting.md` §12.2). `member_protocol.md` §3.1 puts
+  the thing that creates enrollment tickets "outside this protocol" and §5's
+  route table has no entry for it, so putting it under `/member/v0` would add
+  a browser-facing route to the contract an agent is written against.
+
+They share the process, the error shape, and the control-body limit; they
+share no authentication and no lifecycle. The user interface that calls the
+account surface arrives with the member website
+(`docs/plans/slice-2-member-agent.md` §2).
 
 Inside `pool-controller`, the snapshot ingestor, active-benchmark cache,
 orchestrator, decision engine, reconciler, qualifier attributor, accounting

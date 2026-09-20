@@ -211,7 +211,7 @@ const ORCHESTRATION: &str = "\n[orchestration]\ninternal_pool_unverified_limit =
 const GATEWAY: &str = "\n[gateway]\napi_key_file = \"/dev/null\"\nlease_secs = 120\nplatform = \"linux/arm64\"\nserved_compute = []\n";
 
 /// `pool-api`-only: `architecture.md` §3 gives member traffic to one process.
-const MEMBER_API: &str = "\n[member_api]\nlisten = \"127.0.0.1:8081\"\nticket_hmac_key_file = \"/dev/null\"\nmax_control_body_bytes = 524288\n";
+const MEMBER_API: &str = "\n[member_api]\nlisten = \"127.0.0.1:8081\"\npool_domain = \"test.invalid\"\nlogin_chain_id = 84532\nticket_hmac_key_file = \"/dev/null\"\nmax_control_body_bytes = 524288\n";
 
 /// The endpoint the controller and gateway both require. A local `fake-tig`
 /// here, which is also what F4d's guard reads.
@@ -1272,6 +1272,56 @@ fn the_member_api_section_is_required_by_pool_api_and_forbidden_elsewhere() {
 }
 
 #[test]
+fn a_login_domain_or_chain_the_pool_would_not_ask_for_is_rejected() {
+    // `accounting.md` §12.2 compares the domain byte for byte, so anything
+    // that is not the bare host a member's wallet shows them is a different
+    // pool — and a chain this deployment does not operate on is a signature
+    // it should never have asked for.
+    let scratch = Scratch::new("login-terms");
+    let load = |domain: &str, chain: u64| {
+        let mut toml = valid_toml(&scratch.password_file())
+            .replace("user = \"pool_migration\"", "user = \"pool_api\"");
+        toml.push_str(&format!(
+            "\n[member_api]\nlisten = \"127.0.0.1:8081\"\n\
+             pool_domain = \"{domain}\"\nlogin_chain_id = {chain}\n\
+             ticket_hmac_key_file = \"/dev/null\"\n\
+             max_control_body_bytes = 524288\n"
+        ));
+        Config::load(scratch.write(&toml), Binary::PoolApi)
+    };
+
+    for bad in [
+        "",
+        " ",
+        " pool.example",
+        "pool.example ",
+        // A scheme or a path is not what a wallet displays, and the exact
+        // comparison means either would simply never match.
+        "https://pool.example",
+        "pool.example/login",
+        "pool example",
+    ] {
+        let Err(err) = load(bad, 84_532) else {
+            panic!("pool_domain {bad:?} must not load");
+        };
+        assert_invalid(err, "member_api.pool_domain");
+    }
+
+    for bad in [0_u64, 1, 8454, 84_531, u64::MAX] {
+        let Err(err) = load("pool.example", bad) else {
+            panic!("login_chain_id {bad} must not load");
+        };
+        assert_invalid(err, "must be 8453 (Base) or 84532");
+    }
+
+    // Both Base chains load, so the rejections are about which chain rather
+    // than about chains in general.
+    for good in [8453_u64, 84_532] {
+        load("pool.example", good).unwrap_or_else(|e| panic!("chain {good} must load: {e:?}"));
+    }
+}
+
+#[test]
 fn pool_api_must_not_carry_a_tig_endpoint() {
     // `architecture.md` §2.2 puts the TIG credential in the gateway alone and
     // §3 gives this process no reason to reach TIG at all. A config that named
@@ -1309,7 +1359,7 @@ fn a_member_api_section_with_an_unusable_value_does_not_load() {
         "127.0.0.1:0x1f",
     ] {
         let Err(err) = load(&format!(
-            "\n[member_api]\nlisten = \"{bad}\"\nticket_hmac_key_file = \"/dev/null\"\nmax_control_body_bytes = 524288\n"
+            "\n[member_api]\nlisten = \"{bad}\"\npool_domain = \"test.invalid\"\nlogin_chain_id = 84532\nticket_hmac_key_file = \"/dev/null\"\nmax_control_body_bytes = 524288\n"
         )) else {
             panic!("listen {bad:?} must not load");
         };
@@ -1326,7 +1376,7 @@ fn a_member_api_section_with_an_unusable_value_does_not_load() {
     // a test of the other rejection.
     let Err(err) = load(&format!(
         "\n[member_api]\nlisten = \"localhost:8081\"\n\
-         ticket_hmac_key_file = \"/dev/null\"\n\
+         pool_domain = \"test.invalid\"\nlogin_chain_id = 84532\nticket_hmac_key_file = \"/dev/null\"\n\
          max_control_body_bytes = {LARGEST_CONFORMING_CONTROL_BODY_BYTES}\n"
     )) else {
         panic!("a hostname must not load");
@@ -1346,7 +1396,7 @@ fn a_member_api_section_with_an_unusable_value_does_not_load() {
         u64::MAX,
     ] {
         let Err(err) = load(&format!(
-            "\n[member_api]\nlisten = \"127.0.0.1:8081\"\nticket_hmac_key_file = \"/dev/null\"\nmax_control_body_bytes = {bad}\n"
+            "\n[member_api]\nlisten = \"127.0.0.1:8081\"\npool_domain = \"test.invalid\"\nlogin_chain_id = 84532\nticket_hmac_key_file = \"/dev/null\"\nmax_control_body_bytes = {bad}\n"
         )) else {
             panic!("max_control_body_bytes {bad} must not load");
         };
@@ -1360,7 +1410,7 @@ fn a_member_api_section_with_an_unusable_value_does_not_load() {
         LARGEST_PROTOCOL_BODY_BYTES,
     ] {
         load(&format!(
-            "\n[member_api]\nlisten = \"[::1]:8081\"\nticket_hmac_key_file = \"/dev/null\"\nmax_control_body_bytes = {good}\n"
+            "\n[member_api]\nlisten = \"[::1]:8081\"\npool_domain = \"test.invalid\"\nlogin_chain_id = 84532\nticket_hmac_key_file = \"/dev/null\"\nmax_control_body_bytes = {good}\n"
         ))
         .unwrap_or_else(|e| panic!("max_control_body_bytes {good} must load: {e:?}"));
     }

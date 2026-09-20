@@ -94,6 +94,64 @@ fn signed_for(expectation: &LoginExpectation<'_>, signing_key: &SigningKey) -> S
 }
 
 #[test]
+fn each_signing_string_is_the_text_its_section_specifies() {
+    // Written out from the documents rather than built by calling the same
+    // helper the code calls. A signing string is the one thing two parties
+    // must agree on exactly, and a test that constructs it the same way the
+    // implementation does cannot notice them agreeing on the wrong text.
+    //
+    // This was not hypothetical: `pool-api`'s enroll route passed an
+    // already-hashed ticket into `enrollment_signing_string`, which hashes
+    // what it is given, and its test helper made the same call — so the two
+    // agreed with each other and rejected every conforming agent.
+    use pool_identity::keys::{
+        enrollment_signing_string, request_signing_string, rotation_signing_string, sha256_hex,
+    };
+
+    let ticket = "a-one-time-bearer-value";
+    assert_eq!(
+        enrollment_signing_string("req-1", ticket, "pubkey-1"),
+        format!(
+            "TIG-POOL-ENROLLMENT-V1\nreq-1\n{}\npubkey-1",
+            sha256_hex(ticket.as_bytes())
+        ),
+        "member_protocol.md §3.1"
+    );
+
+    assert_eq!(
+        rotation_signing_string("worker-1", "rot-1", "newkey-1"),
+        "TIG-POOL-ROTATION-V1\nworker-1\nrot-1\nnewkey-1",
+        "member_protocol.md §3.3"
+    );
+
+    assert_eq!(
+        request_signing_string(
+            "GET",
+            "/member/v0/protocol",
+            "0.1.0",
+            "worker-1",
+            "cred-1",
+            "req-1",
+            1_774_000_000,
+            "d0",
+        ),
+        "TIG-POOL-REQUEST-V1\nGET\n/member/v0/protocol\n0.1.0\nworker-1\ncred-1\nreq-1\n1774000000\nd0",
+        "member_protocol.md §3.2"
+    );
+
+    // And the three domains differ in their first line, which is what stops
+    // a proof for one being replayed as a proof for another (§3.1, §3.3).
+    let strings = [
+        enrollment_signing_string("x", "y", "z"),
+        rotation_signing_string("x", "y", "z"),
+        request_signing_string("A", "b", "c", "d", "e", "f", 1, "g"),
+    ];
+    let first_lines: std::collections::HashSet<&str> =
+        strings.iter().filter_map(|s| s.lines().next()).collect();
+    assert_eq!(first_lines.len(), 3, "each domain is separate");
+}
+
+#[test]
 fn the_address_derivation_agrees_with_published_keys_and_addresses() {
     // The one step here that could be subtly wrong and still self-consistent:
     // `Keccak256` rather than `Sha3_256`, the uncompressed point with its

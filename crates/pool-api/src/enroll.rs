@@ -175,10 +175,18 @@ async fn enrol_worker(
     // `security.md` §4.1 puts signature verification ahead of database work,
     // and here the signature is over the ticket's digest, so a caller who
     // does not hold the key cannot even probe whether a ticket is live.
-    let ticket_sha256 = sha256_hex(request.enrollment_ticket.as_bytes());
+    //
+    // The **raw** ticket. `enrollment_signing_string` hashes it itself — §3.1
+    // puts "SHA-256 of the UTF-8 enrollment ticket" in the string, and the
+    // helper is what puts it there. Handing it a digest produced a proof over
+    // SHA-256(hex(SHA-256(ticket))), which no conforming agent would ever
+    // make, and the test helper reproduced the same mistake so the two agreed
+    // with each other and with nothing else. The test now builds the string
+    // literally from §3.1 instead of calling this function, which is what
+    // makes it a client rather than a mirror.
     let signing_string = enrollment_signing_string(
         &enrollment_request_id,
-        &ticket_sha256,
+        &request.enrollment_ticket,
         &request.ed25519_public_key,
     );
     let public_key = decode_public_key(&request.ed25519_public_key).map_err(|_| {
@@ -483,13 +491,33 @@ mod tests {
         SigningKey::from_bytes(&[seed; 32])
     }
 
+    /// §3.1's proof string, written out here rather than built by calling the
+    /// crate's own helper.
+    ///
+    /// ```text
+    /// TIG-POOL-ENROLLMENT-V1
+    /// <enrollment_request_id>
+    /// <SHA-256 of the UTF-8 enrollment ticket as 64 lowercase hex characters>
+    /// <ed25519_public_key>
+    /// ```
+    ///
+    /// This is the whole point of the test: a conforming agent reads §3.1 and
+    /// builds this, and the server has to accept *that*. Calling
+    /// `enrollment_signing_string` on both sides made the test a mirror — the
+    /// first version of this route passed the already-hashed ticket into a
+    /// helper that hashes what it is given, the helper here did the same, and
+    /// the two agreed with each other while rejecting every real agent.
+    fn proof_string(request_id: &str, ticket: &str, public_key: &str) -> String {
+        format!(
+            "TIG-POOL-ENROLLMENT-V1\n{request_id}\n{}\n{public_key}",
+            sha256_hex(ticket.as_bytes())
+        )
+    }
+
     /// A conforming `EnrollRequest` for `ticket`, signed by `key`.
     fn enrol_request(ticket: &str, key: &SigningKey, request_id: &str) -> EnrollRequest {
         let public = encode_public_key(&key.verifying_key());
-        let proof = sign_b64url(
-            key,
-            &enrollment_signing_string(request_id, &sha256_hex(ticket.as_bytes()), &public),
-        );
+        let proof = sign_b64url(key, &proof_string(request_id, ticket, &public));
         EnrollRequest {
             enrollment_request_id: request_id.to_owned(),
             enrollment_ticket: ticket.to_owned(),
@@ -818,11 +846,7 @@ mod tests {
         let other = agent_key(0xb2);
         request.ed25519_key_proof = sign_b64url(
             &other,
-            &enrollment_signing_string(
-                REQUEST_ID,
-                &sha256_hex(ticket.ticket.as_bytes()),
-                &request.ed25519_public_key,
-            ),
+            &proof_string(REQUEST_ID, &ticket.ticket, &request.ed25519_public_key),
         );
         assert_eq!(
             enrol_worker(&state, &request, &server_time())
@@ -837,11 +861,7 @@ mod tests {
         let mut request = enrol_request(&ticket.ticket, &agent_key(0xa1), REQUEST_ID);
         request.ed25519_key_proof = sign_b64url(
             &agent_key(0xa1),
-            &enrollment_signing_string(
-                REQUEST_ID,
-                &sha256_hex(b"some other ticket"),
-                &request.ed25519_public_key,
-            ),
+            &proof_string(REQUEST_ID, "some other ticket", &request.ed25519_public_key),
         );
         assert_eq!(
             enrol_worker(&state, &request, &server_time())
